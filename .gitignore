@@ -1,0 +1,5 @@
+build/
+*.deb
+.idea/
+.vscode/
+.DS_Store

@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//mnt/c/Code/MusallahBoard/**)",
+      "Bash(go build *)",
+      "Read(//mnt/c/**)",
+      "Bash(ls /mnt/)",
+      "PowerShell(wsl --status 2>&1 | Select-Object -First 5)",
+      "PowerShell(wsl --exec bash -c \"which go && go version\" 2>&1)",
+      "PowerShell(wsl --exec bash -c \"ls /usr/local/go/bin/go 2>/dev/null && echo found || echo not found; ls ~/go/bin/go 2>/dev/null && echo 'home found' || true\" 2>&1)",
+      "PowerShell(wsl --exec bash -c \"export PATH=`$PATH:/usr/local/go/bin && cd /mnt/c/Code/MusallahBoard/agent && mkdir -p build && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags '-s -w -X github.com/utmmsa/musallahboard-agent/internal/version.Version=0.1.0-dev' -o build/musallahboard-agent-amd64 ./cmd/agent && echo 'Build OK' && ls -lh build/\" 2>&1)"
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+# musallahboard-agent — privileged commands allow-list
+#
+# The agent's command channel can request:
+#   - kiosk.restart  → /bin/systemctl restart musallahboard-kiosk.service
+#   - system.reboot  → /sbin/shutdown -r +1
+#
+# Both invoked as `sudo -n <cmd>` from the agent. We allow only those exact
+# argument sets so a compromised agent can bounce the kiosk or reboot, but
+# can't, say, install packages or open a root shell.
+#
+# Install: drop into /etc/sudoers.d/ with mode 0440 owned by root:root.
+# Replace `admin` with the user the systemd unit runs as if you changed it.
+
+admin ALL=(root) NOPASSWD: /bin/systemctl restart musallahboard-kiosk.service
+admin ALL=(root) NOPASSWD: /sbin/shutdown -r +1

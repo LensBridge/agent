@@ -1,0 +1,42 @@
+[Unit]
+Description=MusallahBoard device agent
+Documentation=https://github.com/utmmsa/musallahboard-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=admin
+Group=admin
+ExecStart=/usr/local/bin/musallahboard-agent run
+Restart=always
+RestartSec=5
+
+# Crash-loop guard: if the agent fails 5 times in 60s, stop trying.
+# Prevents a bad agent update from death-looping across the fleet.
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# sd_notify watchdog: agent must call WATCHDOG=1 every 30s or systemd
+# kills it. Catches goroutine deadlocks where the process is alive but
+# not making progress.
+WatchdogSec=60s
+
+# Hardening
+# NoNewPrivileges is intentionally NOT set: the agent's kiosk.restart and
+# system.reboot commands invoke `sudo` against a tightly-scoped allow-list
+# (see packaging/sudoers.d/musallahboard-agent). Setting NoNewPrivileges=yes
+# would break those commands silently.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/etc/musallahboard /var/lib/musallahboard /var/log/musallahboard
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+
+[Install]
+WantedBy=multi-user.target
