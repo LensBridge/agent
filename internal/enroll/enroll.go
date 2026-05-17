@@ -18,7 +18,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -98,12 +100,19 @@ func Run(ctx context.Context, logger *slog.Logger, p Params) error {
 		return fmt.Errorf("backend response missing deviceId or websocketUrl")
 	}
 
+	// The backend sometimes constructs the WebSocket URL from the HTTP request's
+	// Host header, which drops the port when behind a reverse proxy or when the
+	// client connects directly without a Host: port. Patch it back in if the
+	// backend URL carried an explicit port that the returned WS URL is missing.
+	er.WebSocketURL = restorePort(er.WebSocketURL, p.BackendURL)
+
 	// Persist the private key BEFORE the config: if we crash between the two,
 	// re-running enroll is harmless (token is consumed, but no orphan config
 	// claims to point at a key file that doesn't exist).
 	if err := keystore.Save(keyPath, priv); err != nil {
 		return fmt.Errorf("save key: %w", err)
 	}
+	_ = chownToDirOwner(keyPath, filepath.Dir(keyPath))
 
 	cfg := &config.Config{
 		DeviceID:     er.DeviceID,
@@ -114,6 +123,7 @@ func Run(ctx context.Context, logger *slog.Logger, p Params) error {
 	if err := config.Save(p.ConfigPath, cfg); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
+	_ = chownToDirOwner(p.ConfigPath, filepath.Dir(p.ConfigPath))
 
 	logger.Info("device enrolled",
 		"deviceId", er.DeviceID,
@@ -130,4 +140,21 @@ func readHardwareModel() string {
 		return ""
 	}
 	return strings.TrimRight(strings.TrimSpace(string(b)), "\x00")
+}
+
+// restorePort patches wsURL's host with the port from backendURL when the
+// backend omits it — this happens when the backend derives the WebSocket URL
+// from the HTTP Host header, which proxies or direct HTTP/1.0 clients may
+// omit the port from.
+func restorePort(wsURL, backendURL string) string {
+	ws, err := url.Parse(wsURL)
+	if err != nil || ws.Port() != "" {
+		return wsURL // already has a port (or unparseable — leave alone)
+	}
+	be, err := url.Parse(backendURL)
+	if err != nil || be.Port() == "" {
+		return wsURL // backend URL has no explicit port either — nothing to restore
+	}
+	ws.Host = ws.Hostname() + ":" + be.Port()
+	return ws.String()
 }

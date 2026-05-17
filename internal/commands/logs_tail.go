@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -54,6 +55,10 @@ func (h *LogsTail) Execute(ctx context.Context, payload json.RawMessage, progres
 	)
 	out, err := cmd.Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			return nil, fmt.Errorf("journalctl: %w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
+		}
 		return nil, fmt.Errorf("journalctl: %w", err)
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")

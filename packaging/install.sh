@@ -43,9 +43,11 @@ BACKEND_URL=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --token)   ENROLL_TOKEN="$2"; shift 2 ;;
-        --backend) BACKEND_URL="$2";  shift 2 ;;
-        --*)       error "Unknown flag: $1" ;;
+        --token)    ENROLL_TOKEN="$2"; shift 2 ;;
+        --token=*)  ENROLL_TOKEN="${1#--token=}"; shift ;;
+        --backend)  BACKEND_URL="$2";  shift 2 ;;
+        --backend=*) BACKEND_URL="${1#--backend=}"; shift ;;
+        --*)        error "Unknown flag: $1" ;;
         *)
             [[ -n "$AGENT_DIR" ]] && error "Unexpected argument: $1"
             AGENT_DIR="$1"
@@ -73,11 +75,15 @@ case "$ARCH" in
     *)        error "Unsupported architecture: $ARCH" ;;
 esac
 
-# Prefer the arch-specific binary; fall back to the plain one (native build)
+# Prefer the arch-specific binary; fall back to the plain one (native build).
+# Also check the package root for release tarballs where the binary sits next
+# to the packaging/ directory rather than under build/.
 BINARY=""
 for candidate in \
     "${AGENT_DIR}/build/musallahboard-agent-${ARCH_SUFFIX}" \
-    "${AGENT_DIR}/build/musallahboard-agent"
+    "${AGENT_DIR}/build/musallahboard-agent" \
+    "${AGENT_DIR}/musallahboard-agent-${ARCH_SUFFIX}" \
+    "${AGENT_DIR}/musallahboard-agent"
 do
     if [[ -x "$candidate" ]]; then
         BINARY="$candidate"
@@ -85,7 +91,7 @@ do
     fi
 done
 
-[[ -z "$BINARY" ]] && error "No binary found in ${AGENT_DIR}/build/. Run 'make build' first."
+[[ -z "$BINARY" ]] && error "No binary found under ${AGENT_DIR}. Run 'make build' first."
 
 SUDOERS_SRC="${AGENT_DIR}/packaging/sudoers.d/musallahboard-agent"
 SERVICE_SRC="${AGENT_DIR}/packaging/musallahboard-agent.service"
@@ -112,18 +118,28 @@ else
     info "Created system user '$SERVICE_USER'"
 fi
 
+# systemd-journal membership lets the agent read the journal (for logs.tail).
+if getent group systemd-journal &>/dev/null; then
+    usermod -aG systemd-journal "$SERVICE_USER"
+    info "Added '$SERVICE_USER' to systemd-journal group"
+fi
+
 # ── Directories ───────────────────────────────────────────────────────────────
 section "Directories"
 
 mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$LOG_DIR"
-# Config dir: root-owned, agent can read but not list arbitrary paths
-chown root:root "$CONFIG_DIR"
-chmod 0755 "$CONFIG_DIR"
+# Config dir: owned by the service user so the agent can write its own config
+# and key files at enrollment time and read them at runtime. The agent CLI's
+# `enroll` subcommand chowns newly-written files to match this directory's
+# owner, which means re-enrolling under `sudo` still leaves files owned by
+# $SERVICE_USER rather than root.
+chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR"
+chmod 0750 "$CONFIG_DIR"
 # State and log dirs: agent-owned (service runs as $SERVICE_USER)
 chown "$SERVICE_USER:$SERVICE_USER" "$STATE_DIR" "$LOG_DIR"
 chmod 0750 "$STATE_DIR" "$LOG_DIR"
 
-info "Created $CONFIG_DIR  (root:root 0755)"
+info "Created $CONFIG_DIR  ($SERVICE_USER 0750)"
 info "Created $STATE_DIR   ($SERVICE_USER 0750)"
 info "Created $LOG_DIR     ($SERVICE_USER 0750)"
 
@@ -160,13 +176,13 @@ if [[ -n "$ENROLL_TOKEN" ]]; then
         warn "Config already exists at $CONFIG_PATH — skipping enrollment."
         warn "Delete it and re-run with --token to re-enroll."
     else
-        "$BINARY_DEST" enroll --token="$ENROLL_TOKEN" --backend="$BACKEND_URL" --config="$CONFIG_PATH"
-        # Config is written as root (we're running as root); lock it down
-        chown root:"$SERVICE_USER" "$CONFIG_PATH"
-        chmod 0640 "$CONFIG_PATH"
-        # Key file is written by the agent itself; fix its ownership too
-        KEY_PATH="$(awk -F'"' '/key_path/{print $2}' "$CONFIG_PATH")"
-        [[ -f "$KEY_PATH" ]] && chown root:"$SERVICE_USER" "$KEY_PATH" && chmod 0640 "$KEY_PATH"
+        # Run enroll as the service user so files end up owned by it directly.
+        # (The agent's enroll path also chowns to the parent dir's owner as a
+        # belt-and-suspenders measure when run via `sudo`.)
+        sudo -u "$SERVICE_USER" "$BINARY_DEST" enroll \
+            --token="$ENROLL_TOKEN" \
+            --backend="$BACKEND_URL" \
+            --config="$CONFIG_PATH"
         info "Device enrolled. Config: $CONFIG_PATH"
     fi
 fi

@@ -1,0 +1,6 @@
+* text=auto
+
+*.sh    text eol=lf
+*.toml  text eol=lf
+*.go    text eol=lf
+Makefile text eol=lf
