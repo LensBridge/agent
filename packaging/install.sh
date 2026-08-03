@@ -14,6 +14,14 @@
 #               is skipped (run `musallahboard-agent enroll` later).
 #   --backend   Backend base URL (e.g. http://localhost:8080).
 #               Required when --token is provided.
+#   --kiosk-user USER
+#               Locked-down display user that cage/Chromium runs as. When
+#               given, the cage kiosk unit + launcher are installed and the
+#               box is switched to boot straight into it (no display manager).
+#   --board-url URL
+#               Base board URL (no query). The agent appends ?deviceId and
+#               writes the result to /etc/musallahboard/kiosk-url. Required
+#               when --kiosk-user is given.
 # =====================================================
 
 set -euo pipefail
@@ -34,12 +42,20 @@ LOG_DIR=/var/log/musallahboard
 CONFIG_PATH=${CONFIG_DIR}/agent.toml
 SUDOERS_DEST=/etc/sudoers.d/musallahboard-agent
 SERVICE_DEST=/etc/systemd/system/musallahboard-agent.service
+KIOSK_SERVICE_DEST=/etc/systemd/system/musallahboard-kiosk.service
+KIOSK_WATCH_DEST=/etc/systemd/system/musallahboard-kiosk-watch.path
+KIOSK_RELOAD_DEST=/etc/systemd/system/musallahboard-kiosk-reload.service
+KIOSK_LAUNCHER_DEST=/usr/local/bin/start-kiosk.sh
+KIOSK_SHARE_DIR=/usr/local/share/musallahboard
+BOARD_URL_PATH=${CONFIG_DIR}/board-url
 
 # ── Arg parsing ───────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENT_DIR=""
 ENROLL_TOKEN=""
 BACKEND_URL=""
+KIOSK_USER=""
+BOARD_URL=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -47,6 +63,10 @@ while [[ $# -gt 0 ]]; do
         --token=*)  ENROLL_TOKEN="${1#--token=}"; shift ;;
         --backend)  BACKEND_URL="$2";  shift 2 ;;
         --backend=*) BACKEND_URL="${1#--backend=}"; shift ;;
+        --kiosk-user)   KIOSK_USER="$2"; shift 2 ;;
+        --kiosk-user=*) KIOSK_USER="${1#--kiosk-user=}"; shift ;;
+        --board-url)    BOARD_URL="$2"; shift 2 ;;
+        --board-url=*)  BOARD_URL="${1#--board-url=}"; shift ;;
         --*)        error "Unknown flag: $1" ;;
         *)
             [[ -n "$AGENT_DIR" ]] && error "Unexpected argument: $1"
@@ -64,6 +84,11 @@ AGENT_DIR="$(cd "$AGENT_DIR" && pwd)"
 
 [[ -n "$ENROLL_TOKEN" && -z "$BACKEND_URL" ]] && \
     error "--backend is required when --token is provided"
+
+[[ -n "$KIOSK_USER" && -z "$BOARD_URL" ]] && \
+    error "--board-url is required when --kiosk-user is provided"
+[[ -n "$KIOSK_USER" ]] && ! id "$KIOSK_USER" &>/dev/null && \
+    error "Kiosk user '$KIOSK_USER' does not exist (create it before install)"
 
 section "Pre-flight"
 
@@ -134,7 +159,10 @@ mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$LOG_DIR"
 # owner, which means re-enrolling under `sudo` still leaves files owned by
 # $SERVICE_USER rather than root.
 chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR"
-chmod 0750 "$CONFIG_DIR"
+# 0751 (not 0750): the unprivileged kiosk user must traverse this dir to read
+# the agent-written board-url / kiosk-url files. 0751 grants traverse-by-path
+# without directory listing; agent.key stays 0600 so it is unreadable anyway.
+chmod 0751 "$CONFIG_DIR"
 # State and log dirs: agent-owned (service runs as $SERVICE_USER)
 chown "$SERVICE_USER:$SERVICE_USER" "$STATE_DIR" "$LOG_DIR"
 chmod 0750 "$STATE_DIR" "$LOG_DIR"
@@ -168,6 +196,60 @@ systemctl daemon-reload
 systemctl enable musallahboard-agent.service
 info "Service installed and enabled"
 
+# ── Kiosk (cage + Chromium) ───────────────────────────────────────────────────
+if [[ -n "$KIOSK_USER" ]]; then
+    section "Kiosk (cage)"
+
+    command -v cage >/dev/null || error "cage not installed (apt install cage)"
+
+    KIOSK_SERVICE_SRC="${AGENT_DIR}/packaging/musallahboard-kiosk.service"
+    KIOSK_WATCH_SRC="${AGENT_DIR}/packaging/musallahboard-kiosk-watch.path"
+    KIOSK_RELOAD_SRC="${AGENT_DIR}/packaging/musallahboard-kiosk-reload.service"
+    KIOSK_LAUNCHER_SRC="${AGENT_DIR}/packaging/start-kiosk.sh"
+    KIOSK_SPLASH_SRC="${AGENT_DIR}/packaging/waiting.html"
+    for f in "$KIOSK_SERVICE_SRC" "$KIOSK_WATCH_SRC" "$KIOSK_RELOAD_SRC" \
+             "$KIOSK_LAUNCHER_SRC" "$KIOSK_SPLASH_SRC"; do
+        [[ -f "$f" ]] || error "Missing: $f"
+    done
+
+    # Base board URL — the agent appends ?deviceId and writes kiosk-url. 0644
+    # so the kiosk user can read it across the 0751 config dir.
+    printf '%s\n' "$BOARD_URL" > "$BOARD_URL_PATH"
+    chown "$SERVICE_USER:$SERVICE_USER" "$BOARD_URL_PATH"
+    chmod 0644 "$BOARD_URL_PATH"
+    info "Board URL    : $BOARD_URL  ($BOARD_URL_PATH)"
+
+    install -o root -g root -m 0755 "$KIOSK_LAUNCHER_SRC" "$KIOSK_LAUNCHER_DEST"
+    mkdir -p "$KIOSK_SHARE_DIR"
+    install -o root -g root -m 0644 "$KIOSK_SPLASH_SRC" "$KIOSK_SHARE_DIR/waiting.html"
+
+    # Substitute the kiosk user into the unit's User=/ExecStopPost lines.
+    sed "s/KIOSK_USER_PLACEHOLDER/${KIOSK_USER}/g" "$KIOSK_SERVICE_SRC" \
+        > "$KIOSK_SERVICE_DEST"
+    chown root:root "$KIOSK_SERVICE_DEST"
+    chmod 0644 "$KIOSK_SERVICE_DEST"
+
+    # Watcher: reloads the kiosk the moment the agent (re)composes kiosk-url,
+    # so the splash is replaced by the board on enrollment with no operator
+    # action. No user substitution — these run as root in the system manager.
+    install -o root -g root -m 0644 "$KIOSK_WATCH_SRC"  "$KIOSK_WATCH_DEST"
+    install -o root -g root -m 0644 "$KIOSK_RELOAD_SRC" "$KIOSK_RELOAD_DEST"
+
+    # No display manager: boot to multi-user; the kiosk unit is the session.
+    if systemctl list-unit-files | grep -qE '^(lightdm|gdm3?|sddm)\.service'; then
+        systemctl disable --now lightdm.service gdm.service gdm3.service sddm.service 2>/dev/null || true
+        info "Disabled display manager(s)"
+    fi
+    systemctl set-default multi-user.target >/dev/null
+    systemctl daemon-reload
+    systemctl enable musallahboard-kiosk.service
+    # The .path watcher must be enabled+started so it is armed before the
+    # agent ever writes kiosk-url. The reload .service is pulled in by the
+    # path unit on demand — it is not enabled directly.
+    systemctl enable --now musallahboard-kiosk-watch.path
+    info "Kiosk unit + URL watcher installed and enabled (user: $KIOSK_USER)"
+fi
+
 # ── Enrollment ────────────────────────────────────────────────────────────────
 if [[ -n "$ENROLL_TOKEN" ]]; then
     section "Enrollment"
@@ -194,10 +276,20 @@ if [[ -f "$CONFIG_PATH" ]]; then
     systemctl restart musallahboard-agent.service
     sleep 1
     systemctl status musallahboard-agent.service --no-pager --lines=5
+    # Kiosk shows the splash immediately and the .path watcher swaps it for
+    # the board when the agent writes kiosk-url — safe to start either way.
+    if [[ -n "$KIOSK_USER" ]]; then
+        systemctl restart musallahboard-kiosk.service
+        info "Kiosk service (re)started"
+    fi
 else
-    warn "No config found — service not started."
+    warn "No config found — agent not started."
     warn "Run: musallahboard-agent enroll --token=X --backend=Y"
     warn "Then: systemctl start musallahboard-agent.service"
+    if [[ -n "$KIOSK_USER" ]]; then
+        systemctl start musallahboard-kiosk.service || true
+        warn "Kiosk started on splash — it will load the board once enrolled."
+    fi
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────

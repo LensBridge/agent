@@ -56,16 +56,25 @@ type HeartbeatFrame struct {
 // for fields that Java models as boxed (`Double`, `Boolean`) so a missing
 // reading round-trips as `null` instead of `0`/`false`.
 type Telemetry struct {
-	UptimeSec        *int64   `json:"uptimeSec,omitempty"`
-	CPUTempC         *float64 `json:"cpuTempC,omitempty"`
-	ThrottleFlags    string   `json:"throttleFlags,omitempty"`
-	MemUsedMb        *int     `json:"memUsedMb,omitempty"`
-	MemTotalMb       *int     `json:"memTotalMb,omitempty"`
-	DiskUsedPct      *int     `json:"diskUsedPct,omitempty"`
-	KioskAlive       *bool    `json:"kioskAlive,omitempty"`
-	IPv4             []string `json:"ipv4,omitempty"`
-	WifiSSID         string   `json:"wifiSsid,omitempty"`
-	DisplayedFrameID string   `json:"displayedFrameId,omitempty"`
+	UptimeSec     *int64   `json:"uptimeSec,omitempty"`
+	CPUTempC      *float64 `json:"cpuTempC,omitempty"`
+	ThrottleFlags string   `json:"throttleFlags,omitempty"`
+	MemUsedMb     *int     `json:"memUsedMb,omitempty"`
+	MemTotalMb    *int     `json:"memTotalMb,omitempty"`
+	DiskUsedPct   *int     `json:"diskUsedPct,omitempty"`
+	KioskAlive    *bool    `json:"kioskAlive,omitempty"`
+	IPv4          []string `json:"ipv4,omitempty"`
+	WifiSSID      string   `json:"wifiSsid,omitempty"`
+
+	// AgentVersion lets the admin fleet list show what is actually running.
+	// Without it the backend keeps reporting whatever version enrolled, so a
+	// binary push looks like it never landed.
+	AgentVersion string `json:"agentVersion,omitempty"`
+
+	// DisplayedFrameKey is the kiosk's current slide key ("week", "poster-3"),
+	// not an id. The backend typed it as a UUID once; every heartbeat from a
+	// working board failed to parse and the session was closed as a bad frame.
+	DisplayedFrameKey string `json:"displayedFrameKey,omitempty"`
 }
 
 // CommandAckFrame, CommandProgressFrame, CommandResultFrame are the three
@@ -103,9 +112,11 @@ type CommandResultFrame struct {
 // backend stores them as NULL rather than misleading zeroes.
 func TelemetryFromSnapshot(s telemetry.Snapshot) Telemetry {
 	t := Telemetry{
-		ThrottleFlags: s.ThrottleFlags,
-		IPv4:          s.IPAddrs,
-		WifiSSID:      s.SSID,
+		ThrottleFlags:     s.ThrottleFlags,
+		IPv4:              s.IPAddrs,
+		WifiSSID:          s.SSID,
+		AgentVersion:      s.AgentVersion,
+		DisplayedFrameKey: s.DisplayedFrameKey,
 	}
 	if s.UptimeSec > 0 {
 		v := s.UptimeSec

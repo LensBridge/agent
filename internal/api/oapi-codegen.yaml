@@ -1,0 +1,16 @@
+# Generates the agent's HTTP client from LensBridgeBackend/openapi.yaml.
+#
+# Only the enrollment operation is included. The agent talks to exactly one REST
+# endpoint -- everything else it does runs over the WebSocket in internal/wsclient,
+# which OpenAPI does not describe. Generating all 85 operations would add a large
+# unused surface that still has to be reviewed on every regeneration.
+package: api
+output: client.gen.go
+
+generate:
+  models: true
+  client: true
+
+output-options:
+  include-operation-ids:
+    - enrollAgent

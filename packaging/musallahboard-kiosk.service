@@ -1,0 +1,56 @@
+[Unit]
+Description=MusallahBoard kiosk (cage + Chromium)
+Documentation=https://github.com/utmmsa/musallahboard-agent
+# The kiosk launches IMMEDIATELY and shows the local "waiting for enrollment"
+# splash (start-kiosk.sh falls back to waiting.html when /etc/musallahboard/
+# kiosk-url is absent/empty). There is deliberately NO ExecStartPre gate any
+# more — gating before ExecStart left tty1 black until enrollment. Instead,
+# musallahboard-kiosk-watch.path watches kiosk-url and restarts this unit the
+# moment the agent composes it (on enrollment, or a board-url change), so the
+# board replaces the splash within ~2s with no operator action.
+After=systemd-user-sessions.service
+# We take over the console getty would otherwise own.
+After=getty@tty1.service
+Conflicts=getty@tty1.service
+
+[Service]
+Type=simple
+
+# cage needs a real seat (DRM + input). Running as a system service, the way to
+# get one is a logind session: PAMName=login + a dedicated VT. This is the
+# upstream-recommended "cage as a system service" pattern and is what lets us
+# drop lightdm/labwc autologin entirely.
+User=KIOSK_USER_PLACEHOLDER
+PAMName=login
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+UtmpMode=user
+
+# Optional per-host environment (e.g. WLR_RENDERER=pixman on VMs whose virtual
+# GPU can't scan out GBM buffers). Absent on real Pi hardware → hardware GL.
+# Leading '-' = don't fail if the file is missing.
+EnvironmentFile=-/etc/musallahboard/kiosk.env
+
+# No enrollment gate: start-kiosk.sh shows waiting.html until kiosk-url exists,
+# then the .path watcher cycles us onto the real board.
+ExecStart=/usr/local/bin/start-kiosk.sh
+
+# cage exits when the browser dies; always bring the board back. ExecStopPost
+# guarantees no browser survives a restart — critical because a snap browser
+# would escape this unit's cgroup (we use a deb browser to avoid that, but the
+# kill is a cheap belt-and-suspenders so kiosk.restart always truly cycles).
+ExecStopPost=-/usr/bin/pkill -9 -u KIOSK_USER_PLACEHOLDER -f "google-chrome|chromium"
+Restart=always
+RestartSec=2
+
+# No display manager any more — the box boots to multi-user.target and this
+# unit *is* the graphical session. The setup script runs
+# `systemctl set-default multi-user.target` accordingly.
+[Install]
+WantedBy=multi-user.target

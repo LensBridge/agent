@@ -36,6 +36,13 @@ const (
 	maxFrameBytes = 20 << 20 // 20 MiB	
 	minBackoff               = time.Second
 	maxBackoff               = 5 * time.Minute
+
+	// authSkewLimit mirrors AgentWebSocketHandler.TIMESTAMP_SKEW_MS. Past this
+	// the backend refuses the handshake outright.
+	authSkewLimit = 5 * time.Minute
+	// clockSkewWarn is well inside that limit, so a drifting clock is visible in
+	// the journal before it starts costing sessions.
+	clockSkewWarn = 30 * time.Second
 )
 
 // Command is the parsed view of an inbound `command` frame, handed to the
@@ -63,6 +70,7 @@ type Client struct {
 	safeMode     bool
 
 	onCommand CommandHandler
+	prober    telemetry.PageProber
 }
 
 func New(cfg *config.Config, priv ed25519.PrivateKey, logger *slog.Logger, agentVersion string, safeMode bool) *Client {
@@ -79,6 +87,11 @@ func New(cfg *config.Config, priv ed25519.PrivateKey, logger *slog.Logger, agent
 // Must be called before Run; after Run starts, the field is read-only.
 func (c *Client) SetCommandHandler(h CommandHandler) { c.onCommand = h }
 
+// SetPageProber supplies the browser probe used to fill kioskAlive and
+// displayedFrameKey. Optional — without one, heartbeats fall back to the
+// systemd unit state. Must be called before Run.
+func (c *Client) SetPageProber(p telemetry.PageProber) { c.prober = p }
+
 // Run blocks until ctx is cancelled, repeatedly attempting to maintain a live
 // authenticated session. Errors are logged and trigger a backoff-and-retry.
 func (c *Client) Run(ctx context.Context) {
@@ -88,7 +101,7 @@ func (c *Client) Run(ctx context.Context) {
 			return
 		}
 
-		err := c.runOnce(ctx)
+		authed, err := c.runOnce(ctx)
 		switch {
 		case ctx.Err() != nil:
 			return
@@ -96,24 +109,33 @@ func (c *Client) Run(ctx context.Context) {
 			c.logger.Warn("ws session ended", "err", err, "backoff", backoff)
 		}
 
+		// A session that got as far as auth proves the backend is reachable and
+		// our credentials are good, so the next drop starts over at one second.
+		// Without this the delay only ever climbs: one bad frame mid-session and
+		// a healthy device settles into reconnecting every five minutes.
+		if authed {
+			backoff = minBackoff
+		}
+
 		if !sleep(ctx, backoff+jitter(backoff)) {
 			return
 		}
-		backoff = nextBackoff(backoff)
+		if !authed {
+			backoff = nextBackoff(backoff)
+		}
 	}
 }
 
-// runOnce executes a single dial → auth → serve cycle. Returns when the
-// session ends for any reason. A successful auth resets the caller's backoff
-// (caller checks for nil error to know it got at least to the read loop).
-func (c *Client) runOnce(ctx context.Context) error {
+// runOnce executes a single dial → auth → serve cycle. Returns when the session
+// ends for any reason, and whether it got as far as a completed handshake.
+func (c *Client) runOnce(ctx context.Context) (authed bool, err error) {
 	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 	conn, _, err := websocket.Dial(dialCtx, c.cfg.WebSocketURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{"User-Agent": []string{"musallahboard-agent/" + c.agentVersion}},
 	})
 	if err != nil {
-		return fmt.Errorf("dial: %w", err)
+		return false, fmt.Errorf("dial: %w", err)
 	}
 	conn.SetReadLimit(maxFrameBytes)
 	defer conn.CloseNow()
@@ -125,18 +147,19 @@ func (c *Client) runOnce(ctx context.Context) error {
 
 	hello, err := readFrame(authCtx, conn)
 	if err != nil {
-		return fmt.Errorf("read hello: %w", err)
+		return false, fmt.Errorf("read hello: %w", err)
 	}
 	if hello.Type != "hello" {
-		return fmt.Errorf("expected hello, got %q", hello.Type)
+		return false, fmt.Errorf("expected hello, got %q", hello.Type)
 	}
 	if hello.SessionID == "" || hello.Challenge == "" {
-		return errors.New("hello frame missing sessionId or challenge")
+		return false, errors.New("hello frame missing sessionId or challenge")
 	}
 
 	sess := newSession(conn, hello.SessionID, c.cfg.DeviceID)
 
 	now := time.Now().UnixMilli()
+	c.warnOnClockSkew(hello.ServerTime, now)
 	auth := AuthFrame{
 		Type:      "auth",
 		Seq:       sess.nextSeq(),
@@ -146,15 +169,15 @@ func (c *Client) runOnce(ctx context.Context) error {
 		Signature: SignAuth(c.priv, hello.SessionID, hello.Challenge, c.cfg.DeviceID, now),
 	}
 	if err := sess.sendJSON(authCtx, auth); err != nil {
-		return fmt.Errorf("send auth: %w", err)
+		return false, fmt.Errorf("send auth: %w", err)
 	}
 
 	authOk, err := readFrame(authCtx, conn)
 	if err != nil {
-		return fmt.Errorf("read auth_ok: %w", err)
+		return false, fmt.Errorf("read auth_ok: %w", err)
 	}
 	if authOk.Type != "auth_ok" {
-		return fmt.Errorf("expected auth_ok, got %q", authOk.Type)
+		return false, fmt.Errorf("expected auth_ok, got %q", authOk.Type)
 	}
 
 	hbInterval := defaultHeartbeatInterval
@@ -167,7 +190,33 @@ func (c *Client) runOnce(ctx context.Context) error {
 		"heartbeatInterval", hbInterval,
 	)
 
-	return c.serve(ctx, sess, hbInterval)
+	return true, c.serve(ctx, sess, hbInterval)
+}
+
+// warnOnClockSkew compares our clock against the server's and says so plainly
+// when they disagree.
+//
+// The backend rejects an auth signature whose timestamp is more than
+// authSkewLimit out, and a Pi has no battery-backed RTC — after a power cut it
+// boots with whatever time it last knew until NTP catches up. The failure then
+// looks like "auth_failed" forever with nothing in the journal explaining why,
+// so name the real cause. Only the log can help here: re-signing with the
+// server's clock would defeat the replay protection the timestamp exists for.
+func (c *Client) warnOnClockSkew(serverTimeMs, localTimeMs int64) {
+	if serverTimeMs == 0 {
+		return // older backend, or a hello without serverTime
+	}
+	skew := time.Duration(localTimeMs-serverTimeMs) * time.Millisecond
+	if skew < 0 {
+		skew = -skew
+	}
+	if skew < clockSkewWarn {
+		return
+	}
+	c.logger.Error("system clock disagrees with the backend — authentication will fail past the limit; check NTP (timedatectl)",
+		"skew", skew.Round(time.Second),
+		"limit", authSkewLimit,
+	)
 }
 
 // serve drives the read + heartbeat loops until either ctx fires, the
@@ -190,7 +239,7 @@ func (c *Client) serve(ctx context.Context, sess *session, hbInterval time.Durat
 
 func (c *Client) heartbeatLoop(ctx context.Context, sess *session, interval time.Duration) error {
 	send := func() error {
-		snap := telemetry.Collect(ctx, c.agentVersion, c.safeMode)
+		snap := telemetry.Collect(ctx, c.agentVersion, c.safeMode, c.prober)
 		hb := HeartbeatFrame{
 			Type:      "heartbeat",
 			Seq:       sess.nextSeq(),

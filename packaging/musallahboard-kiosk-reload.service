@@ -1,0 +1,16 @@
+[Unit]
+Description=Reload the MusallahBoard kiosk after the composed URL changed
+Documentation=https://github.com/utmmsa/musallahboard-agent
+# Activated only by musallahboard-kiosk-watch.path. Restarting the kiosk makes
+# start-kiosk.sh re-read /etc/musallahboard/kiosk-url, so the splash is
+# replaced by the board (or vice-versa if the URL was cleared).
+#
+# No restart loop: restarting the kiosk does not touch kiosk-url, so it cannot
+# re-trigger the .path watcher. The agent only writes kiosk-url when the
+# composed value actually changed (it skips identical rewrites), so an
+# already-enrolled device does not flicker on every boot.
+After=musallahboard-kiosk.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl --no-block try-restart musallahboard-kiosk.service

@@ -10,6 +10,7 @@ package cdp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -167,6 +168,86 @@ func (c *Client) PageCaptureScreenshot(ctx context.Context) (base64PNG string, e
 		return "", err
 	}
 	return out.Data, nil
+}
+
+// PageStatus is what the board page reports about itself, via the
+// `window.MusallahBoard.getStatus()` hook the frontend installs.
+type PageStatus struct {
+	DeviceID      string `json:"deviceId"`
+	Paired        bool   `json:"paired"`
+	SlideKey      string `json:"slideKey"`
+	SlideIndex    *int   `json:"slideIndex"`
+	SlideCount    int    `json:"slideCount"`
+	LastPayloadAt string `json:"lastPayloadAt"`
+	Error         string `json:"error"`
+}
+
+// PageStatus asks the board what it is currently showing.
+//
+// Three outcomes worth distinguishing:
+//   - nil error: the board is up and answered.
+//   - ErrEvalUndefined: a browser page exists but has no hook — the local
+//     enrollment splash, or a frontend build older than getStatus(). The
+//     browser is alive; it just isn't the board.
+//   - any other error: Chromium is unreachable.
+func (c *Client) PageStatus(ctx context.Context) (PageStatus, error) {
+	var s PageStatus
+	err := c.EvaluateValue(ctx, "window.MusallahBoard?.getStatus?.() ?? null", &s)
+	return s, err
+}
+
+// ErrEvalUndefined means the expression resolved to `undefined`. Usually an
+// optional call short-circuiting because the page doesn't implement the hook
+// (an old frontend build, or the local enrollment splash rather than the
+// board). Callers decide whether that's fatal.
+var ErrEvalUndefined = errors.New("cdp: expression evaluated to undefined")
+
+// evalReply is the slice of Runtime.evaluate's response we care about.
+type evalReply struct {
+	Result struct {
+		Type  string          `json:"type"`
+		Value json.RawMessage `json:"value"`
+	} `json:"result"`
+	ExceptionDetails *struct {
+		Text      string `json:"text"`
+		Exception *struct {
+			Description string `json:"description"`
+		} `json:"exception"`
+	} `json:"exceptionDetails"`
+}
+
+// EvaluateValue runs expression and unmarshals its resolved value into out.
+//
+// Unlike RuntimeEvaluate it surfaces page-side failures as Go errors: a thrown
+// exception becomes an error carrying the JS description, and a result of
+// `undefined` becomes ErrEvalUndefined. Pass a nil out to evaluate for effect
+// only. Promises are awaited (RuntimeEvaluate sets awaitPromise).
+func (c *Client) EvaluateValue(ctx context.Context, expression string, out any) error {
+	raw, err := c.RuntimeEvaluate(ctx, expression)
+	if err != nil {
+		return err
+	}
+	var reply evalReply
+	if err := json.Unmarshal(raw, &reply); err != nil {
+		return fmt.Errorf("cdp: decode evaluate reply: %w", err)
+	}
+	if reply.ExceptionDetails != nil {
+		msg := reply.ExceptionDetails.Text
+		if reply.ExceptionDetails.Exception != nil && reply.ExceptionDetails.Exception.Description != "" {
+			msg = reply.ExceptionDetails.Exception.Description
+		}
+		return fmt.Errorf("cdp: page threw: %s", msg)
+	}
+	if reply.Result.Type == "undefined" || len(reply.Result.Value) == 0 || string(reply.Result.Value) == "null" {
+		return ErrEvalUndefined
+	}
+	if out == nil {
+		return nil
+	}
+	if err := json.Unmarshal(reply.Result.Value, out); err != nil {
+		return fmt.Errorf("cdp: decode evaluate value: %w", err)
+	}
+	return nil
 }
 
 // RuntimeEvaluate runs the given JS expression in the first page target and

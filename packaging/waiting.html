@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MusallahBoard</title>
+<style>
+  html,body{height:100%;margin:0;cursor:none}
+  body{display:flex;flex-direction:column;align-items:center;justify-content:center;
+        background:#0b1f17;color:#e8f5ee;font:600 28px/1.4 system-ui,sans-serif}
+  .dot{width:10px;height:10px;border-radius:50%;background:#3ddc84;
+       margin-top:24px;animation:p 1.2s ease-in-out infinite}
+  @keyframes p{0%,100%{opacity:.25}50%{opacity:1}}
+  small{margin-top:14px;font:400 15px system-ui,sans-serif;color:#8fb8a4}
+  footer{position:fixed;bottom:16px;left:0;right:0;text-align:center;
+         font:400 13px system-ui,sans-serif;color:#5c8270}
+</style>
+</head>
+<body>
+  <div>Waiting for device enrollment…</div>
+  <div class="dot"></div>
+  <small>This screen clears automatically once the agent is enrolled.</small>
+  <footer>MusallahBoard v2.0 &nbsp;·&nbsp; Powered by IbraSoft</footer>
+  <!-- The kiosk unit restarts every few seconds; once the agent writes
+       /etc/musallahboard/kiosk-url, the next restart loads the board. -->
+</body>
+</html>

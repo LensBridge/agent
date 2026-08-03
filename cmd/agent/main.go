@@ -18,6 +18,7 @@ import (
 	"github.com/utmmsa/musallahboard-agent/internal/config"
 	"github.com/utmmsa/musallahboard-agent/internal/enroll"
 	"github.com/utmmsa/musallahboard-agent/internal/keystore"
+	"github.com/utmmsa/musallahboard-agent/internal/kioskurl"
 	"github.com/utmmsa/musallahboard-agent/internal/safemode"
 	"github.com/utmmsa/musallahboard-agent/internal/version"
 	"github.com/utmmsa/musallahboard-agent/internal/wsclient"
@@ -125,13 +126,27 @@ func runDaemon() {
 		"safeMode", safeMode,
 	)
 
+	// Re-compose the kiosk URL on every startup. Covers the case where enroll
+	// ran before the operator provisioned the base board URL, and picks up a
+	// changed base URL after an agent restart. The kiosk unit waits on this
+	// file, so a successful write here is what unblocks the board on first boot.
+	if err := kioskurl.Write(kioskurl.DefaultBoardURLPath, kioskurl.DefaultOutPath, cfg.DeviceID); err != nil {
+		logger.Warn("could not compose kiosk url (kiosk will wait)", "err", err)
+	} else {
+		logger.Info("kiosk url written", "path", kioskurl.DefaultOutPath)
+	}
+
 	wsClient := wsclient.New(cfg, priv, logger, version.Version, safeMode)
 
 	cdpClient := cdp.New("")
+	// Heartbeats ask the browser what it's showing rather than trusting the
+	// kiosk unit's state, which Restart=always keeps "active" through a crash
+	// loop or a stuck splash.
+	wsClient.SetPageProber(cdpClient)
 	registry := commands.NewRegistry()
 	registry.Register(&commands.ChromeReload{CDP: cdpClient})
 	registry.Register(&commands.ChromeScreenshot{CDP: cdpClient})
-	registry.Register(&commands.ConfigRefresh{CDP: cdpClient})
+	registry.Register(&commands.ConfigRefresh{CDP: cdpClient, DeviceID: cfg.DeviceID})
 	registry.Register(&commands.KioskRestart{})
 	registry.Register(&commands.SystemReboot{})
 	registry.Register(&commands.LogsTail{})

@@ -54,10 +54,15 @@ fi
 
 section "Removing files"
 
+if systemctl list-unit-files musallahboard-kiosk-watch.path &>/dev/null; then
+    systemctl disable --now musallahboard-kiosk-watch.path 2>/dev/null || true
+fi
 rm -f /etc/systemd/system/musallahboard-agent.service
+rm -f /etc/systemd/system/musallahboard-kiosk-watch.path
+rm -f /etc/systemd/system/musallahboard-kiosk-reload.service
 rm -f /etc/sudoers.d/musallahboard-agent
 rm -f /usr/local/bin/musallahboard-agent
-info "Removed binary, unit, sudoers"
+info "Removed binary, units (agent + kiosk watcher), sudoers"
 
 # State / logs: never preserved — they don't contain identity, just runtime crud
 rm -rf /var/lib/musallahboard

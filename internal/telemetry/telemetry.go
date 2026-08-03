@@ -3,6 +3,7 @@ package telemetry
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -10,29 +11,42 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/utmmsa/musallahboard-agent/internal/cdp"
 )
 
 // Snapshot is one heartbeat payload's worth of telemetry. Optional fields
 // (any with omitempty) may be missing if the underlying source isn't
 // available — collecting telemetry must never fail; degraded data is fine.
 type Snapshot struct {
-	Timestamp     int64    `json:"timestamp"`
-	UptimeSec     int64    `json:"uptimeSec"`
-	CPUTempC      float64  `json:"cpuTempC,omitempty"`
-	ThrottleFlags string   `json:"throttleFlags,omitempty"`
-	MemUsedMB     int64    `json:"memUsedMb"`
-	MemTotalMB    int64    `json:"memTotalMb"`
-	DiskUsedPct   float64  `json:"diskUsedPct,omitempty"`
-	KioskAlive    bool     `json:"kioskAlive"`
-	IPAddrs       []string `json:"ipAddrs,omitempty"`
-	SSID          string   `json:"ssid,omitempty"`
-	AgentVersion  string   `json:"agentVersion"`
-	SafeMode      bool     `json:"safeMode,omitempty"`
+	Timestamp         int64    `json:"timestamp"`
+	UptimeSec         int64    `json:"uptimeSec"`
+	CPUTempC          float64  `json:"cpuTempC,omitempty"`
+	ThrottleFlags     string   `json:"throttleFlags,omitempty"`
+	MemUsedMB         int64    `json:"memUsedMb"`
+	MemTotalMB        int64    `json:"memTotalMb"`
+	DiskUsedPct       float64  `json:"diskUsedPct,omitempty"`
+	KioskAlive        bool     `json:"kioskAlive"`
+	DisplayedFrameKey string   `json:"displayedFrameKey,omitempty"`
+	IPAddrs           []string `json:"ipAddrs,omitempty"`
+	SSID              string   `json:"ssid,omitempty"`
+	AgentVersion      string   `json:"agentVersion"`
+	SafeMode          bool     `json:"safeMode,omitempty"`
 }
+
+// PageProber reports what the kiosk browser is currently showing. Satisfied by
+// *cdp.Client; pass nil to skip the browser probe entirely.
+type PageProber interface {
+	PageStatus(ctx context.Context) (cdp.PageStatus, error)
+}
+
+// pageProbeTimeout bounds the CDP round trip. Chromium is on loopback, so this
+// is generous; the point is that a wedged browser must never stall a heartbeat.
+const pageProbeTimeout = 3 * time.Second
 
 // Collect gathers a fresh snapshot. Errors in individual collectors are
 // swallowed and the corresponding field left zero/empty.
-func Collect(ctx context.Context, agentVersion string, safeMode bool) Snapshot {
+func Collect(ctx context.Context, agentVersion string, safeMode bool, prober PageProber) Snapshot {
 	s := Snapshot{
 		Timestamp:    time.Now().Unix(),
 		AgentVersion: agentVersion,
@@ -43,7 +57,7 @@ func Collect(ctx context.Context, agentVersion string, safeMode bool) Snapshot {
 	s.ThrottleFlags, _ = readThrottleFlags(ctx)
 	s.MemUsedMB, s.MemTotalMB, _ = readMemInfo()
 	s.DiskUsedPct, _ = readDiskUsedPct()
-	s.KioskAlive = checkKiosk(ctx)
+	s.KioskAlive, s.DisplayedFrameKey = checkKiosk(ctx, prober)
 	s.IPAddrs = readIPs()
 	s.SSID, _ = readSSID(ctx)
 	return s
@@ -140,10 +154,36 @@ func readDiskUsedPct() (float64, error) {
 	return float64(used) / float64(stat.Blocks) * 100.0, nil
 }
 
-// checkKiosk reports whether the kiosk systemd unit is active. Querying
-// the displayed URL via Chromium DevTools comes in Phase 2 along with the
-// CDP client.
-func checkKiosk(ctx context.Context) bool {
+// checkKiosk reports whether the board is actually on screen, plus which frame
+// it is showing.
+//
+// The systemd unit is Restart=always, so `is-active` says "active" almost
+// unconditionally — including while Chromium is crash-looping, parked on the
+// enrollment splash, or showing a network error page. That made kioskAlive
+// useless as an alert signal. Ask the browser instead, and fall back to the
+// unit state only when the debugger is unreachable (no CDP port, browser still
+// starting, or a build without --remote-debugging-port).
+func checkKiosk(ctx context.Context, prober PageProber) (alive bool, frameID string) {
+	if prober != nil {
+		pctx, cancel := context.WithTimeout(ctx, pageProbeTimeout)
+		defer cancel()
+
+		status, err := prober.PageStatus(pctx)
+		switch {
+		case err == nil:
+			// The board answered. It's alive by definition.
+			return true, status.SlideKey
+		case errors.Is(err, cdp.ErrEvalUndefined):
+			// A page exists but isn't the board — the splash, or a frontend
+			// too old to expose getStatus(). The browser is up regardless.
+			return true, ""
+		}
+		// Anything else: Chromium unreachable. Fall through.
+	}
+	return systemdKioskActive(ctx), ""
+}
+
+func systemdKioskActive(ctx context.Context) bool {
 	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	out, _ := exec.CommandContext(cctx, "systemctl", "is-active", "musallahboard-kiosk.service").Output()
