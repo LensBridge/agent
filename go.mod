@@ -1,4 +1,4 @@
-module github.com/utmmsa/musallahboard-agent
+module github.com/LensBridge/agent
 
 go 1.24.0
 

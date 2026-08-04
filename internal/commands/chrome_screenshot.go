@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/utmmsa/musallahboard-agent/internal/cdp"
+	"github.com/LensBridge/agent/internal/cdp"
 )
 
 // ChromeScreenshot returns a base64-encoded PNG of the current kiosk frame.

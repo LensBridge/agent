@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/utmmsa/musallahboard-agent/internal/wsclient"
+	"github.com/LensBridge/agent/internal/wsclient"
 )
 
 type fakeHandler struct {

@@ -13,15 +13,15 @@ import (
 
 	"github.com/coreos/go-systemd/v22/daemon"
 
-	"github.com/utmmsa/musallahboard-agent/internal/cdp"
-	"github.com/utmmsa/musallahboard-agent/internal/commands"
-	"github.com/utmmsa/musallahboard-agent/internal/config"
-	"github.com/utmmsa/musallahboard-agent/internal/enroll"
-	"github.com/utmmsa/musallahboard-agent/internal/keystore"
-	"github.com/utmmsa/musallahboard-agent/internal/kioskurl"
-	"github.com/utmmsa/musallahboard-agent/internal/safemode"
-	"github.com/utmmsa/musallahboard-agent/internal/version"
-	"github.com/utmmsa/musallahboard-agent/internal/wsclient"
+	"github.com/LensBridge/agent/internal/cdp"
+	"github.com/LensBridge/agent/internal/commands"
+	"github.com/LensBridge/agent/internal/config"
+	"github.com/LensBridge/agent/internal/enroll"
+	"github.com/LensBridge/agent/internal/keystore"
+	"github.com/LensBridge/agent/internal/kioskurl"
+	"github.com/LensBridge/agent/internal/safemode"
+	"github.com/LensBridge/agent/internal/version"
+	"github.com/LensBridge/agent/internal/wsclient"
 )
 
 const (

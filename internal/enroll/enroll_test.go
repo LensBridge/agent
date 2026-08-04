@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/utmmsa/musallahboard-agent/internal/config"
+	"github.com/LensBridge/agent/internal/config"
 )
 
 func quietLogger() *slog.Logger {

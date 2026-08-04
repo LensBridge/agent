@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/utmmsa/musallahboard-agent/internal/telemetry"
+	"github.com/LensBridge/agent/internal/telemetry"
 )
 
 // The wire names here are a contract with the backend's HeartbeatFrame.Telemetry.

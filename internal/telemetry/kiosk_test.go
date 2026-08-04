@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/utmmsa/musallahboard-agent/internal/cdp"
+	"github.com/LensBridge/agent/internal/cdp"
 )
 
 type stubProber struct {

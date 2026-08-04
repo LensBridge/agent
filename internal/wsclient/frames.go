@@ -3,7 +3,7 @@ package wsclient
 import (
 	"encoding/json"
 
-	"github.com/utmmsa/musallahboard-agent/internal/telemetry"
+	"github.com/LensBridge/agent/internal/telemetry"
 )
 
 // IncomingFrame is the union of every frame the backend sends. Fields are all

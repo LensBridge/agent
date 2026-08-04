@@ -1,6 +1,6 @@
 [Unit]
 Description=MusallahBoard kiosk (cage + Chromium)
-Documentation=https://github.com/utmmsa/musallahboard-agent
+Documentation=https://github.com/LensBridge/agent
 # The kiosk launches IMMEDIATELY and shows the local "waiting for enrollment"
 # splash (start-kiosk.sh falls back to waiting.html when /etc/musallahboard/
 # kiosk-url is absent/empty). There is deliberately NO ExecStartPre gate any

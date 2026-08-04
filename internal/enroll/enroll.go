@@ -21,10 +21,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/utmmsa/musallahboard-agent/internal/api"
-	"github.com/utmmsa/musallahboard-agent/internal/config"
-	"github.com/utmmsa/musallahboard-agent/internal/keystore"
-	"github.com/utmmsa/musallahboard-agent/internal/kioskurl"
+	"github.com/LensBridge/agent/internal/api"
+	"github.com/LensBridge/agent/internal/config"
+	"github.com/LensBridge/agent/internal/keystore"
+	"github.com/LensBridge/agent/internal/kioskurl"
 )
 
 type Params struct {

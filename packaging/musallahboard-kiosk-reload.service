@@ -1,6 +1,6 @@
 [Unit]
 Description=Reload the MusallahBoard kiosk after the composed URL changed
-Documentation=https://github.com/utmmsa/musallahboard-agent
+Documentation=https://github.com/LensBridge/agent
 # Activated only by musallahboard-kiosk-watch.path. Restarting the kiosk makes
 # start-kiosk.sh re-read /etc/musallahboard/kiosk-url, so the splash is
 # replaced by the board (or vice-versa if the URL was cleared).

@@ -24,8 +24,8 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/utmmsa/musallahboard-agent/internal/config"
-	"github.com/utmmsa/musallahboard-agent/internal/telemetry"
+	"github.com/LensBridge/agent/internal/config"
+	"github.com/LensBridge/agent/internal/telemetry"
 )
 
 const (

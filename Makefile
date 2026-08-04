@@ -1,5 +1,5 @@
 VERSION ?= 0.1.0-dev
-PKG     := github.com/utmmsa/musallahboard-agent
+PKG     := github.com/lensbridge/agent
 LDFLAGS := -s -w -X $(PKG)/internal/version.Version=$(VERSION)
 
 .PHONY: build build-arm64 build-amd64 tidy test clean \

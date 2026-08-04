@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/utmmsa/musallahboard-agent/internal/cdp"
+	"github.com/LensBridge/agent/internal/cdp"
 )
 
 // ChromeReload triggers a hard reload of the kiosk page via CDP.

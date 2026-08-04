@@ -1,6 +1,6 @@
 [Unit]
 Description=Watch the composed kiosk URL and reload the kiosk on change
-Documentation=https://github.com/utmmsa/musallahboard-agent
+Documentation=https://github.com/LensBridge/agent
 # The agent writes /etc/musallahboard/kiosk-url (atomically: write .tmp then
 # rename into place) on enrollment and whenever the base board-url changes.
 # systemd watches the parent directory's inotify, so the rename-into-place is

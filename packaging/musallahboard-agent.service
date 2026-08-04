@@ -1,6 +1,6 @@
 [Unit]
 Description=MusallahBoard device agent
-Documentation=https://github.com/utmmsa/musallahboard-agent
+Documentation=https://github.com/LensBridge/agent
 After=network-online.target
 Wants=network-online.target
 

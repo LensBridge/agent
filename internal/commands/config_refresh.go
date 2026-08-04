@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/utmmsa/musallahboard-agent/internal/cdp"
-	"github.com/utmmsa/musallahboard-agent/internal/kioskurl"
+	"github.com/LensBridge/agent/internal/cdp"
+	"github.com/LensBridge/agent/internal/kioskurl"
 )
 
 // ConfigRefresh re-composes the on-disk kiosk URL (so an operator's board-url

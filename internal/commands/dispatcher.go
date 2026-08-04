@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/utmmsa/musallahboard-agent/internal/wsclient"
+	"github.com/LensBridge/agent/internal/wsclient"
 )
 
 const (

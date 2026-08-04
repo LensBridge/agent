@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/utmmsa/musallahboard-agent/internal/cdp"
+	"github.com/LensBridge/agent/internal/cdp"
 )
 
 // Snapshot is one heartbeat payload's worth of telemetry. Optional fields

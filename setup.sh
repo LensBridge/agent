@@ -544,7 +544,7 @@ install_systemd_units() {
     sudo tee "$UNIT_DIR/musallahboard-agent.service" > /dev/null << 'EOF'
 [Unit]
 Description=MusallahBoard device agent
-Documentation=https://github.com/utmmsa/musallahboard-agent
+Documentation=https://github.com/LensBridge/agent
 After=network-online.target
 Wants=network-online.target
 
@@ -581,7 +581,7 @@ EOF
     sudo tee "$UNIT_DIR/musallahboard-kiosk.service" > /dev/null << 'EOF'
 [Unit]
 Description=MusallahBoard kiosk (cage + Chromium)
-Documentation=https://github.com/utmmsa/musallahboard-agent
+Documentation=https://github.com/LensBridge/agent
 After=systemd-user-sessions.service
 After=getty@tty1.service
 Conflicts=getty@tty1.service
@@ -613,7 +613,7 @@ EOF
     sudo tee "$UNIT_DIR/musallahboard-kiosk-watch.path" > /dev/null << 'EOF'
 [Unit]
 Description=Watch the composed kiosk URL and reload the kiosk on change
-Documentation=https://github.com/utmmsa/musallahboard-agent
+Documentation=https://github.com/LensBridge/agent
 
 [Path]
 PathModified=/etc/musallahboard/kiosk-url
@@ -627,7 +627,7 @@ EOF
     sudo tee "$UNIT_DIR/musallahboard-kiosk-reload.service" > /dev/null << 'EOF'
 [Unit]
 Description=Reload the MusallahBoard kiosk after the composed URL changed
-Documentation=https://github.com/utmmsa/musallahboard-agent
+Documentation=https://github.com/LensBridge/agent
 After=musallahboard-kiosk.service
 
 [Service]
