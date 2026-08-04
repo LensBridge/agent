@@ -67,7 +67,7 @@ Copy the binary and restart the service in one step:
 make deploy PI=admin@brothers-board.local
 ```
 
-This cross-compiles for arm64, SCPs the binary to `/tmp/` on the Pi, installs it to `/usr/local/bin/`, and restarts `musallahboard-agent.service`.
+This cross-compiles for arm64, SCPs the binary to `/tmp/` on the Pi, installs it to `/usr/bin/`, and restarts `musallahboard-agent.service`.
 
 ## First-time host setup
 
@@ -109,11 +109,16 @@ Common behaviour:
   after enrollment. Change the board via `/etc/musallahboard/board-url` +
   restart the agent.
 
-`install.sh` installs **cage** as `musallahboard-kiosk.service` — a system
-unit, no display manager; the box boots straight to `multi-user.target` and
-cage *is* the graphical session. The browser runs in kiosk mode and the unit
+`install.sh --kiosk` installs **cage** as `musallahboard-kiosk.service` — a
+system unit, no display manager. The browser runs in kiosk mode and the unit
 blocks on `/etc/musallahboard/kiosk-url` (a local "waiting" splash shows until
 the agent enrolls), so the board never loads without a device id.
+
+Making the box *boot* into it — `set-default multi-user.target` plus disabling
+any display manager — is `packaging/appliance-policy.sh`, run separately.
+`install.sh` is payload only (files, accounts, unit enablement) so that it can
+become the `.deb`'s postinst unchanged: installing a package must not repoint
+somebody's boot target. `setup.sh` runs both, in that order.
 
 When setup finishes the device is at the splash, waiting. Finish it with the
 one-time enroll (see Enrollment below) — the board then loads automatically,

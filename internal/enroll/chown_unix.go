@@ -12,7 +12,7 @@ import (
 //
 // Rationale: enrollment is typically run via `sudo musallahboard-agent enroll`,
 // which writes files as root:root. But the daemon runs as the service user
-// (e.g. `admin`), and would fail to read its own key. The install scripts
+// (`musallahdaemon`), and would fail to read its own key. The install scripts
 // pre-create /etc/musallahboard owned by the service user, so chowning new
 // files to match the directory's owner gives the daemon read access without
 // the caller needing to know which user that is.

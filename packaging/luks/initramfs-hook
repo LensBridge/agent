@@ -1,0 +1,172 @@
+#!/bin/sh
+# =====================================================
+# initramfs hook — pull the LUKS/OTP toolchain into the initramfs
+# =====================================================
+# Installed as /etc/initramfs-tools/hooks/musallahboard-luks by
+# packaging/luks/install.sh (bare metal) or by image/scripts/60-luks.sh
+# (rpi-image-gen builds). Both paths ship the same files.
+#
+# Everything the local-top script touches has to be listed here. An initramfs is
+# not the rootfs: if a binary is not copied in, the failure surfaces at boot on a
+# wall-mounted board as "command not found" scrolling past on a screen nobody is
+# watching. Missing tools are therefore a HARD FAILURE of update-initramfs, which
+# in turn fails the installer — the only place this is cheap to fix.
+#
+# Deliberately not relying on busybox applets for anything load-bearing. Most of
+# these do exist in Debian's busybox, but "most" is not a property worth betting
+# a fleet's boot path on, and the applet set is a packaging detail that can
+# change under us.
+# =====================================================
+set -e
+
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "${1:-}" in
+    prereqs) prereqs; exit 0 ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+need() {
+    _p="$(command -v "$1" 2>/dev/null || true)"
+    if [ -z "$_p" ]; then
+        echo "musallahboard-luks hook: FATAL: $1 not found on the system" >&2
+        echo "  The initramfs would boot without it and silently skip encryption." >&2
+        exit 1
+    fi
+    copy_exec "$_p"
+}
+
+# Optional: the local-top script guards every use of these and degrades to a
+# board that is encrypted but has not taken the whole card. Worth copying, not
+# worth failing a build over.
+want() {
+    _p="$(command -v "$1" 2>/dev/null || true)"
+    [ -n "$_p" ] && copy_exec "$_p" || true
+}
+
+# ── Disk encryption ──────────────────────────────────────────────────────────
+need cryptsetup
+
+# ── OTP access ───────────────────────────────────────────────────────────────
+# vcmailbox comes from raspi-utils-core; rpi-otp-private-key from rpi-eeprom.
+# The latter is a /bin/sh script, which is why the utilities it shells out to
+# below are not optional.
+need vcmailbox
+need rpi-otp-private-key
+need musallahboard-otp-key
+
+# ── Everything the two shell scripts shell out to ────────────────────────────
+# rpi-otp-private-key uses sed/awk/tr/cut/wc/od/grep/which for its mailbox
+# response parsing and board detection; musallahboard-otp-key adds sha256sum;
+# the local-top script adds readlink for resolving symlinks.
+for t in sed awk tr cut wc od grep which sha256sum readlink; do
+    need "$t"
+done
+
+# blkid resolves mb_rootdev=PARTUUID=/UUID=/LABEL= when the corresponding
+# /dev/disk/by-* symlink has not appeared. On a bare-metal install that tag IS
+# the only description of the root device the initramfs has, so the fallback is
+# not decorative.
+need blkid
+
+# ── Filesystem surgery for the one-time conversion ───────────────────────────
+for t in e2fsck resize2fs tune2fs blockdev; do
+    need "$t"
+done
+
+# ── Resizing the root partition around the conversion ────────────────────────
+# Both directions need a partition editor. A bare-metal Raspberry Pi OS install
+# has already grown its root to fill the card, so the local-top script shrinks
+# it down to the filesystem before encrypting and grows it back afterwards —
+# otherwise the one-time reencryption is proportional to card size rather than
+# to the data on it. An rpi-image-gen image starts small and only grows.
+need sfdisk
+want partx
+want udevadm
+
+# ── Cipher choice ────────────────────────────────────────────────────────────
+# Written by whichever installer ran: packaging/luks/install.sh detects the SoC
+# on the board itself, image/scripts/60-luks.sh knows the device class at build
+# time. Either way it is carried into the initramfs because the conversion
+# happens there.
+#
+# Read here too, so that only the modules the chosen cipher actually needs get
+# copied in.
+MB_LUKS_CONF=/etc/musallahboard/luks.conf
+if [ -r "$MB_LUKS_CONF" ]; then
+    . "$MB_LUKS_CONF"
+    copy_file config "$MB_LUKS_CONF" /etc/musallahboard/luks.conf
+else
+    echo "musallahboard-luks hook: FATAL: ${MB_LUKS_CONF} not found" >&2
+    echo "  The installer writes it before building the initramfs. Without it the" >&2
+    echo "  board would pick a cipher at conversion time with no idea what SoC" >&2
+    echo "  it is running on." >&2
+    exit 1
+fi
+
+# ── Rehearsal key ────────────────────────────────────────────────────────────
+# Present only when the installer was run with --dry-run-otp. It stands in for
+# the SoC's OTP so that the whole conversion — real initramfs, real
+# reencryption, real reboot — can be exercised on a real board without spending
+# its one permanent write.
+#
+# Pre-populated at install time rather than generated on the board, because
+# --ensure would otherwise try to write it into a read-only initramfs.
+#
+# A board carrying this file is NOT protected: its disk key sits in an
+# unencrypted initramfs on a FAT partition. That is the point of a rehearsal,
+# and it is why the installer prints what it prints.
+MB_OTP_DRY_RUN_FILE=/etc/musallahboard/otp-dry-run.key
+if [ -r "$MB_OTP_DRY_RUN_FILE" ]; then
+    copy_file config "$MB_OTP_DRY_RUN_FILE" /etc/musallahboard/otp-dry-run.key
+    echo "musallahboard-luks hook: REHEARSAL key included — this board's" >&2
+    echo "  encryption will NOT be keyed to its SoC." >&2
+fi
+
+# ── Kernel modules ───────────────────────────────────────────────────────────
+# Listed explicitly because an initramfs.conf set to MODULES=dep would otherwise
+# produce an image that builds cleanly, passes verification, and cannot open its
+# own root filesystem.
+manual_add_modules dm_mod
+manual_add_modules dm_crypt
+
+# Hashes cryptsetup needs for the LUKS2 header itself, whatever the data cipher.
+for m in sha256 sha512 crypto_null; do
+    manual_add_modules "$m" || true
+done
+
+# The data cipher. Soft-added — module names move between kernel versions and
+# arm64 ships accelerated variants under different names — and then hard
+# asserted by the installer against the finished initramfs. Guessing wrong here
+# fails the install; it does not reach a running board.
+case "${MB_LUKS_CIPHER:-}" in
+    aes-xts-plain64)
+        for m in aes xts aes_generic aes-neon-bs aes-neon-blk; do
+            manual_add_modules "$m" || true
+        done
+        ;;
+    xchacha12,aes-adiantum-plain64)
+        # Adiantum is XChaCha12 over NH/Poly1305 with AES underneath, so all
+        # four families have to be present. On arm64 the accelerated chacha and
+        # nhpoly1305 live under -neon names.
+        for m in adiantum nhpoly1305 nhpoly1305-neon \
+                 chacha chacha_generic chacha-neon libchacha \
+                 poly1305 poly1305_generic \
+                 aes aes_generic; do
+            manual_add_modules "$m" || true
+        done
+        ;;
+    *)
+        echo "musallahboard-luks hook: FATAL: unknown cipher '${MB_LUKS_CIPHER:-}'" >&2
+        exit 1
+        ;;
+esac
+
+# No vfat or nls modules. Neither delivery path rewrites cmdline.txt from inside
+# the initramfs: the rpi-image-gen path does not need to because
+# /dev/disk/by-slot/system resolves to the open mapper, and the bare-metal path
+# has already done it from a running system where the result could be checked.
+# See packaging/luks/initramfs-local-top.
+
+exit 0

@@ -1,0 +1,589 @@
+#!/bin/sh
+# =====================================================
+# musallahboard-luks — unlock, or one-time encrypt, the root filesystem
+# =====================================================
+# Installed as /etc/initramfs-tools/scripts/local-top/musallahboard-luks.
+#
+# local-top runs unconditionally, and — confirmed against initramfs-tools
+# 0.148.4's local_mount_root() — it runs BEFORE local_device_setup resolves
+# ROOT. That ordering is the whole design: this script can create
+# /dev/mapper/musallahroot and by the time init looks for the root device it is
+# simply there. No crypttab, no cryptsetup-initramfs, no rewriting ROOT.
+#
+# Debian's initramfs-tools has no /conf/param.conf (that is an Ubuntu
+# extension), so a script CANNOT hand a modified ROOT back to init. Anything
+# that depends on doing so will appear to work and then fail on the device.
+#
+# ── HOW THE DEVICE IS FOUND ──────────────────────────────────────────────────
+#
+# Two delivery paths put this script on two different kinds of system, and they
+# describe the root device differently. The mode is chosen by whether
+# mb_rootdev= is on the kernel command line — an explicit tag, not a probe, so
+# there is never a boot where the answer depends on timing.
+#
+#   BY-SLOT MODE  (rpi-image-gen images; no mb_rootdev=)
+#     image-rpios ships 99-rpi-05-image.rules, which is copied into the
+#     initramfs, and which keys purely on filesystem label plus "is this
+#     partition on the device we booted from":
+#
+#       ID_FS_LABEL=ROOT          -> /dev/disk/by-slot/system
+#       ID_FS_LABEL=OSROOT_CRYPT  -> /dev/disk/by-slot/cryptroot
+#
+#     So the conversion gives the LUKS2 container the label OSROOT_CRYPT and
+#     gets by-slot/cryptroot for free. The inner ext4 keeps its ROOT label, and
+#     because rpi-storage-binder's rules walk the device-mapper slaves chain,
+#     the OPEN MAPPER is what by-slot/system resolves to from then on.
+#
+#     The consequence is worth stating plainly: root=/dev/disk/by-slot/system in
+#     cmdline.txt and in fstab are correct both before and after encryption, and
+#     neither file is ever rewritten on the device.
+#
+#   ROOTDEV MODE  (bare-metal Raspberry Pi OS; mb_rootdev=PARTUUID=...)
+#     Stock Raspberry Pi OS has none of those udev rules. Instead the installer
+#     — which runs on a booted system, where the result can be checked before
+#     rebooting — has already pointed root= and fstab at /dev/mapper/musallahroot
+#     and recorded the underlying partition as mb_rootdev=. Here ONE partition
+#     is both the before and the after, so `cryptsetup isLuks` is what decides
+#     between converting and unlocking.
+#
+#     mb_rootdev MUST name the partition, not the filesystem: a PARTUUID lives
+#     in the partition table and survives the conversion untouched, whereas a
+#     filesystem UUID or LABEL moves inside the container and stops resolving
+#     the moment the board is encrypted. UUID= and LABEL= are refused below
+#     rather than accepted into a boot that would work exactly once.
+#
+# ── STATES ───────────────────────────────────────────────────────────────────
+#
+#   1. the device is a LUKS container -> derive the key from OTP and open it.
+#                                        Every boot after the conversion.
+#   2. it is not                      -> convert. ONCE PER BOARD, and the OTP
+#                                        burn inside it is PERMANENT.
+#
+# POSIX sh. There is no bash here.
+# =====================================================
+
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "${1:-}" in
+    prereqs) prereqs; exit 0 ;;
+esac
+
+. /scripts/functions
+
+MAPPER_NAME="musallahroot"
+MAPPER="/dev/mapper/${MAPPER_NAME}"
+
+BY_SLOT_SYSTEM="/dev/disk/by-slot/system"
+BY_SLOT_CRYPT="/dev/disk/by-slot/cryptroot"
+
+# The label the by-slot udev rule matches on. Changing this string orphans every
+# board already in the field. In rootdev mode it is not load-bearing — discovery
+# is by PARTUUID — but it is still set, so that a card pulled from a board and
+# inspected on a laptop identifies itself.
+CRYPT_LABEL="OSROOT_CRYPT"
+
+# LUKS2 header reservation. cryptsetup shifts the data down by this much to
+# make room, so the filesystem must be shrunk by at least as much first.
+HEADER_MIB=32
+
+# Free space left in the filesystem when it is shrunk ahead of the conversion
+# (rootdev mode only — see shrink_for_conversion). The grow runs immediately
+# afterwards in the same boot, so this only has to cover the case where power is
+# lost in between: the board comes up on the shrunk filesystem and has to be
+# able to run until the next boot grows it back.
+SHRINK_HEADROOM_MIB=1024
+
+# ── Cipher ───────────────────────────────────────────────────────────────────
+# Chosen by whichever installer ran — packaging/luks/install.sh reads the SoC
+# off the board it is running on, image/scripts/60-luks.sh knows the device
+# class at build time — and applied HERE, possibly months later.
+#
+# Read only on the conversion path. Once the container exists its LUKS2 header
+# records its own cipher and cryptsetup uses that, so a board whose config file
+# is later changed or lost still unlocks normally. There is deliberately no
+# fallback default: a wrong guess here is a board that either runs slow forever
+# or fails to convert after it has already burned its OTP.
+MB_LUKS_CONF="${MB_LUKS_CONF:-/etc/musallahboard/luks.conf}"
+
+# How much unused tail the card may have before the partition is considered
+# worth growing. Not zero: partition tables align to megabyte boundaries, so an
+# exact comparison would mean the grow runs on every single boot forever.
+GROW_SLACK_MIB=64
+
+# Everything goes to the console as well as the log. A board doing a
+# twenty-minute reencrypt with a blank screen looks identical to a bricked one,
+# and somebody will pull the power.
+say() {
+    echo "[musallahboard-luks] $*"
+    echo "[musallahboard-luks] $*" >> /dev/console 2>/dev/null || true
+}
+
+bail() {
+    say "ERROR: $*"
+    say "leaving the root filesystem untouched"
+    exit 0
+}
+
+# ── Opt-in ───────────────────────────────────────────────────────────────────
+ENABLED=0
+MB_ROOTDEV=""
+DRY_RUN=0
+for x in $(cat /proc/cmdline); do
+    case "$x" in
+        mb_encrypt=1)    ENABLED=1 ;;
+        mb_rootdev=*)    MB_ROOTDEV="${x#mb_rootdev=}" ;;
+        mb_otp_dryrun=1) DRY_RUN=1 ;;
+    esac
+done
+
+# ── Rehearsal mode ───────────────────────────────────────────────────────────
+# Swaps the SoC's one-time-programmable memory for a file baked into the
+# initramfs by the hook, so that a real board can run the real conversion
+# without spending its one permanent write. musallahboard-otp-key implements
+# both sides of this; here it is only switched on.
+#
+# Announced on every boot, deliberately loudly. A board left in this state is
+# encrypted with a key that anyone holding the card can read straight off the
+# boot partition, and the only thing standing between that and someone
+# believing the board is protected is this message.
+if [ "$DRY_RUN" = "1" ]; then
+    MB_OTP_DRY_RUN=1
+    MB_OTP_DRY_RUN_FILE=/etc/musallahboard/otp-dry-run.key
+    export MB_OTP_DRY_RUN MB_OTP_DRY_RUN_FILE
+    say "***********************************************************"
+    say "* REHEARSAL MODE — the disk key comes from a file in the  *"
+    say "* initramfs, NOT from this SoC's OTP. This board is NOT   *"
+    say "* protected. Reflash it before putting it on a wall.      *"
+    say "***********************************************************"
+fi
+
+if [ "$ENABLED" != "1" ]; then
+    say "mb_encrypt=1 not set — encryption is not enabled for this image"
+    exit 0
+fi
+
+# ── Device discovery ─────────────────────────────────────────────────────────
+# Sets MODE, and DEV: the partition this script operates on. In by-slot mode DEV
+# is left empty and the two symlinks are consulted directly, because there the
+# plaintext and encrypted forms are genuinely two different names.
+
+# Resolve a mb_rootdev= tag to a block device. Prefers the udev symlink, which
+# is what exists on a normally-booting board, and falls back to blkid for the
+# case where udev has not produced it — a slow controller, or a rule that did
+# not fire.
+resolve_tag() {
+    _tag="$1"
+    _path=""
+
+    case "$_tag" in
+        PARTUUID=*)
+            _path="/dev/disk/by-partuuid/${_tag#PARTUUID=}"
+            ;;
+        /dev/*)
+            _path="$_tag"
+            ;;
+        UUID=*|LABEL=*)
+            # Refused deliberately. Both name the FILESYSTEM. After the
+            # conversion the filesystem is inside the container and the
+            # partition reports the LUKS header's own UUID instead, so this
+            # would resolve on the boot that encrypts the board and never
+            # again. The installer translates to PARTUUID for this reason.
+            say "mb_rootdev=${_tag} names a filesystem, not a partition."
+            say "It would stop resolving the moment this board is encrypted."
+            return 1
+            ;;
+        *)
+            say "mb_rootdev=${_tag} is not a form this script understands"
+            return 1
+            ;;
+    esac
+
+    # initramfs-tools starts udev and settles it during init-top, so this is
+    # normally present the instant this runs. Normally. An SD card behind a slow
+    # controller can enumerate after settle returns, and the failure mode of not
+    # waiting is a board that skips its own encryption because the device was
+    # one second late.
+    _i=0
+    while [ "$_i" -lt 30 ]; do
+        [ -b "$_path" ] && break
+        [ "$_i" -eq 0 ] && say "waiting for ${_path}"
+        sleep 1
+        _i=$(( _i + 1 ))
+    done
+
+    if [ ! -b "$_path" ]; then
+        case "$_tag" in
+            PARTUUID=*)
+                _path="$(blkid -t "$_tag" -o device 2>/dev/null | head -n1)"
+                ;;
+        esac
+    fi
+
+    [ -n "$_path" ] && [ -b "$_path" ] || return 1
+    readlink -f "$_path"
+}
+
+DEV=""
+if [ -n "$MB_ROOTDEV" ]; then
+    MODE="rootdev"
+    DEV="$(resolve_tag "$MB_ROOTDEV")" \
+        || bail "cannot resolve mb_rootdev=${MB_ROOTDEV}"
+    say "root partition: ${DEV} (from mb_rootdev=${MB_ROOTDEV})"
+else
+    MODE="byslot"
+    # Same wait, for the same reason, against whichever of the two names the
+    # board is going to present this boot.
+    i=0
+    while [ "$i" -lt 30 ]; do
+        [ -b "$BY_SLOT_CRYPT" ] || [ -b "$BY_SLOT_SYSTEM" ] && break
+        [ "$i" -eq 0 ] && say "waiting for the root device to appear"
+        sleep 1
+        i=$(( i + 1 ))
+    done
+fi
+
+# ── Partition geometry helpers ───────────────────────────────────────────────
+# Read from sysfs rather than by shelling out to a partition tool: sysfs is
+# always there, needs no extra binary, and reports the kernel's own view rather
+# than a possibly stale on-disk table.
+#
+# Partition device names are not derivable by string manipulation — the same
+# disk is mmcblk0p2, nvme0n1p2 or sda2 depending on the medium — so the disk
+# and the partition number both come from sysfs too.
+DISK_DEV=""
+PART_NUM=""
+TAIL_SECTORS=0
+PART_SECTORS=0
+
+read_geometry() {
+    _dev="$1"
+    _sys="/sys/class/block/$(basename "$_dev")"
+    [ -d "$_sys" ] || return 1
+    [ -r "${_sys}/partition" ] || return 1
+
+    _disk_sys="$(dirname "$(readlink -f "$_sys")")"
+    [ -r "${_sys}/start" ] && [ -r "${_sys}/size" ] && [ -r "${_disk_sys}/size" ] || return 1
+
+    PART_NUM="$(cat "${_sys}/partition")"
+    DISK_DEV="/dev/$(basename "$_disk_sys")"
+
+    _start=$(cat "${_sys}/start")
+    PART_SECTORS=$(cat "${_sys}/size")
+    _disk=$(cat "${_disk_sys}/size")
+    TAIL_SECTORS=$(( _disk - _start - PART_SECTORS ))
+    return 0
+}
+
+# Grow the root partition to the end of the card. Idempotent by design: it is
+# called on every boot, and does nothing once the tail is smaller than the
+# slack. That matters because power can be lost between the reencryption and
+# the grow, and the next boot has to finish the job rather than leave the board
+# running on a partition a fraction of the card's size forever.
+grow_partition() {
+    _dev="$1"
+    read_geometry "$_dev" || { say "WARNING: cannot read partition geometry — not growing"; return 1; }
+
+    _slack=$(( GROW_SLACK_MIB * 1024 * 1024 / 512 ))
+    if [ "$TAIL_SECTORS" -le "$_slack" ]; then
+        return 1
+    fi
+
+    say "growing partition ${PART_NUM} to fill the card ($(( TAIL_SECTORS / 2048 )) MiB unused)"
+
+    # ",+" means: keep the start where it is, take all remaining space. sfdisk
+    # updates the kernel's view through BLKPG for the one partition it changed,
+    # which is what makes this safe to do to a device that is already open.
+    if ! echo ',+' | sfdisk --no-reread --force -N "$PART_NUM" "$DISK_DEV" >> /dev/console 2>&1; then
+        say "WARNING: sfdisk failed — the card will be usable but not fully"
+        return 1
+    fi
+
+    # Belt and braces for kernels or media where BLKPG did not take.
+    partx -u "$DISK_DEV" >/dev/null 2>&1 || true
+    udevadm settle >/dev/null 2>&1 || true
+    return 0
+}
+
+# ── Shrink before encrypting (rootdev mode only) ─────────────────────────────
+# An rpi-image-gen image ships a partition barely larger than its contents and
+# grows AFTER encrypting, so its one-time reencryption cost is a few gigabytes
+# whatever card it was flashed to. A bare-metal Raspberry Pi OS install has
+# already expanded its root to fill the card by the time the installer runs, so
+# without this the same conversion rewrites the entire card: hours on a 128 GB
+# one, in front of a person who has been told not to power it off.
+#
+# So: shrink the filesystem to what it actually needs, shrink the partition to
+# match, encrypt that, and let the existing grow_partition put it all back. Both
+# halves already existed; this is the mirror image of the grow.
+#
+# Every failure here is non-fatal and falls through to encrypting the partition
+# at full size. That is slow, and it is correct, which is the right way round.
+shrink_for_conversion() {
+    _dev="$1"
+
+    _blk=$(tune2fs -l "$_dev" 2>/dev/null | awk '/^Block size:/ {print $3}')
+    [ -n "$_blk" ] || { say "WARNING: cannot read block size — not shrinking"; return 1; }
+
+    # -P estimates the minimum without touching anything. resize2fs -M would
+    # shrink to exactly that, which leaves a filesystem with no room to boot on
+    # if power is lost before the grow.
+    _min=$(resize2fs -P "$_dev" 2>/dev/null | awk -F': *' '/minimum size/ {print $2}')
+    case "$_min" in
+        ''|*[!0-9]*) say "WARNING: cannot estimate minimum size — not shrinking"; return 1 ;;
+    esac
+
+    _target=$(( _min + SHRINK_HEADROOM_MIB * 1024 * 1024 / _blk ))
+
+    read_geometry "$_dev" || { say "WARNING: cannot read partition geometry — not shrinking"; return 1; }
+
+    # Sectors the shrunk partition needs: the filesystem plus the header the
+    # reencryption is about to reserve at the front.
+    _want_sectors=$(( _target * (_blk / 512) + HEADER_MIB * 1024 * 1024 / 512 ))
+
+    # Nothing to gain. Leave a generous margin — shrinking to save a few hundred
+    # megabytes is all risk and no benefit.
+    if [ "$_want_sectors" -ge $(( PART_SECTORS - 512 * 1024 * 2 )) ]; then
+        say "partition is already close to the filesystem size — not shrinking"
+        return 1
+    fi
+
+    say "shrinking filesystem to $(( _target * _blk / 1024 / 1024 )) MiB before encrypting"
+    say "(partition is $(( PART_SECTORS / 2048 )) MiB — encrypting all of it would take far longer)"
+
+    if ! resize2fs "$_dev" "$_target" >> /dev/console 2>&1; then
+        say "WARNING: could not shrink the filesystem — encrypting at full size"
+        return 1
+    fi
+
+    if ! echo ",${_want_sectors}" | sfdisk --no-reread --force -N "$PART_NUM" "$DISK_DEV" >> /dev/console 2>&1; then
+        # The filesystem is smaller than the partition now, which is a perfectly
+        # valid state — the reencryption just has more to chew through.
+        say "WARNING: could not shrink the partition — encrypting at full size"
+        return 1
+    fi
+
+    partx -u "$DISK_DEV" >/dev/null 2>&1 || true
+    udevadm settle >/dev/null 2>&1 || true
+    say "partition shrunk to $(( _want_sectors / 2048 )) MiB for the conversion"
+    return 0
+}
+
+# ── Which state are we in? ───────────────────────────────────────────────────
+# by-slot mode asks which of the two names exists; rootdev mode asks the one
+# device whether it is already a container.
+IS_ENCRYPTED=0
+if [ "$MODE" = "rootdev" ]; then
+    if cryptsetup isLuks "$DEV" 2>/dev/null; then
+        IS_ENCRYPTED=1
+    fi
+else
+    if [ -b "$BY_SLOT_CRYPT" ]; then
+        IS_ENCRYPTED=1
+        DEV="$(readlink -f "$BY_SLOT_CRYPT")"
+        [ -b "$DEV" ] || bail "cannot resolve ${BY_SLOT_CRYPT}"
+    fi
+fi
+
+# ── State 1: already encrypted ───────────────────────────────────────────────
+if [ "$IS_ENCRYPTED" = "1" ]; then
+    if [ -b "$MAPPER" ]; then
+        exit 0
+    fi
+
+    # A reencryption interrupted by power loss leaves resume metadata in the
+    # LUKS2 header. This must be handled before anything tries to open or mount
+    # the device: the filesystem is a mix of encrypted and plaintext extents
+    # until it finishes, and mounting it in that state destroys it.
+    if cryptsetup luksDump "$DEV" 2>/dev/null | grep -qi 'reencrypt'; then
+        say "interrupted reencryption detected — resuming (do NOT power off)"
+        if ! musallahboard-otp-key --print > /run/mb.key 2>/dev/null; then
+            bail "cannot derive key to resume reencryption"
+        fi
+        cryptsetup reencrypt --resume-only --key-file /run/mb.key \
+            --progress-frequency 10 "$DEV" >> /dev/console 2>&1
+        rc=$?
+        rm -f /run/mb.key
+        [ "$rc" -eq 0 ] || bail "resume failed (rc=${rc})"
+        say "reencryption resumed and completed"
+    fi
+
+    # Growing before opening, not after: the partition is not yet backing a
+    # device-mapper target, so there is nothing holding it.
+    grow_partition "$DEV" && GREW=1 || GREW=0
+
+    say "unlocking root filesystem"
+    if ! musallahboard-otp-key --print > /run/mb.key 2>/dev/null; then
+        bail "could not derive the disk key from OTP"
+    fi
+    if ! cryptsetup open --type luks --key-file /run/mb.key "$DEV" "$MAPPER_NAME"; then
+        rm -f /run/mb.key
+        # Deliberately not a retry loop or a passphrase prompt. If the
+        # OTP-derived key does not open this container, the card is in a
+        # different Pi than the one it was encrypted on — which is exactly the
+        # case this design exists to refuse.
+        panic "musallahboard: root filesystem cannot be unlocked on this board."
+    fi
+
+    if [ "$GREW" = "1" ]; then
+        say "expanding the encrypted volume into the grown partition"
+        cryptsetup resize --key-file /run/mb.key "$MAPPER_NAME" >> /dev/console 2>&1 \
+            || say "WARNING: could not resize the LUKS mapping"
+        e2fsck -fy "$MAPPER" >> /dev/console 2>&1 || true
+        resize2fs "$MAPPER" >> /dev/console 2>&1 \
+            || say "WARNING: could not grow the filesystem"
+    fi
+
+    rm -f /run/mb.key
+    udevadm settle >/dev/null 2>&1 || true
+    say "unlocked"
+    exit 0
+fi
+
+# ── State 2: convert ─────────────────────────────────────────────────────────
+if [ "$MODE" = "byslot" ]; then
+    [ -b "$BY_SLOT_SYSTEM" ] || bail "neither ${BY_SLOT_CRYPT} nor ${BY_SLOT_SYSTEM} exists"
+
+    DEV="$(readlink -f "$BY_SLOT_SYSTEM")"
+    [ -b "$DEV" ] || bail "cannot resolve ${BY_SLOT_SYSTEM}"
+
+    # by-slot/system resolving to something that is already LUKS would mean a
+    # container whose label never got set. Refusing is right: converting it a
+    # second time would encrypt ciphertext.
+    if cryptsetup isLuks "$DEV" 2>/dev/null; then
+        bail "${DEV} is already a LUKS container but is not labelled ${CRYPT_LABEL}"
+    fi
+fi
+
+[ -b "$DEV" ] || bail "no root device to convert"
+
+# The cipher, read before anything irreversible happens. Doing this after the
+# OTP burn would mean a board that has permanently spent its one write and then
+# discovered it does not know how to encrypt itself.
+if [ -r "$MB_LUKS_CONF" ]; then
+    . "$MB_LUKS_CONF"
+fi
+case "${MB_LUKS_CIPHER:-}" in
+    ?*) : ;;
+    *)  bail "no cipher configured (${MB_LUKS_CONF} missing or empty) — NOT encrypting" ;;
+esac
+case "${MB_LUKS_KEYSIZE:-}" in
+    128|256|512) : ;;
+    *) bail "invalid key size '${MB_LUKS_KEYSIZE:-}' in ${MB_LUKS_CONF} — NOT encrypting" ;;
+esac
+
+say "════════════════════════════════════════════════════════"
+say " ENCRYPTING THE ROOT FILESYSTEM"
+say " cipher: ${MB_LUKS_CIPHER} (${MB_LUKS_KEYSIZE}-bit)"
+say " This runs once and takes a few minutes. DO NOT POWER OFF."
+say " (If power is lost, the next boot resumes where it stopped.)"
+say "════════════════════════════════════════════════════════"
+
+modprobe dm_mod  2>/dev/null || true
+modprobe dm_crypt 2>/dev/null || true
+
+# THE OTP BURN. Permanent, and the point of no return for this board.
+if ! musallahboard-otp-key --ensure > /run/mb.key 2>>/dev/console; then
+    rm -f /run/mb.key
+    bail "could not obtain a device key from OTP — NOT encrypting"
+fi
+[ -s /run/mb.key ] || { rm -f /run/mb.key; bail "derived key is empty"; }
+
+say "checking filesystem"
+e2fsck -fy "$DEV" >> /dev/console 2>&1 || true
+
+# On bare metal the partition already fills the card, so cut it down to the data
+# before encrypting rather than after. Skipped in by-slot mode, where the image
+# was built small on purpose and this would be a no-op with a partition editor
+# in it.
+if [ "$MODE" = "rootdev" ]; then
+    shrink_for_conversion "$DEV" || true
+fi
+
+# Make room for the LUKS2 header by shrinking the filesystem to fit within
+# (partition - 32 MiB). After shrink_for_conversion this is usually already
+# true and resize2fs is a no-op; in by-slot mode, or when the shrink declined,
+# it is what makes the reencryption possible at all.
+blk_size=$(tune2fs -l "$DEV" | awk '/^Block size:/ {print $3}')
+dev_bytes=$(blockdev --getsize64 "$DEV")
+[ -n "$blk_size" ] && [ -n "$dev_bytes" ] || { rm -f /run/mb.key; bail "cannot size the filesystem"; }
+
+target_blocks=$(( (dev_bytes - HEADER_MIB * 1024 * 1024) / blk_size ))
+say "resizing filesystem to make room for the LUKS header"
+if ! resize2fs "$DEV" "$target_blocks" >> /dev/console 2>&1; then
+    rm -f /run/mb.key
+    bail "could not resize the filesystem — NOT encrypting"
+fi
+
+# --pbkdf pbkdf2 with the minimum iteration count, on purpose. The passphrase is
+# a SHA-256 digest of 256 bits of hardware randomness, not something a person
+# typed, so there is nothing for a slow KDF to protect: brute force is already
+# off the table. What argon2id WOULD do here is try to allocate up to 1 GB
+# inside an initramfs on a 2 GB Pi 4B, and get OOM-killed halfway through
+# converting the root filesystem.
+#
+# --label is what makes the by-slot udev rule fire on subsequent boots, and what
+# identifies the card to a human in either mode. It is asserted immediately
+# below rather than trusted.
+say "starting reencryption"
+if ! cryptsetup reencrypt --encrypt \
+        --type luks2 \
+        --reduce-device-size "${HEADER_MIB}M" \
+        --cipher "$MB_LUKS_CIPHER" \
+        --key-size "$MB_LUKS_KEYSIZE" \
+        --label "$CRYPT_LABEL" \
+        --pbkdf pbkdf2 \
+        --pbkdf-force-iterations 1000 \
+        --batch-mode \
+        --progress-frequency 10 \
+        --key-file /run/mb.key \
+        "$DEV" >> /dev/console 2>&1; then
+    rm -f /run/mb.key
+    bail "reencryption failed — the next boot will retry or resume"
+fi
+say "reencryption complete"
+
+# In by-slot mode the label is not cosmetic: without it there is no
+# by-slot/cryptroot, this script finds nothing on the next boot, and the board
+# sits at an initramfs prompt with a perfectly good encrypted filesystem in
+# front of it. Older cryptsetup builds ignore --label on reencrypt, so set it
+# again explicitly and only then check.
+cryptsetup config --label "$CRYPT_LABEL" "$DEV" >/dev/null 2>&1 || true
+if ! cryptsetup luksDump "$DEV" 2>/dev/null | grep -q "$CRYPT_LABEL"; then
+    if [ "$MODE" = "byslot" ]; then
+        rm -f /run/mb.key
+        bail "container is encrypted but has no ${CRYPT_LABEL} label — fix with: cryptsetup config --label ${CRYPT_LABEL} ${DEV}"
+    fi
+    # In rootdev mode discovery is by PARTUUID, which is untouched by all of
+    # this, so a missing label costs identification convenience and nothing else.
+    say "WARNING: container has no ${CRYPT_LABEL} label (harmless in this mode)"
+fi
+
+# Now take the rest of the card.
+grow_partition "$DEV" || true
+
+if ! cryptsetup open --type luks --key-file /run/mb.key "$DEV" "$MAPPER_NAME"; then
+    rm -f /run/mb.key
+    bail "encrypted the filesystem but cannot reopen it"
+fi
+
+cryptsetup resize --key-file /run/mb.key "$MAPPER_NAME" >> /dev/console 2>&1 \
+    || say "WARNING: could not resize the LUKS mapping"
+rm -f /run/mb.key
+
+e2fsck -fy "$MAPPER" >> /dev/console 2>&1 || true
+resize2fs "$MAPPER" >> /dev/console 2>&1 || say "WARNING: could not grow the filesystem"
+
+# No reboot, and nothing to rewrite. The state on disk is now exactly the state
+# every subsequent boot will find: in by-slot mode because
+# root=/dev/disk/by-slot/system resolves to the open mapper via the DM branch of
+# the storage-binder rules, and in rootdev mode because the installer already
+# pointed root= at /dev/mapper/musallahroot from a running system. Neither one
+# edits a boot file from inside an initramfs.
+udevadm settle >/dev/null 2>&1 || true
+
+if [ -b "$MAPPER" ]; then
+    say "encryption complete — continuing boot"
+    exit 0
+fi
+
+bail "mapper did not appear after conversion"

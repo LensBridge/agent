@@ -1,0 +1,167 @@
+#!/bin/sh
+# =====================================================
+# musallahboard-otp-key — derive this board's LUKS passphrase
+# =====================================================
+# Prints the LUKS passphrase for this specific Raspberry Pi to stdout. The
+# passphrase is derived from the device-unique private key held in the SoC's
+# one-time-programmable memory, so it exists nowhere on the card and cannot be
+# recomputed on any other board.
+#
+# Runs in two places: from the initramfs (busybox sh, minimal environment) and
+# occasionally by hand for diagnostics. POSIX sh only — there is no bash in an
+# initramfs.
+#
+#     musallahboard-otp-key            print the passphrase
+#     musallahboard-otp-key --ensure   burn a key first if OTP is blank
+#     musallahboard-otp-key --status   report whether OTP is programmed
+#
+# ── WHAT THIS PROTECTS AGAINST ───────────────────────────────────────────────
+#
+# It protects against the card being read or modified anywhere other than the
+# board it belongs to: a laptop, a card reader, a different Pi. That is the
+# realistic threat for a display mounted on a wall in a public room.
+#
+# It does NOT protect against someone booting their own operating system on
+# THIS board and reading the key back out. Raspberry Pi states the limitation
+# directly: "It is not possible to prevent code running in ARM supervisor mode
+# from accessing OTP hardware directly", and these SoCs have no hardware key
+# store. Closing that gap requires signed boot plus lock_device_private_key=1
+# inside a signed config.txt — deliberately out of scope, see the README.
+#
+# Do not let this file's existence talk anyone into believing otherwise.
+# =====================================================
+set -eu
+
+# Domain separation. The OTP key is a general-purpose device secret; hashing it
+# with a purpose string means a future consumer of the same OTP value cannot
+# end up using the identical bytes for a different job.
+#
+# Plain SHA-256 rather than HMAC on purpose: the OTP value is already 256 bits
+# of uniform randomness and the message is a fixed constant, so HMAC's
+# resistance to length-extension and to structured keys buys nothing here.
+# What it would cost is openssl and its shared libraries inside the initramfs,
+# which is the part of this design most likely to break silently on an upgrade.
+DOMAIN="musallahboard-luks-v1"
+
+# 8 rows = 256 bits. This is the maximum on BCM2711 (Pi 4B) and well within
+# BCM2712's 16 rows (Pi 5), so both models take one code path with no runtime
+# model detection. rpi-otp-private-key defaults to 8 and refuses anything
+# larger than the SoC supports, which would otherwise be a Pi-4-only failure
+# discovered on a Pi 4.
+OTP_ROWS=8
+
+OTP_TOOL="${OTP_TOOL:-rpi-otp-private-key}"
+
+log() { echo "[otp-key] $*" >&2; }
+die() { echo "[otp-key] FATAL: $*" >&2; exit 1; }
+
+# ── Dry-run ──────────────────────────────────────────────────────────────────
+# There is no undo for an OTP burn and no test lab for one. With
+# MB_OTP_DRY_RUN=1 the "OTP" is a file, so the entire encrypt-and-boot cycle
+# can be rehearsed on a loopback image on a build host. See
+# scripts/luks-rehearsal.sh.
+otp_read() {
+    if [ "${MB_OTP_DRY_RUN:-0}" = "1" ]; then
+        [ -f "$MB_OTP_DRY_RUN_FILE" ] || return 1
+        cat "$MB_OTP_DRY_RUN_FILE"
+        return 0
+    fi
+    "$OTP_TOOL" -l "$OTP_ROWS"
+}
+
+otp_is_set() {
+    if [ "${MB_OTP_DRY_RUN:-0}" = "1" ]; then
+        [ -s "$MB_OTP_DRY_RUN_FILE" ] || return 1
+        # Same "all zeros means unset" rule the real tool applies.
+        [ -n "$(tr -d '0' < "$MB_OTP_DRY_RUN_FILE" | tr -d '\n')" ]
+        return $?
+    fi
+    "$OTP_TOOL" -c -l "$OTP_ROWS"
+}
+
+otp_write() {
+    key="$1"
+    if [ "${MB_OTP_DRY_RUN:-0}" = "1" ]; then
+        mkdir -p "$(dirname "$MB_OTP_DRY_RUN_FILE")"
+        printf '%s' "$key" > "$MB_OTP_DRY_RUN_FILE"
+        log "DRY RUN — wrote key to ${MB_OTP_DRY_RUN_FILE} instead of OTP"
+        return 0
+    fi
+    # -y is not optional. Without it the tool prompts for confirmation when
+    # stdin is a terminal, and in an initramfs stdin IS the console: the board
+    # would sit forever at a "Type YES to continue" prompt that nobody is
+    # standing in front of.
+    #
+    # The tool performs its own readback comparison after writing and fails if
+    # it does not match, so there is no need to repeat that here.
+    "$OTP_TOOL" -y -l "$OTP_ROWS" -w "$key"
+}
+
+MB_OTP_DRY_RUN_FILE="${MB_OTP_DRY_RUN_FILE:-/etc/musallahboard/otp-dry-run.key}"
+
+generate_key() {
+    # 32 bytes of kernel randomness as 64 lowercase hex characters. od is
+    # available as a busybox applet and is copied into the initramfs
+    # explicitly by the hook, so this works identically in both environments.
+    od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+derive() {
+    otp_hex="$1"
+    # Guard against deriving a passphrase from a blank or truncated read. An
+    # all-zero OTP read that silently produced a valid-looking passphrase would
+    # give every unprogrammed board in the fleet the same disk key.
+    case "$otp_hex" in
+        "") die "empty OTP read" ;;
+    esac
+    [ "${#otp_hex}" -eq $(( OTP_ROWS * 8 )) ] \
+        || die "OTP read is ${#otp_hex} hex chars, expected $(( OTP_ROWS * 8 ))"
+    [ -n "$(printf '%s' "$otp_hex" | tr -d '0')" ] \
+        || die "OTP is all zeros — refusing to derive a fleet-wide key"
+
+    # No trailing newline. cryptsetup treats a --key-file argument
+    # asymmetrically: for `-` (stdin) it reads up to a newline, but for a
+    # regular file it uses the ENTIRE contents, newline included. So
+    # `musallahboard-otp-key > /run/key; cryptsetup --key-file /run/key` and
+    # `musallahboard-otp-key | cryptsetup --key-file -` would derive two
+    # different passphrases from the same OTP — and the second form is exactly
+    # what anyone debugging this by hand will type. Emitting no newline makes
+    # every path agree.
+    printf '%s:%s' "$DOMAIN" "$otp_hex" | sha256sum | cut -d' ' -f1 | tr -d '\n'
+}
+
+# ── Entry points ─────────────────────────────────────────────────────────────
+case "${1:---print}" in
+    --status)
+        if otp_is_set; then
+            echo "programmed"
+        else
+            echo "blank"
+            exit 1
+        fi
+        ;;
+
+    --ensure)
+        # THIS IS THE IRREVERSIBLE STEP. OTP bits go from 0 to 1 and never
+        # back. Called exactly once per board, from the initramfs, immediately
+        # before the root filesystem is encrypted.
+        if ! otp_is_set; then
+            log "OTP is blank — generating and burning a device key (PERMANENT)"
+            newkey="$(generate_key)"
+            [ "${#newkey}" -eq $(( OTP_ROWS * 8 )) ] \
+                || die "generated key is the wrong length — refusing to burn"
+            otp_write "$newkey"
+            log "OTP programmed"
+        fi
+        derive "$(otp_read)"
+        ;;
+
+    --print|"")
+        otp_is_set || die "OTP is blank — run with --ensure to program it"
+        derive "$(otp_read)"
+        ;;
+
+    *)
+        die "unknown argument: $1"
+        ;;
+esac

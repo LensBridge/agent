@@ -20,7 +20,7 @@ Type=simple
 # get one is a logind session: PAMName=login + a dedicated VT. This is the
 # upstream-recommended "cage as a system service" pattern and is what lets us
 # drop lightdm/labwc autologin entirely.
-User=KIOSK_USER_PLACEHOLDER
+User=musallahkiosk
 PAMName=login
 TTYPath=/dev/tty1
 TTYReset=yes
@@ -39,13 +39,13 @@ EnvironmentFile=-/etc/musallahboard/kiosk.env
 
 # No enrollment gate: start-kiosk.sh shows waiting.html until kiosk-url exists,
 # then the .path watcher cycles us onto the real board.
-ExecStart=/usr/local/bin/start-kiosk.sh
+ExecStart=/usr/bin/start-kiosk.sh
 
 # cage exits when the browser dies; always bring the board back. ExecStopPost
 # guarantees no browser survives a restart — critical because a snap browser
 # would escape this unit's cgroup (we use a deb browser to avoid that, but the
 # kill is a cheap belt-and-suspenders so kiosk.restart always truly cycles).
-ExecStopPost=-/usr/bin/pkill -9 -u KIOSK_USER_PLACEHOLDER -f "google-chrome|chromium"
+ExecStopPost=-/usr/bin/pkill -9 -u musallahkiosk -f "google-chrome|chromium"
 Restart=always
 RestartSec=2
 

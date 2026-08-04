@@ -14,8 +14,8 @@
 # here and fall back to a local splash if it vanished between the check and
 # now (e.g. a mid-write crash).
 #
-# Browser: we must NOT use a snap. Snap Chromium (a) can't read /usr/local and
-# (b) runs in its own snapd cgroup scope, so it survives `systemctl restart`
+# Browser: we must NOT use a snap. Snap Chromium runs in its own snapd cgroup
+# scope, so it survives `systemctl restart`
 # and the agent's kiosk.restart never actually cycles it. On the Pi, deb
 # `chromium` is the right binary; on the Ubuntu test VM it's `google-chrome-
 # stable` (a real deb). We pick the first real one and explicitly reject the
@@ -23,7 +23,7 @@
 set -euo pipefail
 
 KIOSK_URL_FILE="/etc/musallahboard/kiosk-url"
-SPLASH="file:///usr/local/share/musallahboard/waiting.html"
+SPLASH="file:///usr/share/musallahboard/waiting.html"
 
 URL=""
 if [[ -r "$KIOSK_URL_FILE" ]]; then

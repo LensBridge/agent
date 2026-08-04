@@ -63,6 +63,16 @@ package: build-arm64
 	@cp -r packaging build/pkg/musallahboard-agent-$(VERSION)-arm64/
 	@sed -i 's/\r//' build/pkg/musallahboard-agent-$(VERSION)-arm64/packaging/*.sh
 	@chmod +x build/pkg/musallahboard-agent-$(VERSION)-arm64/packaging/*.sh
+# setup.sh is the whole point of the arm64 tarball: the one-line installer
+# fetches this archive and runs it. Not shipped in the amd64 one — it is a
+# Raspberry Pi wrapper and the x86 host is provisioned by the Packer image.
+	@cp setup.sh build/pkg/musallahboard-agent-$(VERSION)-arm64/
+	@sed -i 's/\r//' build/pkg/musallahboard-agent-$(VERSION)-arm64/setup.sh
+	@chmod +x build/pkg/musallahboard-agent-$(VERSION)-arm64/setup.sh
+# packaging/luks/ holds three extensionless scripts that run inside an
+# initramfs, where a stray CR in a shebang produces no diagnosable error at all.
+	@sed -i 's/\r//' build/pkg/musallahboard-agent-$(VERSION)-arm64/packaging/luks/*
+	@chmod +x build/pkg/musallahboard-agent-$(VERSION)-arm64/packaging/luks/*
 	@cp README.md build/pkg/musallahboard-agent-$(VERSION)-arm64/ 2>/dev/null || true
 	@tar czf build/musallahboard-agent-$(VERSION)-arm64.tar.gz \
 	    -C build/pkg musallahboard-agent-$(VERSION)-arm64

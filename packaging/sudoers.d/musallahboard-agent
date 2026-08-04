@@ -9,7 +9,13 @@
 # can't, say, install packages or open a root shell.
 #
 # Install: drop into /etc/sudoers.d/ with mode 0440 owned by root:root.
-# Replace `admin` with the user the systemd unit runs as if you changed it.
+#
+# `musallahdaemon` is a fixed, package-owned system account — it is NOT
+# configurable, and must match User= in musallahboard-agent.service. Keeping it
+# fixed is what lets this file ship verbatim in a .deb with no substitution.
+# It is deliberately a name no human would choose for a login: an earlier
+# revision used `admin`, which collided with the human sudo account on Pi
+# installs and silently ran the agent with NOPASSWD:ALL.
 
-admin ALL=(root) NOPASSWD: /bin/systemctl restart musallahboard-kiosk.service
-admin ALL=(root) NOPASSWD: /bin/systemctl reboot
+musallahdaemon ALL=(root) NOPASSWD: /bin/systemctl restart musallahboard-kiosk.service
+musallahdaemon ALL=(root) NOPASSWD: /bin/systemctl reboot

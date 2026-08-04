@@ -27,7 +27,7 @@ error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 [[ $EUID -ne 0 ]] && error "Run as root: sudo bash $0"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BINARY_DEST=/usr/local/bin/musallahboard-agent
+BINARY_DEST=/usr/bin/musallahboard-agent
 SERVICE=musallahboard-agent.service
 
 BINARY_SRC="${1:-}"

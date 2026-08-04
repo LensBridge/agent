@@ -10,16 +10,16 @@
 #                                       # (irreversible — the Ed25519 key is gone)
 #
 # What is removed in the default mode:
-#   - /etc/systemd/system/musallahboard-agent.service (stopped, disabled)
+#   - /lib/systemd/system/musallahboard-*.{service,path} (stopped, disabled)
 #   - /etc/sudoers.d/musallahboard-agent
-#   - /usr/local/bin/musallahboard-agent
+#   - /usr/bin/musallahboard-agent
 #   - /var/lib/musallahboard
 #   - /var/log/musallahboard
 #
 # What is preserved (unless --purge):
 #   - /etc/musallahboard/agent.toml      (device id, backend url)
 #   - /etc/musallahboard/agent.key       (Ed25519 private key)
-#   - The service user account ('admin' or as configured)
+#   - The service user account ('musallahdaemon')
 #
 # Re-installing later (without --purge) keeps the device's existing enrollment.
 # =====================================================
@@ -57,12 +57,21 @@ section "Removing files"
 if systemctl list-unit-files musallahboard-kiosk-watch.path &>/dev/null; then
     systemctl disable --now musallahboard-kiosk-watch.path 2>/dev/null || true
 fi
+rm -f /lib/systemd/system/musallahboard-agent.service
+rm -f /lib/systemd/system/musallahboard-kiosk.service
+rm -f /lib/systemd/system/musallahboard-kiosk-watch.path
+rm -f /lib/systemd/system/musallahboard-kiosk-reload.service
+# Pre-/lib layout — harmless if absent, and leaving one behind would shadow a
+# reinstall's unit, since /etc/systemd/system takes precedence over /lib.
 rm -f /etc/systemd/system/musallahboard-agent.service
+rm -f /etc/systemd/system/musallahboard-kiosk.service
 rm -f /etc/systemd/system/musallahboard-kiosk-watch.path
 rm -f /etc/systemd/system/musallahboard-kiosk-reload.service
 rm -f /etc/sudoers.d/musallahboard-agent
-rm -f /usr/local/bin/musallahboard-agent
-info "Removed binary, units (agent + kiosk watcher), sudoers"
+rm -f /usr/bin/musallahboard-agent
+rm -f /usr/bin/start-kiosk.sh
+rm -rf /usr/share/musallahboard
+info "Removed binary, units (agent + kiosk watcher), launcher, splash, sudoers"
 
 # State / logs: never preserved — they don't contain identity, just runtime crud
 rm -rf /var/lib/musallahboard

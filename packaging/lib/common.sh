@@ -25,6 +25,10 @@
 #   platform_after_hardening    (function, optional) Pi-only extras: watchdog,
 #                               WiFi power-save, Raspberry Pi Connect. Define
 #                               an empty function if there is nothing to do.
+#   platform_finalize           (function, optional) runs LAST, after the agent
+#                               is installed. Anything that changes how the
+#                               board boots belongs here, so that a failure
+#                               earlier on leaves a machine that still boots.
 #
 # This file is sourced, never executed. It assumes `set -euo pipefail` was
 # already set by the wrapper.
@@ -42,6 +46,68 @@ section() { echo; echo -e "${BOLD}═══ $* ═══${NC}"; }
 # on campus WiFi can take a while to associate before it can reach a time server.
 NTP_SYNC_TIMEOUT_SEC="${NTP_SYNC_TIMEOUT_SEC:-90}"
 
+# ── Non-interactive configuration ─────────────────────────────────────────────
+# Every prompt below can be answered in advance through an environment
+# variable. That is what makes this usable from the one-line installer, where
+# the script arrives down a pipe and stdin is the script itself rather than a
+# person — a bare `read` there consumes the rest of the script instead of an
+# answer, and does it silently.
+#
+#   MB_HOSTNAME  MB_ADMIN_USER  MB_BOARD_URL  MB_TIMEZONE
+#   MB_ADMIN_SSH_KEY
+#   MB_ASSUME_YES=1   take the default for anything unset, confirm nothing
+#   MB_REBOOT=auto|never|ask
+#
+# Anything left unset is still asked for interactively, so `bash setup.sh` by
+# hand behaves exactly as it always has.
+#
+# MB_KIOSK_USER is gone: the display account is fixed at `musallahkiosk`
+# because musallahboard-kiosk.service names it in User= and ExecStopPost, and
+# a .deb ships that unit as a static file.
+MB_ASSUME_YES="${MB_ASSUME_YES:-0}"
+MB_REBOOT="${MB_REBOOT:-ask}"
+
+# Fixed service accounts, both created by packaging/install.sh. Mirrored here
+# only so prompts, the SSH deny-list and the summary can name them.
+KIOSK_USER=musallahkiosk
+SERVICE_USER=musallahdaemon
+
+# Read one answer: the pre-supplied value if there is one, otherwise a prompt,
+# otherwise the default. Never prompts when there is no terminal on stdin —
+# that case is not a user who wants defaults, it is a user who would never see
+# the question.
+#
+# $1 variable to set   $2 prompt text   $3 default
+_ask() {
+    local _var="$1" _prompt="$2" _default="$3" _preset _reply
+    _preset="${!_var-}"
+
+    if [[ -n "$_preset" ]]; then
+        printf '  %-34s %s\n' "$_prompt" "$_preset"
+        return 0
+    fi
+
+    if [[ "$MB_ASSUME_YES" == "1" ]] || [[ ! -t 0 ]]; then
+        printf -v "$_var" '%s' "$_default"
+        printf '  %-34s %s (default)\n' "$_prompt" "$_default"
+        return 0
+    fi
+
+    read -rp "$(printf '  %-34s [%s]: ' "$_prompt" "$_default")" _reply
+    printf -v "$_var" '%s' "${_reply:-$_default}"
+    return 0
+}
+
+# Yes/no confirmation that defaults to yes under MB_ASSUME_YES and refuses to
+# guess when there is no terminal.
+_confirm() {
+    local _prompt="$1" _reply
+    [[ "$MB_ASSUME_YES" == "1" ]] && return 0
+    [[ ! -t 0 ]] && return 0
+    read -rp "$_prompt" -n 1 _reply; echo
+    [[ $_reply =~ ^[Yy]$ ]]
+}
+
 # ── Pre-flight ────────────────────────────────────────────────────────────────
 _preflight() {
     [[ $EUID -eq 0 ]] && error "Do not run as root. Run as a user with sudo access."
@@ -55,6 +121,8 @@ _preflight() {
         || error "wrapper must define platform_install_packages()"
     declare -F platform_after_hardening >/dev/null \
         || platform_after_hardening() { :; }
+    declare -F platform_finalize >/dev/null \
+        || platform_finalize() { :; }
 }
 
 _banner() {
@@ -73,29 +141,56 @@ BANNER
 _prompt_config() {
     section "Configuration"
 
-    read -rp "Hostname for this board          [musallahboard]: " _h
-    HOSTNAME="${_h:-musallahboard}"
+    # Seeded from the MB_* overrides so the same code path serves an interactive
+    # run and a piped one. HOSTNAME is assigned unconditionally on purpose: bash
+    # sets it to this machine's own name, which _ask would otherwise mistake for
+    # an answer somebody supplied and never ask the question.
+    HOSTNAME="${MB_HOSTNAME-}"
+    ADMIN_USER="${MB_ADMIN_USER-}"
+    KIOSK_URL="${MB_BOARD_URL-}"
+    TIMEZONE="${MB_TIMEZONE-}"
 
-    read -rp "Admin username (SSH/sudo)        [ibra]: " _a
-    ADMIN_USER="${_a:-ibra}"
+    _ask HOSTNAME   "Hostname for this board"          "musallahboard"
+    _ask ADMIN_USER "Admin username (SSH/sudo)"        "ibra"
+    _ask KIOSK_URL  "Kiosk URL"                        "https://board.lensbridge.tech"
+    _ask TIMEZONE   "Timezone"                         "America/Toronto"
 
-    read -rp "Kiosk username (display account) [musallah]: " _k
-    KIOSK_USER="${_k:-musallah}"
-
-    read -rp "Kiosk URL                        [https://board.lensbridge.tech]: " _u
-    KIOSK_URL="${_u:-https://board.lensbridge.tech}"
-
-    read -rp "Timezone                         [America/Toronto]: " _tz
-    TIMEZONE="${_tz:-America/Toronto}"
+    # Three accounts, three trust levels, no overlap:
+    #   $ADMIN_USER     human login, passwordless sudo
+    #   musallahkiosk   runs Chromium against remote content; least trusted
+    #   musallahdaemon  holds the Ed25519 device key + the sudo allow-list
+    #
+    # Only the first is a choice. The other two are fixed because the systemd
+    # units and the sudoers allow-list name them literally — that is what lets
+    # those files ship verbatim in a .deb instead of being templated at install
+    # time. packaging/install.sh creates both; nothing here does.
+    #
+    # Aliasing any pair collapses a boundary: naming the human account
+    # `musallahdaemon` would hand the daemon NOPASSWD:ALL, and `musallahkiosk`
+    # would put the device key behind a browser exploit.
+    for _reserved in musallahdaemon "$KIOSK_USER"; do
+        [[ "$ADMIN_USER" == "$_reserved" ]] && \
+            error "'$_reserved' is reserved for a MusallahBoard service account."
+    done
 
     echo
-    if [[ "$SSH_KEY_REQUIRED" == "yes" ]]; then
-        echo "Paste the SSH public key for $ADMIN_USER:"
-        read -rp "> " SSH_PUB_KEY
-        [[ -z "$SSH_PUB_KEY" ]] && error "SSH public key is required on this platform."
-    else
-        echo "Paste the SSH public key for $ADMIN_USER (blank to skip SSH hardening):"
-        read -rp "> " SSH_PUB_KEY
+    SSH_PUB_KEY="${MB_ADMIN_SSH_KEY-}"
+    if [[ -n "$SSH_PUB_KEY" ]]; then
+        info "SSH key supplied for $ADMIN_USER"
+    elif [[ -t 0 ]]; then
+        if [[ "$SSH_KEY_REQUIRED" == "yes" ]]; then
+            echo "Paste the SSH public key for $ADMIN_USER:"
+            read -rp "> " SSH_PUB_KEY
+            [[ -z "$SSH_PUB_KEY" ]] && error "SSH public key is required on this platform."
+        else
+            echo "Paste the SSH public key for $ADMIN_USER (blank to skip SSH hardening):"
+            read -rp "> " SSH_PUB_KEY
+        fi
+    elif [[ "$SSH_KEY_REQUIRED" == "yes" ]]; then
+        # No key, no terminal to ask on, and this platform mandates one. Failing
+        # here beats handing back a headless Pi whose only admin account cannot
+        # be logged into.
+        error "SSH public key is required on this platform. Pass MB_ADMIN_SSH_KEY."
     fi
 
     echo
@@ -108,8 +203,7 @@ _prompt_config() {
     printf "  %-18s %s\n" "Timezone:"   "$TIMEZONE"
     [[ -z "$SSH_PUB_KEY" ]] && warn "  No SSH key — password auth stays enabled; harden after testing."
     echo
-    read -rp "Continue? (y/n): " -n 1 REPLY; echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    if ! _confirm "Continue? (y/n): "; then
         exit 0
     fi
     # Explicit: a trailing `cond && action` would make this function return the
@@ -196,40 +290,12 @@ _setup_admin_user() {
 }
 
 # ── Kiosk user ────────────────────────────────────────────────────────────────
-_setup_kiosk_user() {
-    section "Kiosk user: $KIOSK_USER"
-
-    if ! id "$KIOSK_USER" &>/dev/null; then
-        sudo useradd -m -s /bin/bash "$KIOSK_USER"
-        info "Created user $KIOSK_USER"
-    fi
-
-    # Locked password — no password-based login path
-    sudo passwd -l "$KIOSK_USER"
-
-    # Strip privilege groups (keep audio/video for browser multimedia)
-    for group in sudo adm dialout cdrom plugdev games users input netdev; do
-        sudo gpasswd -d "$KIOSK_USER" "$group" 2>/dev/null || true
-    done
-    sudo rm -f "/etc/sudoers.d/$KIOSK_USER"
-
-    # Shell exits immediately — belt-and-suspenders since SSH denies this user.
-    sudo tee "/home/$KIOSK_USER/.bashrc" > /dev/null << 'EOF'
-readonly PATH
-echo "This account is for kiosk use only. Direct shell access is not permitted."
-exit
-EOF
-
-    sudo tee "/home/$KIOSK_USER/.bash_profile" > /dev/null << EOF
-export PATH="/home/$KIOSK_USER/bin"
-EOF
-
-    sudo chown "$KIOSK_USER:$KIOSK_USER" \
-        "/home/$KIOSK_USER/.bashrc" \
-        "/home/$KIOSK_USER/.bash_profile"
-
-    info "$KIOSK_USER locked down (password locked, no sudo, no SSH, no shell)"
-}
+# Deliberately absent. Both $KIOSK_USER and $SERVICE_USER are created and
+# locked down by packaging/install.sh, which is the code that will become the
+# .deb's postinst — keeping account creation in one place stops the host
+# provisioner and the package from drifting into two different lockdowns.
+# _harden_ssh still names $KIOSK_USER in DenyUsers; that is just a config
+# string and does not require the account to exist yet.
 
 # ── Kiosk display stack ───────────────────────────────────────────────────────
 _setup_display_stack() {
@@ -265,11 +331,11 @@ EOF
         info "Bare-metal host — keeping hardware GL (no kiosk.env)"
     fi
 
-    # Persist the board base URL now, unconditionally. install.sh --board-url
-    # also writes this, but doing it here means the value survives even if the
-    # operator enrolls the agent before running install.sh — otherwise the
-    # agent composes an empty kiosk-url and the kiosk waits forever. The agent
-    # owns appending ?deviceId=<uuid> → /etc/musallahboard/kiosk-url.
+    # Persist the board base URL. This is the only writer on the setup.sh path
+    # — install.sh no longer takes --board-url, because a base URL is per-device
+    # state rather than package payload. Without it the agent composes an empty
+    # kiosk-url and the kiosk waits forever. The agent owns appending
+    # ?deviceId=<uuid> → /etc/musallahboard/kiosk-url.
     printf '%s\n' "$KIOSK_URL" | sudo tee /etc/musallahboard/board-url > /dev/null
     sudo chmod 0644 /etc/musallahboard/board-url
     info "Wrote /etc/musallahboard/board-url ($KIOSK_URL)"
@@ -406,15 +472,17 @@ _install_agent() {
         warn "No agent binary found under $REPO_ROOT (looked in build/ and repo root)."
         warn "Build it, then run install.sh yourself:"
         warn "  make build-$PLATFORM_ARCH"
-        warn "  sudo bash $REPO_ROOT/packaging/install.sh \"$REPO_ROOT\" \\"
-        warn "       --kiosk-user=$KIOSK_USER --board-url=$KIOSK_URL"
+        warn "  sudo bash $REPO_ROOT/packaging/install.sh \"$REPO_ROOT\" --kiosk"
+        warn "  sudo bash $REPO_ROOT/packaging/appliance-policy.sh"
         return 0
     fi
 
     info "Agent binary : $AGENT_BINARY"
-    sudo bash "$REPO_ROOT/packaging/install.sh" "$REPO_ROOT" \
-        --kiosk-user="$KIOSK_USER" \
-        --board-url="$KIOSK_URL"
+    # install.sh is payload only: files, accounts, unit enablement. It does not
+    # touch the boot target — that is appliance-policy.sh, below. board-url was
+    # already written unconditionally by _setup_display_stack.
+    sudo bash "$REPO_ROOT/packaging/install.sh" "$REPO_ROOT" --kiosk
+    sudo bash "$REPO_ROOT/packaging/appliance-policy.sh"
     AGENT_INSTALLED="yes"
     info "Agent + kiosk installed and enabled (enrollment still pending)"
 }
@@ -461,11 +529,31 @@ EOF
     fi
 
     [[ -n "$SSH_PUB_KEY" ]] && warn "Verify SSH works as $ADMIN_USER before rebooting!"
-    echo
-    read -rp "Reboot now? (y/n): " -n 1 REBOOT_REPLY; echo
-    if [[ $REBOOT_REPLY =~ ^[Yy]$ ]]; then
-        sudo reboot
+
+    # When the encryption has been armed the reboot is not a formality — it is
+    # the step that does the conversion — so say so rather than offering the
+    # same bare y/n as always.
+    if [[ "${LUKS_ARMED:-no}" == "yes" ]]; then
+        echo
+        warn "The next boot converts the root filesystem. It will sit on the"
+        warn "console saying DO NOT POWER OFF for several minutes."
     fi
+
+    echo
+    case "$MB_REBOOT" in
+        never)
+            info "Not rebooting (MB_REBOOT=never). Reboot when you are ready."
+            ;;
+        auto)
+            info "Rebooting now (MB_REBOOT=auto)."
+            sudo reboot
+            ;;
+        *)
+            if _confirm "Reboot now? (y/n): "; then
+                sudo reboot
+            fi
+            ;;
+    esac
     return 0
 }
 
@@ -482,7 +570,8 @@ musallahboard_setup_main() {
     _setup_hostname
     _setup_clock
     _setup_admin_user
-    _setup_kiosk_user
+    # No _setup_kiosk_user — packaging/install.sh creates and locks down both
+    # service accounts. See the "Kiosk user" note further up this file.
     _setup_display_stack
     _disable_tty1_autologin
     _harden_ssh
@@ -494,5 +583,11 @@ musallahboard_setup_main() {
     platform_after_hardening           # wrapper-provided: Pi-only extras (or noop)
 
     _install_agent                     # runs install.sh (no enrollment)
+
+    # Last, and deliberately so. platform_finalize is where the boot files get
+    # pointed at an encrypted root; doing it before the agent install would mean
+    # a board that had committed to the conversion and then failed to provision.
+    platform_finalize
+
     _print_summary
 }

@@ -4,3 +4,9 @@
 *.toml  text eol=lf
 *.go    text eol=lf
 Makefile text eol=lf
+
+# Extensionless executables that run inside an initramfs. Without these,
+# `* text=auto` hands a Windows checkout CRLF line endings and the kernel then
+# looks for an interpreter literally named "/bin/sh\r" — in an environment with
+# no useful error message and no way to log in and find out.
+packaging/luks/* text eol=lf

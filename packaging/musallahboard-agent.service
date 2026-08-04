@@ -6,9 +6,9 @@ Wants=network-online.target
 
 [Service]
 Type=notify
-User=admin
-Group=admin
-ExecStart=/usr/local/bin/musallahboard-agent run
+User=musallahdaemon
+Group=musallahdaemon
+ExecStart=/usr/bin/musallahboard-agent run
 Restart=always
 RestartSec=5
 
@@ -30,6 +30,20 @@ WatchdogSec=60s
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+
+# systemd creates and chowns these to User= on every start, so the installer
+# does not have to. /etc/musallahboard is NOT listed here on purpose: these
+# directories appear only when the service first starts, and `enroll` has to
+# be able to write agent.toml/agent.key before that has ever happened. The
+# installer creates the config dir itself for that reason.
+StateDirectory=musallahboard
+StateDirectoryMode=0750
+LogsDirectory=musallahboard
+LogsDirectoryMode=0750
+
+# Redundant with the two directives above (systemd makes those writable even
+# under ProtectSystem=strict) but kept explicit for /etc/musallahboard, which
+# is not managed by a *Directory= directive.
 ReadWritePaths=/etc/musallahboard /var/lib/musallahboard /var/log/musallahboard
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
