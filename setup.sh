@@ -676,6 +676,7 @@ exec cage -d -- "$BROWSER" \
     --overscroll-history-navigation=0 \
     --check-for-update-interval=31536000 \
     --enable-features=OverlayScrollbar \
+    --password-store=basic \
     --user-data-dir="$PROFILE_DIR" \
     --remote-debugging-port=9222 \
     --remote-debugging-address=127.0.0.1 \
