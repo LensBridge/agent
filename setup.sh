@@ -6,7 +6,7 @@
 # configured MusallahBoard kiosk, ready for enrollment.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/utmmsa/musallahboard-agent/main/setup.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/lensbridge/agent/main/setup.sh | bash
 #
 # Or with pre-supplied answers (no prompts):
 #   curl -fsSL ... | MB_HOSTNAME=lobby MB_ADMIN_USER=admin \
@@ -25,7 +25,7 @@ set -euo pipefail
 # ── Version and download URLs ─────────────────────────────────────────────────
 VERSION="${MB_VERSION:-0.1.0}"
 GITHUB_REPO="LensBridge/agent"
-RELEASE_URL="https://github.com/${GITHUB_REPO}/releases/download/v${VERSION}"
+RELEASE_URL="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}"
 BINARY_URL="${RELEASE_URL}/musallahboard-agent-arm64"
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
