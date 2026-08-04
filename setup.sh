@@ -471,27 +471,6 @@ RebootWatchdogSec=2min
 EOF
     info "Watchdog: systemd pings /dev/watchdog0 every 15s; reboots if it misses"
 
-    section "WiFi power save"
-    if nmcli device status 2>/dev/null | grep -q wifi; then
-        WIFI_CONN=$(nmcli -t -f NAME,TYPE connection show --active 2>/dev/null | grep ':wifi$' | cut -d: -f1 | head -1)
-        if [[ -n "$WIFI_CONN" ]]; then
-            sudo nmcli connection modify "$WIFI_CONN" 802-11-wireless.powersave 2
-            sudo iw dev wlan0 set power_save off 2>/dev/null || true
-            info "WiFi power save disabled for connection: $WIFI_CONN"
-        else
-            info "No active WiFi connection — skipping"
-        fi
-        sudo mkdir -p /etc/NetworkManager/conf.d
-        sudo tee /etc/NetworkManager/conf.d/wifi-powersave-off.conf > /dev/null << 'EOF'
-[connection]
-wifi.powersave = 2
-EOF
-        sudo systemctl reload NetworkManager 2>/dev/null || true
-        info "Global NM policy: wifi.powersave=disable"
-    else
-        info "No WiFi device detected — skipping"
-    fi
-
     section "Raspberry Pi Connect"
     sudo loginctl enable-linger "$ADMIN_USER"
     sudo systemctl stop wayvnc.service 2>/dev/null || true
