@@ -1,5 +1,8 @@
 VERSION ?= 0.1.0
-PKG     := github.com/lensbridge/agent
+# Must match the module path in go.mod exactly, case included: the linker
+# silently ignores -X for a symbol it cannot resolve, so a wrong-case path
+# here ships a binary that reports "dev" forever.
+PKG     := github.com/LensBridge/agent
 LDFLAGS := -s -w -X $(PKG)/internal/version.Version=$(VERSION)
 
 .PHONY: build build-arm64 build-amd64 tidy test clean \

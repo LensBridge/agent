@@ -24,6 +24,15 @@ import (
 // DefaultDebuggerURL is the default localhost JSON discovery endpoint.
 const DefaultDebuggerURL = "http://localhost:9222"
 
+// maxReplyBytes caps a single CDP reply. The library default is 32 KiB, which
+// is fine for Page.reload and Runtime.evaluate but nowhere near a screenshot:
+// Page.captureScreenshot returns the whole PNG base64-encoded in one text
+// frame, so a 1080p board came back as
+// "read: websocket: message too big: read limited at 32769 bytes".
+// Chromium is on loopback and we asked for the payload, so the limit exists
+// only to stop a wedged browser from exhausting memory.
+const maxReplyBytes = 32 << 20 // 32 MiB
+
 // Target is one /json tab entry. We only care about webSocketDebuggerUrl
 // and Type (which filters out DevTools UI tabs).
 type Target struct {
@@ -107,6 +116,7 @@ func (c *Client) Call(ctx context.Context, target Target, method string, params,
 		return fmt.Errorf("ws dial cdp: %w", err)
 	}
 	defer conn.CloseNow()
+	conn.SetReadLimit(maxReplyBytes)
 
 	id := c.id.Add(1)
 	req := rpcRequest{ID: id, Method: method, Params: params}

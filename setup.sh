@@ -355,18 +355,18 @@ setup_display_stack() {
     sudo chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR"
     sudo chmod 0751 "$CONFIG_DIR"
 
-    # Software-rendering fallback for VMs
+    # Kiosk environment: software-rendering fallback for VMs
     if systemd-detect-virt --quiet 2>/dev/null; then
         sudo tee "$CONFIG_DIR/kiosk.env" > /dev/null << 'EOF'
-WLR_RENDERER=pixman
 WLR_NO_HARDWARE_CURSORS=1
+WLR_RENDERER=pixman
 WLR_DRM_NO_MODIFIERS=1
 EOF
         sudo chmod 0644 "$CONFIG_DIR/kiosk.env"
         info "Virtualized host detected — wrote kiosk.env (software-render fallback)"
     else
         sudo rm -f "$CONFIG_DIR/kiosk.env"
-        info "Bare-metal host — keeping hardware GL"
+        info "Bare-metal host — no kiosk.env needed"
     fi
 
     # Persist the board base URL
