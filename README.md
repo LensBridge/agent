@@ -68,3 +68,7 @@ make build-arm64
 ```
 
 Requires Go 1.23+. Binaries land in `build/`.
+
+## Roadmap
+
+Eventually I would like to create a premade Pi image (or an image builder) with the agent preinstalled, so that users can just flash an SD card and have a ready-to-go kiosk. Unfortunately, everything has been testing my patience lately and I gave up on that for now.
