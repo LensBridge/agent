@@ -45,7 +45,9 @@ chmod +x ./setup.sh
 sudo ./setup.sh
 ```
 
-Follow the prompts to set the device up, then reboot. Upon reboot, the device will be at a splash screen waiting for enrollment. To enroll the device, run:
+Follow the prompts to set the device up, then reboot. Upon reboot, the device will be at a splash screen waiting for enrollment. Once the device has a network connection, that splash also prints its IP address on screen — use it to SSH in without hunting through DHCP leases.
+
+To enroll the device, run:
 
 ```bash
 sudo musallahboard-agent enroll \

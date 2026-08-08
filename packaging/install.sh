@@ -353,23 +353,26 @@ section "Service"
 # first boot.
 if ! systemd_running; then
     info "No running systemd (chroot/image build) — units enabled, nothing started"
-elif [[ -f "$CONFIG_PATH" ]]; then
+else
+    # Started with or without a config. An unenrolled agent no longer exits: it
+    # runs a pre-enrollment loop that paints this device's IP address onto the
+    # kiosk splash — which is how an operator finds the box to SSH into it —
+    # and picks up enrollment on its own, so nothing here has to be re-run.
     systemctl restart musallahboard-agent.service
     sleep 1
     systemctl status musallahboard-agent.service --no-pager --lines=5
+
     # Kiosk shows the splash immediately and the .path watcher swaps it for
     # the board when the agent writes kiosk-url — safe to start either way.
     if [[ "$WANT_KIOSK" == "yes" ]]; then
-        systemctl restart musallahboard-kiosk.service
+        systemctl restart musallahboard-kiosk.service || true
         info "Kiosk service (re)started"
     fi
-else
-    warn "No config found — agent not started."
-    warn "Run: musallahboard-agent enroll --token=X --backend=Y"
-    warn "Then: systemctl start musallahboard-agent.service"
-    if [[ "$WANT_KIOSK" == "yes" ]]; then
-        systemctl start musallahboard-kiosk.service || true
-        warn "Kiosk started on splash — it will load the board once enrolled."
+
+    if [[ ! -f "$CONFIG_PATH" ]]; then
+        warn "No config found — agent is waiting to be enrolled."
+        warn "The splash now shows this device's IP address."
+        warn "Run: musallahboard-agent enroll --token=X --backend=Y"
     fi
 fi
 

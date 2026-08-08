@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -19,7 +20,9 @@ import (
 	"github.com/LensBridge/agent/internal/enroll"
 	"github.com/LensBridge/agent/internal/keystore"
 	"github.com/LensBridge/agent/internal/kioskurl"
+	"github.com/LensBridge/agent/internal/netinfo"
 	"github.com/LensBridge/agent/internal/safemode"
+	"github.com/LensBridge/agent/internal/splash"
 	"github.com/LensBridge/agent/internal/version"
 	"github.com/LensBridge/agent/internal/wsclient"
 )
@@ -32,6 +35,13 @@ const (
 	// crash counter is reset. Shorter than systemd's StartLimitIntervalSec
 	// so that a flapping agent never gets credit for "stable."
 	stableRunDuration = 5 * time.Minute
+
+	// enrollPollInterval is how often an unenrolled agent re-reads its network
+	// state, repaints the kiosk splash, and checks whether a config appeared.
+	// Short enough that a board plugged into ethernet shows its address while
+	// the installer is still standing in front of it, and that enrollment
+	// takes effect without anyone restarting the service by hand.
+	enrollPollInterval = 5 * time.Second
 )
 
 func main() {
@@ -100,10 +110,29 @@ func runDaemon() {
 	logger := newLogger()
 	logger.Info("agent starting", "version", version.Version)
 
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
+
+	var wg sync.WaitGroup
+
+	// Started before the config gate: awaitEnrollment below can hold the
+	// process for days, and systemd's WatchdogSec does not pause for it.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		watchdogLoop(ctx)
+	}()
+
 	cfg, err := config.Load(defaultConfigPath)
 	if err != nil {
-		logger.Error("failed to load config (run `musallahboard-agent enroll` first)", "err", err)
-		os.Exit(1)
+		logger.Info("not enrolled yet — entering pre-enrollment mode", "reason", err)
+		cfg = awaitEnrollment(ctx, logger)
+		if cfg == nil { // context cancelled while waiting
+			wg.Wait()
+			logger.Info("shutdown complete")
+			return
+		}
+		logger.Info("enrollment detected", "deviceId", cfg.DeviceID)
 	}
 
 	sm := safemode.New(defaultStateDir)
@@ -111,9 +140,6 @@ func runDaemon() {
 	if safeMode {
 		logger.Warn("agent starting in safe mode (repeated crashes detected)")
 	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer cancel()
 
 	priv, err := keystore.Load(cfg.KeyPath)
 	if err != nil {
@@ -155,20 +181,14 @@ func runDaemon() {
 	dispatcher := commands.NewDispatcher(registry, logger)
 	wsClient.SetCommandHandler(dispatcher.Handle)
 
+	// Re-sent, and harmless, when awaitEnrollment already reported ready.
 	_, _ = daemon.SdNotify(false, daemon.SdNotifyReady)
-
-	var wg sync.WaitGroup
+	_, _ = daemon.SdNotify(false, "STATUS=enrolled")
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		wsClient.Run(ctx)
-	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		watchdogLoop(ctx)
 	}()
 
 	wg.Add(1)
@@ -187,6 +207,64 @@ func runDaemon() {
 	_, _ = daemon.SdNotify(false, daemon.SdNotifyStopping)
 	wg.Wait()
 	logger.Info("shutdown complete")
+}
+
+// awaitEnrollment blocks until a usable config appears at defaultConfigPath,
+// painting this device's IP address onto the kiosk splash while it waits.
+// Returns nil if ctx is cancelled first.
+//
+// Before this existed the daemon exited(1) on a missing config, so a freshly
+// imaged board burned through systemd's StartLimitBurst within a minute and
+// then sat dead behind a static "waiting for enrollment" card. Finding the box
+// to SSH into meant plugging in a keyboard or trawling the router's DHCP
+// leases. The screen is the one output an appliance always has, so an
+// unenrolled agent now stays up and uses it: no network client, no command
+// dispatcher, no key — just a poll loop and a CDP push.
+//
+// Waiting is a legitimate running state rather than a slow start, so we report
+// READY to systemd up front; otherwise Type=notify would hold the unit in
+// "activating" and kill it at TimeoutStartSec.
+func awaitEnrollment(ctx context.Context, logger *slog.Logger) *config.Config {
+	_, _ = daemon.SdNotify(false, daemon.SdNotifyReady)
+	_, _ = daemon.SdNotify(false, "STATUS=waiting for enrollment")
+
+	cdpClient := cdp.New("")
+
+	var last netinfo.Info
+	var reported bool
+
+	t := time.NewTicker(enrollPollInterval)
+	defer t.Stop()
+	for {
+		info := netinfo.Collect(ctx)
+		if !reported || !info.Equal(last) {
+			logger.Info("device network address",
+				"ipv4", info.IPv4,
+				"ssid", info.SSID,
+				"hostname", info.Hostname,
+			)
+			last, reported = info, true
+		}
+
+		// Chromium may not be up yet, or may be mid-restart, and once enrolled
+		// the board replaces the splash entirely — a push that finds no hook is
+		// the normal case, not an error worth a log line every tick.
+		switch err := splash.PushNetInfo(ctx, cdpClient, info); {
+		case err == nil, errors.Is(err, splash.ErrNoSplash):
+		default:
+			logger.Debug("could not update enrollment splash", "err", err)
+		}
+
+		if cfg, err := config.Load(defaultConfigPath); err == nil {
+			return cfg
+		}
+
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			return nil
+		}
+	}
 }
 
 // watchdogLoop pings systemd's WATCHDOG=1 at half the configured interval.

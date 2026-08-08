@@ -20,7 +20,10 @@
       "Bash(curl -s https://gitlab.com/buildroot.org/buildroot/-/raw/master/board/pc/genimage-bios.cfg)",
       "Bash(curl -s https://gitlab.com/buildroot.org/buildroot/-/raw/master/board/pc/post-image.sh)",
       "Bash(chmod +x C:/Code/MusallahBoard/agent/buildroot-external/board/musallahboard/post-build.sh C:/Code/MusallahBoard/agent/buildroot-external/board/musallahboard/post-image.sh)",
-      "WebSearch"
+      "WebSearch",
+      "Read(//c/Code/MusallahBoard/**)",
+      "Read(//c/Code/**)",
+      "Read(//c/Code/MusallahBoard/update-anim/**)"
     ]
   }
 }

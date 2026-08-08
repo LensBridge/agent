@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"strconv"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/LensBridge/agent/internal/cdp"
+	"github.com/LensBridge/agent/internal/netinfo"
 )
 
 // Snapshot is one heartbeat payload's worth of telemetry. Optional fields
@@ -58,8 +58,11 @@ func Collect(ctx context.Context, agentVersion string, safeMode bool, prober Pag
 	s.MemUsedMB, s.MemTotalMB, _ = readMemInfo()
 	s.DiskUsedPct, _ = readDiskUsedPct()
 	s.KioskAlive, s.DisplayedFrameKey = checkKiosk(ctx, prober)
-	s.IPAddrs = readIPs()
-	s.SSID, _ = readSSID(ctx)
+	// Unfiltered on purpose: the heartbeat reports every address the box holds,
+	// link-local included, so the backend can see a board that failed DHCP.
+	// The enrollment splash uses netinfo.Collect, which drops those.
+	s.IPAddrs = netinfo.IPv4Addrs()
+	s.SSID, _ = netinfo.SSID(ctx)
 	return s
 }
 
@@ -188,28 +191,4 @@ func systemdKioskActive(ctx context.Context) bool {
 	defer cancel()
 	out, _ := exec.CommandContext(cctx, "systemctl", "is-active", "musallahboard-kiosk.service").Output()
 	return strings.TrimSpace(string(out)) == "active"
-}
-
-func readIPs() []string {
-	var ips []string
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return nil
-	}
-	for _, a := range addrs {
-		if ipnet, ok := a.(*net.IPNet); ok && !ipnet.IP.IsLoopback() && ipnet.IP.To4() != nil {
-			ips = append(ips, ipnet.IP.String())
-		}
-	}
-	return ips
-}
-
-func readSSID(ctx context.Context) (string, error) {
-	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(cctx, "iwgetid", "-r").Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
 }
