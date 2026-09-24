@@ -224,14 +224,6 @@ func (u *Updater) apply(ctx context.Context, out *Outcome) error {
 	}
 	_ = fsutil.SyncDir(filepath.Dir(u.Binary))
 
-	// A board enrolled before v2 has no content key; the new agent could not
-	// verify any content without one. Best effort: the board may be offline.
-	if !u.hasContentKey() {
-		if o, err := u.Run(ctx, u.Binary, "trust", "fetch"); err != nil {
-			u.Logf("no content key is trusted and `trust fetch` failed (%v): %s", err, firstLine(o))
-		}
-	}
-
 	u.Logf("restarting %s", AgentUnit)
 	if o, err := u.Run(ctx, "systemctl", "restart", AgentUnit); err != nil {
 		return u.rollback(ctx, m.Version, fmt.Sprintf("restarting the agent failed: %v %s", err, firstLine(o)))
@@ -283,11 +275,6 @@ func (u *Updater) extract(pkg *mbu.Package, binary string) error {
 	}
 	// Executable by everyone only once it is complete and verified.
 	return os.Chmod(u.NewBinary, 0o755)
-}
-
-func (u *Updater) hasContentKey() bool {
-	s, err := trust.LoadRootOwned(u.TrustPath)
-	return err == nil && len(s.Content) > 0
 }
 
 func (u *Updater) writeOutcome(o Outcome) error {

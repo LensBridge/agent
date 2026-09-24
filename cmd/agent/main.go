@@ -63,11 +63,6 @@ func main() {
 		runSelfUpdate(os.Args[2:])
 	case "usb-import":
 		runUSBImport(os.Args[2:])
-	case "bundle", "app", "mode", "gate":
-		fmt.Fprintf(os.Stderr, "`%s` was removed in agent v2. Updates are signed packages now:\n"+
-			"  sudo musallahboard-agent import <file.mbu>      (see docs/architecture.md)\n"+
-			"  sudo musallahboard-agent service-port on|off    (replaces `mode offline|online`)\n", os.Args[1])
-		os.Exit(2)
 	case "version", "-v", "--version":
 		fmt.Printf("musallahboard-agent %s\n", version.Version)
 	case "-h", "--help", "help":

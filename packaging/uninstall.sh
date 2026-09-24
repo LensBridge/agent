@@ -20,8 +20,6 @@
 #   - the service port, if set up: the musallahboard-service-port and
 #     musallahboard-lan NetworkManager connections, its ufw rules, and the
 #     RTC boot-time clock unit
-#   - leftovers of v1 offline mode: the 'mbpush' push account (user, sudoers
-#     rule, sshd settings)
 #
 # What is preserved (unless --purge):
 #   - /etc/musallahboard/agent.toml      (device id, backend url)
@@ -95,13 +93,12 @@ rm -rf /usr/share/musallahboard
 info "Removed binary, units (agent, self-updater, USB import, kiosk watcher), udev rules, launcher, splash, sudoers"
 
 # State / logs: never preserved — they don't contain identity, just runtime crud.
-# Includes installed content and app releases, and v1's unsigned bundles
-# (/var/lib/musallahboard/offline) on a board that never ran setup.sh again.
+# Includes installed content and app releases.
 rm -rf /var/lib/musallahboard
 rm -rf /var/log/musallahboard
 info "Removed /var/lib/musallahboard and /var/log/musallahboard"
 
-# The service port (setup.sh --service-port, v1's --offline). Left behind, the
+# The service port (setup.sh --service-port). Left behind, the
 # service-port connection would keep eth0 able to act as a DHCP server with no
 # agent to switch it off.
 section "Removing the service port"
@@ -130,25 +127,6 @@ if [[ -e /etc/udev/rules.d/85-musallahboard-rtc.rules || -e /lib/systemd/system/
     # harmless), and fake-hwclock is not reinstalled.
     info "Removed the RTC boot-time clock unit"
 fi
-# v1's push account, if setup.sh never cleaned it up. Its only permission was
-# running the agent's gate, which no longer exists.
-if id mbpush &>/dev/null || [[ -e /etc/sudoers.d/musallahboard-push || -e /etc/ssh/sshd_config.d/99-musallahboard-push.conf ]]; then
-    rm -f /etc/sudoers.d/musallahboard-push
-    rm -f /etc/ssh/sshd_config.d/99-musallahboard-push.conf
-    if [[ -f /etc/ssh/sshd_config.d/kiosk-hardening.conf ]]; then
-        sed -i -E 's/^(AllowUsers\b.*)[[:space:]]mbpush([[:space:]]|$)/\1\2/' /etc/ssh/sshd_config.d/kiosk-hardening.conf
-    fi
-    if /usr/sbin/sshd -t 2>/dev/null; then
-        systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
-    else
-        warn "sshd's configuration does not validate after removing the push account; check /etc/ssh before logging out"
-    fi
-    if id mbpush &>/dev/null; then
-        userdel --remove mbpush 2>/dev/null || userdel mbpush || true
-    fi
-    info "Removed the push account (mbpush), its sudo rule and sshd settings"
-fi
-
 if [[ "$PURGE" == "yes" ]]; then
     warn "--purge: deleting device identity at /etc/musallahboard"
     warn "         (the Ed25519 private key will be lost — re-enrollment required)"

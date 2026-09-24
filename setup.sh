@@ -27,16 +27,14 @@
 # to provision the ethernet service port, where a laptop or phone plugged in
 # can upload signed update packages. USB sticks work on every board.
 #
-# Re-running this script is safe, and on a board set up for v1 it also removes
-# what v1 needed and v2 does not (the mbpush push account, unsigned bundles).
+# Re-running this script is safe.
 # =====================================================
 
 set -euo pipefail
 
 # ── Version and download URLs ─────────────────────────────────────────────────
 # MB_VERSION pins a release tag; the default follows the latest release, since
-# this script and the units it writes track the current agent. A pre-v2 tag
-# installs an agent that does not understand those units.
+# this script and the units it writes track the current agent.
 VERSION="${MB_VERSION:-latest}"
 GITHUB_REPO="LensBridge/agent"
 if [[ "$VERSION" == "latest" ]]; then
@@ -97,18 +95,6 @@ SERVICE_NET=10.77.0.0/24
 RTC_OVERLAY="dtoverlay=i2c-rtc,ds3231"
 SSHD_HARDENING=/etc/ssh/sshd_config.d/kiosk-hardening.conf
 
-# v1 leftovers that cleanup_v1 removes. Nothing creates these any more.
-V1_PUSH_USER=mbpush
-V1_PUSH_SUDOERS=/etc/sudoers.d/musallahboard-push
-V1_PUSH_SSHD_CONF=/etc/ssh/sshd_config.d/99-musallahboard-push.conf
-V1_DIRS=(
-    /etc/musallahboard/board-url
-    /var/lib/musallahboard/offline
-    /usr/share/musallahboard/board
-    /usr/share/musallahboard/board.tmp
-    /usr/share/musallahboard/board.d
-)
-
 # ── Argument parsing ──────────────────────────────────────────────────────────
 usage() {
     cat <<'USAGE'
@@ -127,7 +113,6 @@ Service port (after a normal setup and enrollment, while still online):
                          or phone plugged in can upload update packages, and
                          turn it on; skips the normal setup
   --rtc                  a DS3231 RTC is fitted: enable it, remove fake-hwclock
-  --offline              old name for --service-port
 
 Update packages (.mbu) are installed with a USB stick, an upload on the
 service port, or: sudo musallahboard-agent import <file.mbu>
@@ -136,10 +121,6 @@ USAGE
 
 for arg in "$@"; do
     case "$arg" in
-        --board-url|--board-url=*)
-            echo "--board-url is gone: there is no hosted board any more. The kiosk always shows the board" >&2
-            echo "served by the agent, which fetches the signed board app itself (or from a USB stick or upload)." >&2
-            exit 1 ;;
         --hostname=*)      export MB_HOSTNAME="${arg#*=}" ;;
         --admin-user=*)    export MB_ADMIN_USER="${arg#*=}" ;;
         --timezone=*)      export MB_TIMEZONE="${arg#*=}" ;;
@@ -147,20 +128,7 @@ for arg in "$@"; do
         --reboot=*)        export MB_REBOOT="${arg#*=}" ;;
         --yes|-y)          export MB_ASSUME_YES=1 ;;
         --service-port)    SERVICE_PORT=1 ;;
-        --offline)
-            echo "Note: --offline is now --service-port. There is no offline mode any more:" >&2
-            echo "      every board serves the board locally and syncs when it can." >&2
-            SERVICE_PORT=1 ;;
         --rtc)             SERVICE_PORT_RTC=1 ;;
-        --board-dist|--board-dist=*)
-            echo "--board-dist is gone. The board app is now a signed package (musallahboard-app-<version>.mbu)." >&2
-            echo "Online boards fetch it themselves. Otherwise install it from a USB stick, an upload on the" >&2
-            echo "service port, or: sudo musallahboard-agent import musallahboard-app-<version>.mbu" >&2
-            exit 1 ;;
-        --push-key|--push-key=*)
-            echo "--push-key is gone, and so is the mbpush SSH account. Laptops and phones upload signed" >&2
-            echo "packages to the board's service port (http://10.77.0.1/) instead; no key is needed." >&2
-            exit 1 ;;
         -h|--help)         usage; exit 0 ;;
         *) echo "Unknown option: $arg" >&2; usage >&2; exit 1 ;;
     esac
@@ -242,9 +210,8 @@ prompt_config() {
     _ask ADMIN_USER "Admin username (SSH/sudo)"        "ibra"
     _ask TIMEZONE   "Timezone"                         "America/Toronto"
 
-    # Validate admin user is not a reserved name. mbpush stays reserved:
-    # cleanup_v1 deletes a leftover v1 account of that name.
-    for _reserved in musallahdaemon "$KIOSK_USER" "$V1_PUSH_USER"; do
+    # Validate admin user is not a reserved name.
+    for _reserved in musallahdaemon "$KIOSK_USER"; do
         [[ "$ADMIN_USER" == "$_reserved" ]] && \
             error "'$_reserved' is reserved for a MusallahBoard service account."
     done
@@ -569,13 +536,6 @@ install_agent_binary() {
     sudo install -o root -g root -m 0755 "$tmp_binary" "$BINARY_DEST"
     rm -f "$tmp_binary"
     info "Installed $BINARY_DEST ($("$BINARY_DEST" version 2>/dev/null || echo 'version unknown'))"
-
-    # Updates from here on arrive as signed packages (USB, upload, or the
-    # release channel), not through this script.
-    if ! "$BINARY_DEST" help 2>&1 | grep -q "selfupdate apply"; then
-        warn "This agent predates signed packages (v2): self-updates, USB sticks and the upload"
-        warn "server will not work. Use a v2 release (MB_VERSION=<tag>, or unset for the latest)."
-    fi
 }
 
 # ── Install sudoers allow-list ────────────────────────────────────────────────
@@ -1099,160 +1059,11 @@ EOF
     return 0
 }
 
-# ══ v1 cleanup and the trust store (both modes) ═══════════════════════════════
-
-# Removes what v1 offline mode left on a board and v2 does not use: the
-# restricted push account (user, sudo rule, sshd drop-in, AllowUsers entry)
-# and the unsigned bundle and board-app directories. Safe to run on any board;
-# it only acts on what it finds. $1 is the admin account, which must keep its
-# SSH access.
-cleanup_v1() {
-    local admin="$1" found=0 d
-    if id "$V1_PUSH_USER" &>/dev/null || sudo test -e "$V1_PUSH_SUDOERS" || \
-       sudo test -e "$V1_PUSH_SSHD_CONF" || _allowusers_has_push; then
-        found=1
-    fi
-    for d in "${V1_DIRS[@]}"; do
-        if sudo test -e "$d" || sudo test -L "$d"; then found=1; fi
-    done
-    if [[ "$found" == "0" ]]; then
-        return 0
-    fi
-
-    section "Removing v1 offline mode leftovers"
-
-    # sshd first, while nothing else has changed: if it cannot be done
-    # safely, stop here with everything as it was.
-    _v1_remove_push_sshd "$admin"
-
-    # Removing a sudoers drop-in cannot break sudo; adding one could.
-    if sudo test -e "$V1_PUSH_SUDOERS"; then
-        sudo rm -f "$V1_PUSH_SUDOERS"
-        info "Removed $V1_PUSH_SUDOERS"
-    fi
-
-    if id "$V1_PUSH_USER" &>/dev/null; then
-        # prompt_config refuses mbpush as an admin name, and this refuses to
-        # delete whoever is running the script, so this is only ever v1's
-        # system account.
-        if [[ "$V1_PUSH_USER" == "$admin" || "$V1_PUSH_USER" == "$(id -un)" ]]; then
-            warn "Not removing '$V1_PUSH_USER': it is the account running this script."
-        else
-            sudo pkill -u "$V1_PUSH_USER" 2>/dev/null || true
-            sudo userdel --remove "$V1_PUSH_USER" 2>/dev/null || sudo userdel "$V1_PUSH_USER" || true
-            info "Removed the v1 push account '$V1_PUSH_USER'"
-        fi
-    fi
-
-    # Unsigned v1 data. The agent ignores it; nothing should serve it again.
-    for d in "${V1_DIRS[@]}"; do
-        if sudo test -e "$d" || sudo test -L "$d"; then
-            sudo rm -rf -- "$d"
-            info "Removed $d (v1, unsigned)"
-        fi
-    done
-}
-
-_allowusers_has_push() {
-    sudo grep -qE "^AllowUsers\b.*[[:space:]]$V1_PUSH_USER([[:space:]]|\$)" "$SSHD_HARDENING" 2>/dev/null
-}
-
-# Drops v1's sshd settings for the push account without being able to lock
-# the admin out: the files are backed up, sshd must accept the result
-# (`sshd -t`) and must still admit the admin, and otherwise the backups are
-# restored before anything is reloaded. The same safety net v1 used to add
-# them.
-_v1_remove_push_sshd() {
-    local admin="$1"
-    if ! sudo test -e "$V1_PUSH_SSHD_CONF" && ! _allowusers_has_push; then
-        return 0
-    fi
-    local probe="host=localhost,addr=127.0.0.1"
-    local backup
-    backup="$(mktemp -d)"
-    if sudo test -f "$SSHD_HARDENING"; then sudo cp -p "$SSHD_HARDENING" "$backup/hardening"; fi
-    if sudo test -f "$V1_PUSH_SSHD_CONF"; then sudo cp -p "$V1_PUSH_SSHD_CONF" "$backup/push"; fi
-    _restore_sshd() {
-        if [[ -f "$backup/hardening" ]]; then sudo cp -p "$backup/hardening" "$SSHD_HARDENING"; fi
-        if [[ -f "$backup/push" ]]; then sudo cp -p "$backup/push" "$V1_PUSH_SSHD_CONF"; fi
-        sudo rm -rf "$backup"
-    }
-
-    sudo rm -f "$V1_PUSH_SSHD_CONF"
-    if _allowusers_has_push; then
-        sudo sed -i -E "s/^(AllowUsers\b.*)[[:space:]]$V1_PUSH_USER([[:space:]]|\$)/\1\2/" "$SSHD_HARDENING"
-    fi
-
-    # Captured, not piped into grep -q: under pipefail an early grep exit can
-    # SIGPIPE sshd and turn a pass into a false failure.
-    local problem="" admin_cfg=""
-    if sudo /usr/sbin/sshd -t 2> /dev/null; then
-        admin_cfg="$(sudo /usr/sbin/sshd -T -C "user=$admin,$probe" 2>/dev/null || true)"
-    else
-        problem="sshd rejected the configuration without it"
-    fi
-    if [[ -z "$problem" ]] && sudo grep -qE '^AllowUsers\b' "$SSHD_HARDENING" 2>/dev/null && \
-       ! grep -qE "^allowusers .*\b$admin\b" <<< "$admin_cfg"; then
-        problem="$admin would no longer be allowed to log in"
-    fi
-    if [[ -n "$problem" ]]; then
-        _restore_sshd
-        error "Not removing the v1 push account's sshd settings: $problem. The previous sshd configuration was restored.
-       Check /etc/ssh/sshd_config.d/ by hand, then re-run."
-    fi
-    sudo rm -rf "$backup"
-
-    sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd 2>/dev/null || true
-    info "sshd: v1 push account settings removed; $admin unchanged"
-}
-
-# Pins the backend's content signing keys on a board that has none: one
-# enrolled before v2, whose enrollment response carried no keys. Only on an
-# enrolled board, only when the backend answers, and never fatal: without the
-# keys the board keeps showing what it has and refuses new content until
-# `sudo musallahboard-agent trust fetch` succeeds.
-fetch_trust_if_needed() {
-    sudo test -s "$CONFIG_DIR/agent.toml" || return 0
-    [[ -x "$BINARY_DEST" ]] || return 0
-
-    section "Trust store"
-
-    if ! "$BINARY_DEST" help 2>&1 | grep -q "trust show"; then
-        warn "The installed agent predates signed packages; not fetching signing keys."
-        return 0
-    fi
-    # Compact first, so the check does not depend on how the file is laid out.
-    if tr -d '[:space:]' < "$TRUST_PATH" 2>/dev/null | grep -qF '"content":[{'; then
-        info "A content signing key is already pinned in $TRUST_PATH"
-        return 0
-    fi
-
-    local backend
-    backend="$(sudo sed -n -E 's/^[[:space:]]*backend_url[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' "$CONFIG_DIR/agent.toml" | head -n1)"
-    if [[ -z "$backend" ]]; then
-        warn "No backend_url in $CONFIG_DIR/agent.toml; not fetching signing keys."
-        return 0
-    fi
-    if ! curl -fsS --max-time 15 -o /dev/null "${backend%/}/api/agent/signing-keys" 2>/dev/null; then
-        warn "No content signing key is pinned, and $backend is not reachable right now."
-        warn "Run 'sudo musallahboard-agent trust fetch' once it is, or content updates will be refused."
-        return 0
-    fi
-    if sudo "$BINARY_DEST" trust fetch; then
-        info "Pinned the backend's content signing keys (trust on first use over TLS)"
-        # Picked up on its next start by a daemon that is already running.
-        sudo systemctl try-restart musallahboard-agent.service || true
-    else
-        warn "'musallahboard-agent trust fetch' failed; content updates will be refused until it succeeds."
-    fi
-}
-
 # ══ Service port (setup.sh --service-port) ════════════════════════════════════
 # Everything below runs only with --service-port, on a board that has already
 # been set up and enrolled. See docs/architecture.md, sections 9.5 and 13.
 # Every step is idempotent: re-running it is safe, and is how you add --rtc
-# later. It also brings a board set up for v1 up to date: v2 units, udev
-# rules and directories, and the v1 push account removed.
+# later.
 
 service_port_preflight() {
     [[ $EUID -eq 0 ]] && error "Do not run as root. Run as a user with sudo access."
@@ -1263,9 +1074,6 @@ service_port_preflight() {
         error "nmcli not found. The service port needs NetworkManager (the Raspberry Pi OS default)."
     [[ -x "$BINARY_DEST" ]] || \
         error "$BINARY_DEST is not installed. Run the normal setup (without --service-port) first."
-    "$BINARY_DEST" help 2>&1 | grep -q "service-port on|off" || \
-        error "The installed agent predates the service port (v2). Update it first: re-run the normal
-       setup (bash setup.sh), or packaging/update.sh with a v2 binary."
     sudo test -s "$CONFIG_DIR/agent.toml" || \
         error "This board is not enrolled yet. Enroll it online first:
        sudo musallahboard-agent enroll --token=<token> --backend=<url>"
@@ -1285,16 +1093,6 @@ service_port_install_packages() {
     export DEBIAN_FRONTEND=noninteractive
     sudo apt-get update -qq
     sudo apt-get install -y "${pkgs[@]}"
-}
-
-# The units, rules and directories the normal setup installs. Repeated here so
-# that a board set up for v1, whose agent was then replaced by hand, gets them
-# too. On a board set up by this version it rewrites the same files.
-service_port_v2_payload() {
-    install_systemd_units
-    install_udev_rules
-    install_state_dirs
-    enable_services
 }
 
 # Prints the name of a saved (not auto-generated) wired profile eth0 could
@@ -1470,17 +1268,13 @@ EOF
 }
 
 service_port_main() {
-    local admin="${SUDO_USER:-$(id -un)}"
     service_port_preflight
     service_port_install_packages
-    cleanup_v1 "$admin"
-    service_port_v2_payload
     service_port_profiles
     service_port_firewall
     if [[ "$SERVICE_PORT_RTC" == "1" ]]; then
         service_port_rtc
     fi
-    fetch_trust_if_needed
     service_port_switch_on
     service_port_summary
 }
@@ -1505,7 +1299,6 @@ main() {
     setup_display_stack
     disable_tty1_autologin
     harden_ssh
-    cleanup_v1 "$ADMIN_USER"
     setup_logind
     setup_journal
     setup_unattended_upgrades
@@ -1521,7 +1314,6 @@ main() {
     install_splash_page
     enable_services
     apply_appliance_policy
-    fetch_trust_if_needed
 
     print_summary
 }

@@ -154,8 +154,7 @@ func startUploadServer(ctx context.Context, logger *slog.Logger, cfg *config.Con
 }
 
 // startCommandChannel holds the backend WebSocket (telemetry and remote
-// commands) open, as before v2. content.sync is the one new command: it asks
-// for a sync now.
+// commands) open. config.refresh also asks the content syncer for a sync now.
 func startCommandChannel(ctx context.Context, logger *slog.Logger, cfg *config.Config, priv []byte,
 	safeMode bool, cdpClient *cdp.Client, syncer *boardsync.Syncer, wg *sync.WaitGroup) {
 	wsClient := wsclient.New(cfg, priv, logger, version.Version, safeMode)
@@ -219,4 +218,3 @@ func goRun(wg *sync.WaitGroup, f func()) {
 		f()
 	}()
 }
-

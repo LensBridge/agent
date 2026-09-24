@@ -121,7 +121,7 @@ Pushing a tag (`0.3.0`) runs `.github/workflows/release.yml`: tests, builds, sig
 
 ### Trust management
 
-Keys live in `/etc/musallahboard/trust.json` (root-owned). Content keys are pinned at enrollment; a board enrolled before v2 gets them with `sudo musallahboard-agent trust fetch` (`setup.sh` does this for you). Release keys are compiled in and can be extended there.
+Keys live in `/etc/musallahboard/trust.json` (root-owned). Content keys are pinned at enrollment; `sudo musallahboard-agent trust fetch` re-reads them from the backend (for example after a key rotation). Release keys are compiled in and can be extended there.
 
 ```bash
 sudo musallahboard-agent trust show

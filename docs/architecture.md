@@ -226,10 +226,9 @@ packer (`scripts/package-mbu.mjs`) producing the same format.
 
 - **Content keys** are pinned at enrollment: `POST /api/agent/enroll` returns
   them (`contentSigningKeys`) over the same TLS connection that establishes the
-  device identity. Boards enrolled before v2 fetch them once with
-  `sudo musallahboard-agent trust fetch` (`GET /api/agent/signing-keys`,
-  trust on first use over TLS; `setup.sh` and the root self-updater run it when
-  no content key is present).
+  device identity. `sudo musallahboard-agent trust fetch`
+  (`GET /api/agent/signing-keys`, over TLS) re-reads them, for example after a
+  key rotation.
 - **Release keys** are compiled into the agent (`-ldflags -X
   github.com/LensBridge/agent/internal/trust.BuiltinReleaseKeys=<b64>[,<b64>]`)
   and may be extended in `trust.json`. A dev build without a compiled key
@@ -279,8 +278,6 @@ prunes the rest; media not referenced by a kept bundle is deleted.
 High-water marks live here, not only in the installed directories, so deleting
 a bundle cannot reopen a rollback. Written atomically (tmp, fsync, rename).
 
-Migration: v1 paths (`/var/lib/musallahboard/offline`, `/usr/share/musallahboard/board`)
-held unsigned data and are ignored and removed by `setup.sh`.
 
 ## 7. Local kiosk API (`127.0.0.1:8080`, local API version 2)
 
@@ -303,7 +300,7 @@ section 9.3) every 30 minutes. The payload endpoint substitutes that object for
 `weather` while it is less than 3 hours old; otherwise `weather` stays `null`
 and the page hides the chip.
 
-**Picking today's payload** (unchanged from v1): `today` is the current date in
+**Picking today's payload**: `today` is the current date in
 the bundle's `timezone`; serve `firstDay` if `today < firstDay`, `lastDay` if
 `today > lastDay`, else `today`.
 
@@ -447,7 +444,7 @@ only repeat an idempotent read.
 | `GET /api/agent/weather` | device (9.2) | `{"weather": <object> or null, "fetchedAt": "<ISO-8601>"}`. Never a 5xx for missing weather: `weather` is `null`. |
 | `GET /api/agent/signing-keys` | none | `{"content": [{"keyId", "publicKey"}]}` |
 | `POST /api/agent/enroll` | token | unchanged, plus `contentSigningKeys: [{"keyId", "publicKey"}]` |
-| `GET /api/admin/board/devices/{id}/offline-bundle?days=14` | `BOARD_DEVICE_READ` | now the signed v2 `.mbu` (filename `musallahboard-content-<id8>-<firstDay>.mbu`), media always included |
+| `GET /api/admin/board/devices/{id}/offline-bundle?days=14` | `BOARD_DEVICE_READ` | the signed `.mbu` (filename `musallahboard-content-<id8>-<firstDay>.mbu`), media always included |
 
 Backend configuration: `musallahboard.content-signing.private-key` (base64
 seed; env `MUSALLAHBOARD_CONTENT_SIGNING_KEY`), and optionally
@@ -556,7 +553,7 @@ unchanged. New keys, all optional:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `service_port` | `false` | Run the eth0 service port and the upload server. Set by `musallahboard-agent service-port on|off`. v1's `mode = "offline"` is read as `service_port = true`. |
+| `service_port` | `false` | Run the eth0 service port and the upload server. Set by `musallahboard-agent service-port on|off`. |
 | `usb_import` | `true` | Accept USB sticks. |
 | `content_sync` | `true` | Sync content from the backend. |
 | `content_days` | `7` | Days per synced content package (1-31). |
@@ -580,8 +577,7 @@ route and cost nothing, and the moment it gets a network it starts syncing.
    `/usr/bin/.musallahboard-agent.new`; runs `.new version` and requires the
    expected version; copies the current binary to
    `/usr/lib/musallahboard/agent.prev`; renames the new binary into place;
-   runs `trust fetch` if there is no content key; restarts
-   `musallahboard-agent.service`.
+   restarts `musallahboard-agent.service`.
 4. Health check: within 120 s, `GET http://127.0.0.1:8080/api/local/status`
    must report the new `agentVersion`. Otherwise the updater restores
    `agent.prev`, restarts the service, and adds the version to
@@ -592,7 +588,7 @@ route and cost nothing, and the moment it gets a network it starts syncing.
 
 ## 13. Service port (eth0)
 
-Unchanged from v1 apart from the name of the switch: two NetworkManager
+Two NetworkManager
 profiles on eth0, `musallahboard-lan` (DHCP client, priority 0,
 `ipv4.dhcp-timeout 30`) tried first, then `musallahboard-service-port`
 (`ipv4.method shared`, `10.77.0.1/24`, priority -999), whose autoconnect is

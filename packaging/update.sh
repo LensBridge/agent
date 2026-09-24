@@ -88,11 +88,3 @@ else
     warn "$SERVICE not installed — binary replaced but no service to restart."
     warn "Run install.sh to fully install."
 fi
-
-# A board set up before v2 has the new binary now but not the units it relies
-# on for self-updates and USB sticks. Say so rather than fail later.
-if [[ ! -e /lib/systemd/system/musallahboard-agent-update.path || \
-      ! -e /etc/udev/rules.d/90-musallahboard-usb.rules ]]; then
-    warn "The v2 units (self-updater, USB import) are not installed on this board."
-    warn "Re-run install.sh from the release tarball, or setup.sh, to add them."
-fi

@@ -63,8 +63,7 @@ func loadConfigCLI() *config.Config {
 // ── service-port ──────────────────────────────────────────────────────────────
 
 // runServicePort is `service-port on|off [--force]` (docs/architecture.md,
-// section 13). It replaces v1's `mode offline|online`: in v2 there is no mode,
-// only whether eth0 offers the service port and the upload server.
+// section 13): whether eth0 offers the service port and the upload server.
 func runServicePort(args []string) {
 	force := false
 	var rest []string

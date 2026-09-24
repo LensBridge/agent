@@ -107,7 +107,7 @@ func NewKey(pub ed25519.PublicKey, note string) Key {
 }
 
 // Load reads the store at path. A missing file is an empty store, not an
-// error: a board enrolled before v2 has none until `trust fetch` runs.
+// error: an unenrolled board has none yet.
 func Load(path string) (*Store, error) {
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {

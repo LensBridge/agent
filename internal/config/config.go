@@ -1,6 +1,6 @@
 // Package config persists the agent's runtime identity at /etc/musallahboard/agent.toml.
 //
-// Schema (v2 — Ed25519 era):
+// Schema:
 //
 //	device_id      = "uuid"
 //	backend_url    = "https://api.utmmsa.ca"
@@ -9,10 +9,9 @@
 //
 // Optional keys (docs/architecture.md, section 11): service_port, usb_import,
 // content_sync, content_days, auto_update, app_channel_url, agent_channel_url.
-// v1's `mode = "offline"` is still read, as service_port = true.
 //
-// The HMAC `device_secret` field from the v1 schema is gone; identity is now
-// proved by signing a server-issued challenge with the Ed25519 key at KeyPath.
+// Identity is proved by signing a server-issued challenge with the Ed25519 key
+// at KeyPath.
 package config
 
 import (
@@ -26,13 +25,6 @@ import (
 // DefaultKeyPath is where Save writes if the caller leaves Config.KeyPath empty.
 const DefaultKeyPath = "/etc/musallahboard/agent.key"
 
-// v1 modes. v2 has no modes (every board is local-first); a v1 config's
-// mode = "offline" only means the service port should be on.
-const (
-	ModeOnline  = "online"
-	ModeOffline = "offline"
-)
-
 // Channel defaults (section 9.4). %s is the board's GOARCH.
 const (
 	DefaultAppChannelURL   = "https://github.com/LensBridge/MusallahBoard/releases/latest/download/app-channel.json"
@@ -44,16 +36,13 @@ const (
 //
 // The first four fields are required at runtime; Load returns an error if any
 // is empty. Everything else is optional: a nil pointer means "not set", and
-// the accessor methods supply the default, so a config written by any older
-// agent keeps working unchanged.
+// the accessor methods supply the default, so a freshly enrolled config needs
+// none of them.
 type Config struct {
 	DeviceID     string `toml:"device_id"`
 	BackendURL   string `toml:"backend_url"`
 	WebSocketURL string `toml:"websocket_url"`
 	KeyPath      string `toml:"key_path"`
-
-	// Mode is v1's; read for compatibility, never written by v2.
-	Mode string `toml:"mode,omitempty"`
 
 	ServicePortSet  *bool   `toml:"service_port,omitempty"`
 	USBImportSet    *bool   `toml:"usb_import,omitempty"`
@@ -73,7 +62,7 @@ func boolOr(p *bool, def bool) bool {
 
 // ServicePort reports whether the eth0 service port and upload server run.
 func (c *Config) ServicePort() bool {
-	return boolOr(c.ServicePortSet, c.Mode == ModeOffline)
+	return boolOr(c.ServicePortSet, false)
 }
 
 // USBImport reports whether USB sticks are accepted.
@@ -120,14 +109,11 @@ func Load(path string) (*Config, error) {
 	if c.DeviceID == "" || c.BackendURL == "" || c.WebSocketURL == "" {
 		return nil, fmt.Errorf("config %s is incomplete (run `agent enroll` first)", path)
 	}
-	if c.Mode != "" && c.Mode != ModeOnline && c.Mode != ModeOffline {
-		return nil, fmt.Errorf("config %s: unknown mode %q", path, c.Mode)
-	}
 	return &c, nil
 }
 
 // SetServicePort rewrites service_port in the config at path, leaving every
-// other field as it was (and dropping v1's mode, which it supersedes). The file
+// other field as it was. The file
 // keeps its owner: this runs as root via sudo, but the daemon reading the
 // result runs as the service user, and Save creates a fresh 0600 file that
 // would otherwise belong to root.
@@ -137,7 +123,6 @@ func SetServicePort(path string, on bool) error {
 		return err
 	}
 	owner, haveOwner := fileOwner(path)
-	c.Mode = ""
 	c.ServicePortSet = &on
 	if err := Save(path, c); err != nil {
 		return err

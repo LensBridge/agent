@@ -21,8 +21,8 @@ import (
 )
 
 const (
-	// Format and FormatVersion identify this layout. Version 1 was the
-	// unsigned v1 offline bundle; it is not accepted.
+	// Format and FormatVersion identify this layout. Any other version is
+	// refused.
 	Format        = "mbu"
 	FormatVersion = 2
 

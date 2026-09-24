@@ -133,7 +133,7 @@ func TestApplyOK(t *testing.T) {
 			t.Errorf("%s left behind", p)
 		}
 	}
-	want := []string{".musallahboard-agent.new version", "musallahboard-agent trust fetch", "systemctl restart musallahboard-agent.service"}
+	want := []string{".musallahboard-agent.new version", "systemctl restart musallahboard-agent.service"}
 	if fmt.Sprint(h.cmds) != fmt.Sprint(want) {
 		t.Errorf("commands = %q, want %q", h.cmds, want)
 	}
@@ -143,19 +143,6 @@ func TestApplyOK(t *testing.T) {
 	// No temp directories left in TempRoot.
 	if m, _ := filepath.Glob(filepath.Join(h.u.TempRoot, "musallahboard-selfupdate-*")); len(m) != 0 {
 		t.Errorf("work dirs left: %v", m)
-	}
-}
-
-func TestApplyNoTrustFetchWithContentKey(t *testing.T) {
-	h := newHarness(t, true)
-	h.stage(t, "0.4.0", "arm64", releaseKey)
-	if _, err := h.u.Apply(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	for _, c := range h.cmds {
-		if strings.Contains(c, "trust fetch") {
-			t.Fatalf("trust fetch run although a content key is trusted: %q", h.cmds)
-		}
 	}
 }
 

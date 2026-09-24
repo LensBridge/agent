@@ -61,9 +61,8 @@ NTP_SYNC_TIMEOUT_SEC="${NTP_SYNC_TIMEOUT_SEC:-90}"
 # Anything left unset is still asked for interactively, so `bash setup.sh` by
 # hand behaves exactly as it always has.
 #
-# MB_KIOSK_USER is gone: the display account is fixed at `musallahkiosk`
-# because musallahboard-kiosk.service names it in User= and ExecStopPost, and
-# a .deb ships that unit as a static file.
+# The display account is fixed at `musallahkiosk`: musallahboard-kiosk.service
+# names it in User= and ExecStopPost, and a .deb ships that unit as a static file.
 MB_ASSUME_YES="${MB_ASSUME_YES:-0}"
 MB_REBOOT="${MB_REBOOT:-ask}"
 

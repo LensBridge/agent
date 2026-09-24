@@ -85,7 +85,7 @@ rm -f /etc/sudoers.d/musallahboard-agent
 info "Sudoers removed"
 
 # ── Remove the service port ───────────────────────────────────────────────────
-# setup.sh --service-port (v1: --offline). Left behind, the service-port
+# setup.sh --service-port. Left behind, the service-port
 # connection would keep eth0 able to act as a DHCP server with no agent to
 # switch it off.
 section "Removing the service port"
@@ -103,20 +103,6 @@ if command -v ufw &>/dev/null; then
     ufw delete allow in on eth0 from 10.77.0.0/24 to any port 80 proto tcp >/dev/null 2>&1 || true
 fi
 info "Service port removed (if it was set up)"
-
-# ── Remove the v1 push account ────────────────────────────────────────────────
-# Only on a board set up for v1 offline mode and never re-run through v2
-# setup.sh, which removes it.
-if id mbpush &>/dev/null || [[ -e /etc/sudoers.d/musallahboard-push || -e /etc/ssh/sshd_config.d/99-musallahboard-push.conf ]]; then
-    section "Removing the v1 push account"
-    rm -f /etc/sudoers.d/musallahboard-push
-    rm -f /etc/ssh/sshd_config.d/99-musallahboard-push.conf
-    if id mbpush &>/dev/null; then
-        pkill -9 -u mbpush 2>/dev/null || true
-        userdel --remove mbpush 2>/dev/null || userdel mbpush 2>/dev/null || true
-    fi
-    info "Removed the push account (mbpush), its sudo rule and sshd settings"
-fi
 
 # ── Remove config and state ───────────────────────────────────────────────────
 section "Removing configuration and state"

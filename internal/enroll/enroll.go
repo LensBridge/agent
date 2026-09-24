@@ -14,7 +14,6 @@ package enroll
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -95,13 +94,12 @@ func Run(ctx context.Context, logger *slog.Logger, p Params) error {
 
 	deviceID := enrolled.DeviceId.String()
 
-	// contentSigningKeys is newer than the generated client, so it is read
-	// from the same body alongside the generated type. A backend that does
-	// not send it yet decodes to an empty list, handled below.
-	var extra struct {
-		ContentSigningKeys []SigningKey `json:"contentSigningKeys"`
+	var contentKeys []SigningKey
+	if enrolled.ContentSigningKeys != nil {
+		for _, k := range *enrolled.ContentSigningKeys {
+			contentKeys = append(contentKeys, SigningKey{KeyID: k.KeyId, PublicKey: k.PublicKey})
+		}
 	}
-	_ = json.Unmarshal(resp.Body, &extra)
 
 	// The backend sometimes constructs the WebSocket URL from the HTTP request's
 	// Host header, which drops the port when behind a reverse proxy or when the
@@ -141,12 +139,12 @@ func Run(ctx context.Context, logger *slog.Logger, p Params) error {
 	if trustPath == "" {
 		trustPath = trust.DefaultPath
 	}
-	if len(extra.ContentSigningKeys) == 0 {
+	if len(contentKeys) == 0 {
 		logger.Warn("the backend sent no content signing keys, so this board cannot verify content until they are fetched: run `sudo musallahboard-agent trust fetch` once the backend has a content key configured")
-	} else if added, err := PinContentKeys(trustPath, extra.ContentSigningKeys, "lensbridge"); err != nil {
+	} else if added, err := PinContentKeys(trustPath, contentKeys, "lensbridge"); err != nil {
 		logger.Warn("could not pin the backend's content signing keys; run `sudo musallahboard-agent trust fetch`", "err", err, "path", trustPath)
 	} else {
-		logger.Info("content signing keys pinned", "received", len(extra.ContentSigningKeys), "added", len(added), "path", trustPath)
+		logger.Info("content signing keys pinned", "received", len(contentKeys), "added", len(added), "path", trustPath)
 	}
 
 	logger.Info("device enrolled",

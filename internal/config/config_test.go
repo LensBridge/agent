@@ -22,31 +22,15 @@ func writeConfig(t *testing.T, body string) string {
 	return p
 }
 
-func TestServicePortFromV1Mode(t *testing.T) {
-	cases := []struct {
-		extra string
-		want  bool
-	}{
-		{"", false},
-		{`mode = "online"`, false},
-		{`mode = "offline"`, true},
-		{`service_port = true`, true},
-		{"mode = \"offline\"\nservice_port = false", false},
-	}
-	for _, tc := range cases {
-		c, err := Load(writeConfig(t, baseTOML+tc.extra+"\n"))
+func TestServicePort(t *testing.T) {
+	for extra, want := range map[string]bool{"": false, "service_port = true": true, "service_port = false": false} {
+		c, err := Load(writeConfig(t, baseTOML+extra+"\n"))
 		if err != nil {
-			t.Fatalf("%q: %v", tc.extra, err)
+			t.Fatalf("%q: %v", extra, err)
 		}
-		if got := c.ServicePort(); got != tc.want {
-			t.Errorf("%q: ServicePort = %v, want %v", tc.extra, got, tc.want)
+		if got := c.ServicePort(); got != want {
+			t.Errorf("%q: ServicePort = %v, want %v", extra, got, want)
 		}
-	}
-}
-
-func TestLoadRejectsUnknownMode(t *testing.T) {
-	if _, err := Load(writeConfig(t, baseTOML+`mode = "sideways"`+"\n")); err == nil {
-		t.Fatal("unknown mode accepted")
 	}
 }
 
@@ -68,7 +52,7 @@ func TestDefaults(t *testing.T) {
 }
 
 func TestSetServicePortKeepsOtherFields(t *testing.T) {
-	p := writeConfig(t, baseTOML+`mode = "offline"`+"\n")
+	p := writeConfig(t, baseTOML+"service_port = true\n")
 	if err := SetServicePort(p, false); err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +60,7 @@ func TestSetServicePortKeepsOtherFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.ServicePort() || c.Mode != "" || c.DeviceID != "3f2a1b4c-0000-4000-8000-000000000001" {
+	if c.ServicePort() || c.DeviceID != "3f2a1b4c-0000-4000-8000-000000000001" {
 		t.Errorf("after SetServicePort(false): %+v", c)
 	}
 	if err := SetServicePort(filepath.Join(t.TempDir(), "missing.toml"), true); err == nil {

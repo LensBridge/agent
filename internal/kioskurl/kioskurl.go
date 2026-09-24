@@ -7,9 +7,6 @@
 // doubles as the launcher's enrollment sentinel: until it exists the kiosk
 // shows the "waiting for enrollment" splash, and the systemd .path watcher
 // restarts the kiosk when it appears or changes.
-//
-// v1 composed <board-url>?deviceId=<id> for the hosted site. The hosted site
-// is gone; /etc/musallahboard/board-url is no longer read.
 package kioskurl
 
 import (

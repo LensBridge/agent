@@ -35,4 +35,3 @@ func TestWriteLocalRejectsEmpty(t *testing.T) {
 		t.Fatal("expected an error")
 	}
 }
-

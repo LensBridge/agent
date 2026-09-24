@@ -84,8 +84,8 @@ KIOSK_WATCH_DEST=${UNIT_DIR}/musallahboard-kiosk-watch.path
 KIOSK_RELOAD_DEST=${UNIT_DIR}/musallahboard-kiosk-reload.service
 KIOSK_LAUNCHER_DEST=/usr/bin/start-kiosk.sh
 KIOSK_SHARE_DIR=/usr/share/musallahboard
-# v2 (docs/architecture.md): the root self-updater, the USB import helper and
-# the udev rules that feed them.
+# The root self-updater, the USB import helper and the udev rules that feed
+# them (docs/architecture.md, sections 9.6 and 12).
 UPDATE_PATH_DEST=${UNIT_DIR}/musallahboard-agent-update.path
 UPDATE_SERVICE_DEST=${UNIT_DIR}/musallahboard-agent-update.service
 USB_SERVICE_DEST=${UNIT_DIR}/musallahboard-usb-import@.service
@@ -109,14 +109,6 @@ while [[ $# -gt 0 ]]; do
         --backend)  BACKEND_URL="$2";  shift 2 ;;
         --backend=*) BACKEND_URL="${1#--backend=}"; shift ;;
         --kiosk)        WANT_KIOSK=yes; shift ;;
-        # Accepted only to fail loudly: the account is fixed now, and silently
-        # ignoring a name here would install a kiosk running as the wrong user.
-        --kiosk-user|--kiosk-user=*)
-            error "--kiosk-user is gone; the display account is always '$KIOSK_USER'. Use --kiosk." ;;
-        # There is no hosted board any more: the kiosk always shows the
-        # board the agent serves (docs/architecture.md section 14).
-        --board-url|--board-url=*)
-            error "--board-url is gone: the kiosk always shows the board served by the agent." ;;
         --*)        error "Unknown flag: $1" ;;
         *)
             [[ -n "$AGENT_DIR" ]] && error "Unexpected argument: $1"
@@ -424,16 +416,10 @@ if [[ -n "$ENROLL_TOKEN" ]]; then
         info "Device enrolled. Config: $CONFIG_PATH"
     fi
 
-    # Whatever wrote it, trust.json is root's. And a backend that predates
-    # contentSigningKeys in the enroll response leaves no content key, which
-    # `trust fetch` fills in (trust on first use over TLS).
+    # Whatever wrote it, trust.json is root's.
     if [[ -f "$TRUST_PATH" ]]; then
         chown root:root "$TRUST_PATH"
         chmod 0644 "$TRUST_PATH"
-    fi
-    if ! tr -d '[:space:]' < "$TRUST_PATH" 2>/dev/null | grep -qF '"content":[{'; then
-        "$BINARY_DEST" trust fetch \
-            || warn "No content signing key yet, and 'trust fetch' failed. Run 'sudo musallahboard-agent trust fetch' once the backend is reachable."
     fi
 fi
 

@@ -118,8 +118,8 @@ func TestRunEnrollsAndPersistsConfig(t *testing.T) {
 	}
 }
 
-// A backend that predates contentSigningKeys still enrolls the board; the
-// keys come later from `trust fetch`.
+// A backend with no content signing key configured sends no keys; the board
+// still enrolls, and gets them later from `trust fetch`.
 func TestRunWithoutContentKeys(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
