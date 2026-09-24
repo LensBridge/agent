@@ -131,7 +131,8 @@ Per type:
 
 - `deviceId`: required, the enrolled device id. Content is always device-bound.
 - `sequence`: required, positive integer, strictly increasing per device. The
-  backend uses `createdAt` in epoch milliseconds.
+  backend uses the build time in epoch milliseconds (not truncated to seconds,
+  so two builds in the same second still order).
 - `content.timezone`: IANA zone, not empty, not `Local`, loadable on the board.
 - `content.firstDay`, `content.lastDay`: `YYYY-MM-DD`, inclusive, first <= last,
   at most 31 days.
