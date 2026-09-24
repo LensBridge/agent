@@ -61,7 +61,7 @@ func trustUsage() {
 }
 
 func loadTrustCLI() *trust.Store {
-	s, err := trust.Load(trust.DefaultPath)
+	s, err := trust.LoadForWrite(trust.DefaultPath)
 	if err != nil {
 		fail("cannot read the trust store: %v", err)
 	}

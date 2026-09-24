@@ -8,11 +8,11 @@
 # at which point systemd (Restart=always) bounces us. This replaces the old
 # lightdm + labwc autologin stack: one systemd unit == the whole display.
 #
-# The board URL (with ?deviceId=<uuid>) is written by the agent to
-# KIOSK_URL_FILE. The systemd unit's ExecStartPre blocks until that file
-# exists, so by the time we run the device is enrolled. We still re-read it
-# here and fall back to a local splash if it vanished between the check and
-# now (e.g. a mid-write crash).
+# The agent writes the URL to KIOSK_URL_FILE once the device is enrolled:
+# its own local server, http://127.0.0.1:8080/ (or, on a v1 board with a
+# board-url and no app release yet, the hosted site). Until then the file is
+# absent and we show the local "waiting for enrollment" splash; the kiosk
+# .path watcher restarts us when the agent writes it.
 #
 # Browser: we must NOT use a snap. Snap Chromium runs in its own snapd cgroup
 # scope, so it survives `systemctl restart`

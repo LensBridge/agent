@@ -236,9 +236,11 @@ packer (`scripts/package-mbu.mjs`) producing the same format.
   accepts only keys in `trust.json`.
 - `musallahboard-agent trust show|add <role> <b64>|remove <keyId>|fetch` manage
   it (root). The daemon only reads it.
-- The root self-updater trusts only `trust.json` (root-owned) and the keys
-  compiled into the binary running as root. It never reads anything the daemon
-  can write to decide trust.
+- The root self-updater trusts only `trust.json` and the keys compiled into the
+  binary running as root. Because the daemon can write the directory (it owns
+  `kiosk-url`), every root reader and writer of `trust.json` refuses a file
+  that is not a regular, root-owned, singly linked file writable only by root:
+  a file the daemon planted there is never trusted or carried forward.
 
 ## 6. On-device layout
 
@@ -495,8 +497,9 @@ Clients:
 
 - **Browser**: `http://10.77.0.1/` from any laptop. Nothing to install.
 - **`mbpush`** (agent repo, Windows/macOS/Linux): `mbpush [--host 10.77.0.1] <file.mbu>...`,
-  `mbpush status`, `mbpush fetch --device <id> ...` (downloads the latest app
-  and agent packages from the channels ahead of a visit). `--ssh user@host`
+  `mbpush status`, `mbpush fetch [--dir D] [--arch arm64]` (downloads the
+  latest app and agent packages from the channels ahead of a visit; the content
+  package comes from LensBridge's "Download offline bundle"). `--ssh user@host`
   streams to `sudo musallahboard-agent import -` for boards reachable only by
   SSH.
 - **Android app**: downloads the content package from LensBridge and the
@@ -539,7 +542,8 @@ Correct time decides which day's content is shown and the prayer times.
   `clockFloor`, set it to `clockFloor` (the agent has `CAP_SYS_TIME`) and write
   the RTC when one is present. A signed `createdAt` in the future of the board
   is proof its clock is behind.
-- An upload's `X-MB-Client-Time` is applied only after at least one package in
+- An upload's `X-MB-Client-Time` (the uploader's clock when it started
+  sending; the board measures the offset when the request arrives) is applied only after at least one package in
   that request verified, only when it differs by more than 5 s, and only within
   `[clockFloor, clockFloor + 90 days]`. The response reports the drift.
 - A DS3231 RTC is still recommended (`setup.sh --rtc`), and online boards keep

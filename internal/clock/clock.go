@@ -206,9 +206,9 @@ func abs(n int64) int64 {
 func writeRTC() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "hwclock", "--systohc").CombinedOutput()
+	out, err := exec.CommandContext(ctx, "hwclock", "--systohc", "--utc", "--noadjfile").CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("hwclock --systohc: %v: %s", err, out)
+		return fmt.Errorf("hwclock --systohc --utc --noadjfile: %v: %s", err, out)
 	}
 	return nil
 }

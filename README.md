@@ -55,7 +55,7 @@ sudo musallahboard-agent enroll \
   --token <one-time-token-from-admin-ui
 ```
 
-The device will then be enrolled and the MusallahBoard frontend will load automatically. The device is now ready to be used as a kiosk!
+The device will then be enrolled and the board will load automatically once its first content and board app packages have synced. The device is now ready to be used as a kiosk!
 
 ## Building
 
@@ -67,28 +67,68 @@ make build
 
 # Cross-compile for Raspberry Pi (arm64)
 make build-arm64
+
+# Laptop tool (Windows, macOS, Linux) and the package signer
+make mbpush
+make mbpack
 ```
 
-Requires Go 1.23+. Binaries land in `build/`.
+Requires Go 1.24+. Binaries land in `build/`. A plain build is a dev build: it trusts no release key of its own (see Release signing below).
 
-## Offline mode
+## How a board gets updates (v2)
 
-A board with no internet connection can run in offline mode: the agent serves the board app and a content bundle (14 days of payloads and posters, exported from LensBridge) to the kiosk from `127.0.0.1:8080`, and makes no network calls. An admin refreshes the content every week or two by plugging a laptop into the board's ethernet port and running `mbpush`, which also corrects the board's clock.
+Every board renders from its own disk: the kiosk always loads the agent's local server at `http://127.0.0.1:8080/`. Content (payloads and posters), the board app and the agent itself all arrive as signed `.mbu` packages, which the board checks against keys it has pinned before installing anything. The network only changes how fresh the board is. [docs/architecture.md](docs/architecture.md) is the full design and the contract with the backend, the frontend and the Android app.
+
+### Online boards
+
+Nothing to do. An enrolled board syncs its content from LensBridge every 30 minutes (and straight after an admin changes something), and follows the release channels on GitHub for new board app and agent versions. A new agent is installed by a small root updater that checks it again and rolls it back automatically if it does not start. If the internet drops, the board keeps showing the 7 days of content it already has.
+
+### Boards without internet
+
+Set the board up and enroll it online as usual, then, while it still has internet:
 
 ```bash
-# On the board, once, after a normal setup and enrollment, while still online:
-bash setup.sh --offline --board-dist=<frontend dist dir or .tar.gz> [--rtc]
-
-# On the laptop (build with: make mbpush):
-mbpush musallahboard-3f2a1b4c-2026-09-24.zip   # set clock, install bundle, show status
-mbpush status                                  # check only
-
-# On the board:
-sudo musallahboard-agent status
-sudo musallahboard-agent mode online           # switch back; before joining a real network
+bash setup.sh --service-port [--rtc]     # --rtc if a DS3231 clock module is fitted
 ```
 
-[docs/offline.md](docs/offline.md) is the full design and the contract between the backend exporter, this agent and the frontend, including how to convert an existing online board.
+That turns the ethernet port into a service port: a laptop or phone plugged straight into it gets an address from the board. Turn it off before plugging the board into a real network: `sudo musallahboard-agent service-port off`.
+
+To update the board, get the packages first, while you have internet:
+
+- content: LensBridge admin, Devices, the board, Download offline bundle (`musallahboard-content-<id>-<date>.mbu`, 14 days)
+- board app and agent: `mbpush fetch` (saves the latest `musallahboard-app-*.mbu` and `musallahboard-agent-*-arm64.mbu`)
+
+Then use any of:
+
+1. **USB stick.** Copy the `.mbu` files to the stick (its root, or a `MusallahBoard/` folder) and plug it into the board. The screen shows progress; remove the stick when it says "Update complete". One stick can carry content for several boards: each board takes only its own.
+2. **Laptop.** Plug into the board's ethernet port and open `http://10.77.0.1/` in a browser, or run `mbpush <file.mbu>...`. `mbpush status` shows what is installed and how far the board's clock is off; an upload also sets the clock from the laptop's. For a board reachable only over SSH: `mbpush --ssh admin@host <file.mbu>...`.
+3. **Android app.** Downloads the packages while it has signal, then uploads them over a USB ethernet adapter.
+
+On the board itself: `sudo musallahboard-agent import <file.mbu>...` and `sudo musallahboard-agent status`.
+
+### Release signing
+
+Software (board app and agent) is signed with a release key that the backend never holds; content is signed by the backend's own key. To set up release signing once:
+
+```bash
+make mbpack && build/mbpack keygen    # prints a private seed, a public key and its key id
+```
+
+- The **private seed** goes in the repository secret `MB_RELEASE_SIGNING_KEY` (and the frontend repo's, for app packages). Keep an offline copy; never commit it.
+- The **public key** goes in the repository variable `MB_RELEASE_PUBLIC_KEYS` (comma-separated, to allow a second key during a rotation). CI compiles it into the agent (`RELEASE_KEYS`), so every board trusts it without any configuration.
+
+Pushing a tag (`0.3.0`) runs `.github/workflows/release.yml`: tests, builds, signs `musallahboard-agent-<version>-<arch>.mbu`, and publishes them with `agent-channel-<arch>.json`, the release tarballs and the `mbpush` binaries. Locally: `MB_RELEASE_SIGNING_KEY=<seed> make package-mbu VERSION=0.3.0 RELEASE_KEYS=<public key>`.
+
+### Trust management
+
+Keys live in `/etc/musallahboard/trust.json` (root-owned). Content keys are pinned at enrollment; a board enrolled before v2 gets them with `sudo musallahboard-agent trust fetch` (`setup.sh` does this for you). Release keys are compiled in and can be extended there.
+
+```bash
+sudo musallahboard-agent trust show
+sudo musallahboard-agent trust add content|release <base64 public key>
+sudo musallahboard-agent trust remove <key id>
+sudo musallahboard-agent trust fetch
+```
 
 ## Roadmap
 

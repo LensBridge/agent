@@ -1,0 +1,42 @@
+[Unit]
+Description=Apply a staged MusallahBoard agent update
+Documentation=https://github.com/LensBridge/agent/blob/main/docs/architecture.md
+# Started only by musallahboard-agent-update.path. Runs as root: it replaces
+# /usr/bin/musallahboard-agent, keeps the previous binary in
+# /usr/lib/musallahboard/agent.prev, restarts musallahboard-agent.service and
+# rolls back if the new agent does not report its version on
+# 127.0.0.1:8080 within 120 s. Nothing the daemon can write decides trust
+# here: the updater re-verifies against /etc/musallahboard/trust.json
+# (root-owned) and the keys compiled into this binary.
+After=musallahboard-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/musallahboard-agent selfupdate apply
+# Verify + swap + restart + a 120 s health check, with room to spare. Killing
+# it mid-way is safe (every step is a rename), but it would leave the version
+# unjudged, so the limit is generous.
+TimeoutStartSec=5min
+
+# Hardening. It needs to write /usr/bin (the binary), /usr/lib/musallahboard
+# (agent.prev), /var/lib/musallahboard (state.json, agent/last-update.json)
+# and /etc/musallahboard (trust.json, when it runs `trust fetch` because no
+# content key is pinned yet). It needs the network for that fetch and for
+# the loopback health check, and it talks to PID 1 over its private socket
+# to restart the agent, which a read-only /run does not prevent.
+ProtectSystem=strict
+ReadWritePaths=/usr/bin -/usr/lib/musallahboard /var/lib/musallahboard /etc/musallahboard
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+UMask=0022

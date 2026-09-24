@@ -10,27 +10,40 @@
 #
 # Or with pre-supplied answers (no prompts):
 #   curl -fsSL ... | MB_HOSTNAME=lobby MB_ADMIN_USER=admin \
-#       MB_BOARD_URL=https://board.example.com MB_TIMEZONE=America/Toronto \
+#       MB_TIMEZONE=America/Toronto \
 #       MB_ADMIN_SSH_KEY="ssh-ed25519 AAAA..." bash
 #
 # After setup completes, enroll the device:
 #   sudo musallahboard-agent enroll --token=<token> --backend=<url>
 #
-# Offline boards (docs/offline.md): once the board is set up and enrolled,
-# and while it still has internet, run
-#   bash setup.sh --offline --board-dist=<dist-dir-or-tar.gz> [--rtc]
-# to provision the ethernet service port and switch it to offline mode.
-#
 # The kiosk shows a "waiting for enrollment" splash until then; once enrolled
-# the board loads automatically with no reboot.
+# it shows the board served by the local agent, with no reboot. Every board
+# renders from its own disk and syncs content whenever it has internet
+# (docs/architecture.md).
+#
+# Boards without internet: once the board is set up and enrolled, and while
+# it still has internet, run
+#   bash setup.sh --service-port [--rtc]
+# to provision the ethernet service port, where a laptop or phone plugged in
+# can upload signed update packages. USB sticks work on every board.
+#
+# Re-running this script is safe, and on a board set up for v1 it also removes
+# what v1 needed and v2 does not (the mbpush push account, unsigned bundles).
 # =====================================================
 
 set -euo pipefail
 
 # ── Version and download URLs ─────────────────────────────────────────────────
-VERSION="${MB_VERSION:-0.1.2}"
+# MB_VERSION pins a release tag; the default follows the latest release, since
+# this script and the units it writes track the current agent. A pre-v2 tag
+# installs an agent that does not understand those units.
+VERSION="${MB_VERSION:-latest}"
 GITHUB_REPO="LensBridge/agent"
-RELEASE_URL="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}"
+if [[ "$VERSION" == "latest" ]]; then
+    RELEASE_URL="https://github.com/${GITHUB_REPO}/releases/latest/download"
+else
+    RELEASE_URL="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}"
+fi
 BINARY_URL="${RELEASE_URL}/musallahboard-agent-arm64"
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
@@ -47,7 +60,8 @@ NTP_SYNC_TIMEOUT_SEC="${NTP_SYNC_TIMEOUT_SEC:-90}"
 # Every prompt can be answered in advance via environment variable. When piped
 # (stdin is the script itself), prompts cannot work — defaults are used.
 #
-#   MB_HOSTNAME  MB_ADMIN_USER  MB_BOARD_URL  MB_TIMEZONE  MB_ADMIN_SSH_KEY
+#   MB_HOSTNAME  MB_ADMIN_USER  MB_TIMEZONE  MB_ADMIN_SSH_KEY
+#   MB_BOARD_URL      optional, never asked for (see --board-url)
 #   MB_ASSUME_YES=1   take the default for anything unset, confirm nothing
 #   MB_REBOOT=auto|never|ask
 MB_ASSUME_YES="${MB_ASSUME_YES:-0}"
@@ -63,32 +77,43 @@ CONFIG_DIR=/etc/musallahboard
 UNIT_DIR=/lib/systemd/system
 SUDOERS_DEST=/etc/sudoers.d/musallahboard-agent
 KIOSK_SHARE_DIR=/usr/share/musallahboard
+STATE_DIR=/var/lib/musallahboard
+INBOX_DIR=/var/lib/musallahboard/inbox
+LIB_DIR=/usr/lib/musallahboard
+TRUST_PATH=/etc/musallahboard/trust.json
+UDEV_DIR=/etc/udev/rules.d
+# The kiosk always loads the agent's local server (docs/architecture.md, 14).
+KIOSK_URL="http://127.0.0.1:8080/"
 
-# Offline mode (setup.sh --offline). Connection names and the address are
-# shared with cmd/agent (offline_cli.go) and cmd/mbpush — change them together.
-OFFLINE=0
-OFFLINE_RTC=0
-BOARD_DIST=""
+# The ethernet service port (setup.sh --service-port). Connection names and
+# the address are shared with cmd/agent (serviceport_cli.go) and cmd/mbpush —
+# change them together.
+SERVICE_PORT=0
+SERVICE_PORT_RTC=0
 SERVICE_CONN=musallahboard-service-port
 LAN_CONN=musallahboard-lan
 SERVICE_IFACE=eth0
 SERVICE_ADDR=10.77.0.1/24
-OFFLINE_DIR=/var/lib/musallahboard/offline
+SERVICE_NET=10.77.0.0/24
 RTC_OVERLAY="dtoverlay=i2c-rtc,ds3231"
-# The restricted account mbpush and the Android app log in as. Shared with
-# cmd/agent (gate.go) and cmd/mbpush — change them together.
-PUSH_USER=mbpush
-PUSH_KEYS=()
-PUSH_SUDOERS=/etc/sudoers.d/musallahboard-push
-PUSH_SSHD_CONF=/etc/ssh/sshd_config.d/99-musallahboard-push.conf
 SSHD_HARDENING=/etc/ssh/sshd_config.d/kiosk-hardening.conf
+
+# v1 leftovers that cleanup_v1 removes. Nothing creates these any more.
+V1_PUSH_USER=mbpush
+V1_PUSH_SUDOERS=/etc/sudoers.d/musallahboard-push
+V1_PUSH_SSHD_CONF=/etc/ssh/sshd_config.d/99-musallahboard-push.conf
+V1_DIRS=(
+    /var/lib/musallahboard/offline
+    /usr/share/musallahboard/board
+    /usr/share/musallahboard/board.tmp
+    /usr/share/musallahboard/board.d
+)
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 usage() {
     cat <<'USAGE'
 Usage: bash setup.sh [options]
 
-  --board-url=URL        kiosk URL for this board
   --hostname=NAME        hostname to set
   --admin-user=NAME      SSH/sudo account
   --timezone=TZ          e.g. America/Toronto
@@ -96,16 +121,19 @@ Usage: bash setup.sh [options]
   --reboot=auto|never|ask
   --yes, -y              answer every prompt with its default
   -h, --help
+  --board-url=URL        optional hosted fallback: the kiosk shows this site
+                         until the first signed app release is installed.
+                         Without it a new board waits for an app package.
 
-Offline mode (after a normal setup and enrollment, while still online):
-  --offline              provision the ethernet service port and switch this
-                         board to offline mode; skips the normal setup
-  --board-dist=PATH      board app build (dist dir or .tar.gz) to serve offline;
-                         required the first time
+Service port (after a normal setup and enrollment, while still online):
+  --service-port         provision the ethernet service port, where a laptop
+                         or phone plugged in can upload update packages, and
+                         turn it on; skips the normal setup
   --rtc                  a DS3231 RTC is fitted: enable it, remove fake-hwclock
-  --push-key=KEY         public key allowed to push bundles as the restricted
-                         'mbpush' account (repeatable; re-run to add more).
-                         That account can only run `musallahboard-agent gate`.
+  --offline              old name for --service-port
+
+Update packages (.mbu) are installed with a USB stick, an upload on the
+service port, or: sudo musallahboard-agent import <file.mbu>
 USAGE
 }
 
@@ -118,17 +146,28 @@ for arg in "$@"; do
         --admin-ssh-key=*) export MB_ADMIN_SSH_KEY="${arg#*=}" ;;
         --reboot=*)        export MB_REBOOT="${arg#*=}" ;;
         --yes|-y)          export MB_ASSUME_YES=1 ;;
-        --offline)         OFFLINE=1 ;;
-        --rtc)             OFFLINE_RTC=1 ;;
-        --board-dist=*)    BOARD_DIST="${arg#*=}" ;;
-        --push-key=*)      PUSH_KEYS+=("${arg#*=}") ;;
+        --service-port)    SERVICE_PORT=1 ;;
+        --offline)
+            echo "Note: --offline is now --service-port. There is no offline mode any more:" >&2
+            echo "      every board serves the board locally and syncs when it can." >&2
+            SERVICE_PORT=1 ;;
+        --rtc)             SERVICE_PORT_RTC=1 ;;
+        --board-dist|--board-dist=*)
+            echo "--board-dist is gone. The board app is now a signed package (musallahboard-app-<version>.mbu)." >&2
+            echo "Online boards fetch it themselves. Otherwise install it from a USB stick, an upload on the" >&2
+            echo "service port, or: sudo musallahboard-agent import musallahboard-app-<version>.mbu" >&2
+            exit 1 ;;
+        --push-key|--push-key=*)
+            echo "--push-key is gone, and so is the mbpush SSH account. Laptops and phones upload signed" >&2
+            echo "packages to the board's service port (http://10.77.0.1/) instead; no key is needed." >&2
+            exit 1 ;;
         -h|--help)         usage; exit 0 ;;
         *) echo "Unknown option: $arg" >&2; usage >&2; exit 1 ;;
     esac
 done
 
-if [[ "$OFFLINE" != "1" ]] && { [[ "$OFFLINE_RTC" == "1" ]] || [[ -n "$BOARD_DIST" ]] || (( ${#PUSH_KEYS[@]} )); }; then
-    echo "--rtc, --board-dist and --push-key only apply with --offline" >&2
+if [[ "$SERVICE_PORT" != "1" && "$SERVICE_PORT_RTC" == "1" ]]; then
+    echo "--rtc only applies with --service-port" >&2
     exit 1
 fi
 
@@ -197,16 +236,21 @@ prompt_config() {
     # HOSTNAME is set by bash to the machine's name; clear it so _ask works
     HOSTNAME="${MB_HOSTNAME-}"
     ADMIN_USER="${MB_ADMIN_USER-}"
-    KIOSK_URL="${MB_BOARD_URL-}"
     TIMEZONE="${MB_TIMEZONE-}"
+
+    # v1 loaded a hosted board URL. v2 shows the board the agent serves
+    # locally, so the URL is no longer asked for. If given, it is only the
+    # hosted fallback the kiosk shows until the first signed app release is
+    # installed (docs/architecture.md section 14, "Migration guard").
+    BOARD_URL="${MB_BOARD_URL-}"
 
     _ask HOSTNAME   "Hostname for this board"          "musallahboard"
     _ask ADMIN_USER "Admin username (SSH/sudo)"        "ibra"
-    _ask KIOSK_URL  "Kiosk URL"                        "https://board.lensbridge.tech"
     _ask TIMEZONE   "Timezone"                         "America/Toronto"
 
-    # Validate admin user is not a reserved name
-    for _reserved in musallahdaemon "$KIOSK_USER" "$PUSH_USER"; do
+    # Validate admin user is not a reserved name. mbpush stays reserved:
+    # cleanup_v1 deletes a leftover v1 account of that name.
+    for _reserved in musallahdaemon "$KIOSK_USER" "$V1_PUSH_USER"; do
         [[ "$ADMIN_USER" == "$_reserved" ]] && \
             error "'$_reserved' is reserved for a MusallahBoard service account."
     done
@@ -228,7 +272,10 @@ prompt_config() {
     printf "  %-18s %s\n" "Hostname:"   "$HOSTNAME"
     printf "  %-18s %s\n" "Admin user:" "$ADMIN_USER  (SSH key auth, passwordless sudo)"
     printf "  %-18s %s\n" "Kiosk user:" "$KIOSK_USER  (auto-login, browser only, no sudo/SSH/shell)"
-    printf "  %-18s %s\n" "Kiosk URL:"  "$KIOSK_URL"
+    printf "  %-18s %s\n" "Kiosk URL:"  "$KIOSK_URL  (served by the agent)"
+    if [[ -n "$BOARD_URL" ]]; then
+        printf "  %-18s %s\n" "Hosted fallback:" "$BOARD_URL  (until the first app release is installed)"
+    fi
     printf "  %-18s %s\n" "Timezone:"   "$TIMEZONE"
     echo
     if ! _confirm "Continue? (y/n): "; then
@@ -390,7 +437,7 @@ BASHRC
     info "Kiosk user locked down (no sudo, no shell, video+render only)"
 }
 
-# ── Display stack (config dir, board-url) ─────────────────────────────────────
+# ── Display stack (config dir, kiosk.env, board-url) ──────────────────────────
 setup_display_stack() {
     section "Display stack"
 
@@ -412,10 +459,16 @@ EOF
         info "Bare-metal host — no kiosk.env needed"
     fi
 
-    # Persist the board base URL
-    printf '%s\n' "$KIOSK_URL" | sudo tee "$CONFIG_DIR/board-url" > /dev/null
-    sudo chmod 0644 "$CONFIG_DIR/board-url"
-    info "Wrote $CONFIG_DIR/board-url ($KIOSK_URL)"
+    # board-url is optional since v2: once enrolled, the agent writes
+    # kiosk-url itself, pointing at its own local server. board-url only
+    # decides what the kiosk shows until the first signed app release is
+    # installed: the hosted site instead of "board app not installed".
+    # Written only when given; an existing one is left alone.
+    if [[ -n "$BOARD_URL" ]]; then
+        printf '%s\n' "$BOARD_URL" | sudo tee "$CONFIG_DIR/board-url" > /dev/null
+        sudo chmod 0644 "$CONFIG_DIR/board-url"
+        info "Wrote $CONFIG_DIR/board-url ($BOARD_URL, hosted fallback until the first app release)"
+    fi
 }
 
 # ── Disable tty1 autologin ────────────────────────────────────────────────────
@@ -535,7 +588,14 @@ install_agent_binary() {
 
     sudo install -o root -g root -m 0755 "$tmp_binary" "$BINARY_DEST"
     rm -f "$tmp_binary"
-    info "Installed $BINARY_DEST"
+    info "Installed $BINARY_DEST ($("$BINARY_DEST" version 2>/dev/null || echo 'version unknown'))"
+
+    # Updates from here on arrive as signed packages (USB, upload, or the
+    # release channel), not through this script.
+    if ! "$BINARY_DEST" help 2>&1 | grep -q "selfupdate apply"; then
+        warn "This agent predates signed packages (v2): self-updates, USB sticks and the upload"
+        warn "server will not work. Use a v2 release (MB_VERSION=<tag>, or unset for the latest)."
+    fi
 }
 
 # ── Install sudoers allow-list ────────────────────────────────────────────────
@@ -562,13 +622,20 @@ EOF
 install_systemd_units() {
     section "Systemd units"
 
-    # Agent service
+    # KEEP IN SYNC with packaging/*.service, *.path and packaging/udev/. This
+    # script is curl|bash'd and has no checkout to copy from, so the units are
+    # inlined here without their comments; the packaged files explain them.
+
+    # Agent service. CAP_SYS_TIME sets the clock (and, with the RTC rule, the
+    # RTC); CAP_NET_BIND_SERVICE is for the upload server on port 80.
     sudo tee "$UNIT_DIR/musallahboard-agent.service" > /dev/null << 'EOF'
 [Unit]
 Description=MusallahBoard device agent
 Documentation=https://github.com/LensBridge/agent
 After=network-online.target
 Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=60
 
 [Service]
 Type=notify
@@ -577,9 +644,8 @@ Group=musallahdaemon
 ExecStart=/usr/bin/musallahboard-agent run
 Restart=always
 RestartSec=5
-StartLimitBurst=5
-StartLimitIntervalSec=60
 WatchdogSec=60s
+AmbientCapabilities=CAP_SYS_TIME CAP_NET_BIND_SERVICE
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
@@ -605,6 +671,8 @@ EOF
 Description=MusallahBoard kiosk (cage + Chromium)
 Documentation=https://github.com/LensBridge/agent
 After=systemd-user-sessions.service
+After=musallahboard-agent.service
+Wants=musallahboard-agent.service
 After=getty@tty1.service
 Conflicts=getty@tty1.service
 
@@ -657,7 +725,135 @@ Type=oneshot
 ExecStart=/bin/systemctl --no-block try-restart musallahboard-kiosk.service
 EOF
 
+    # Root self-updater: the daemon stages a verified agent package and
+    # creates staged/ready; this re-verifies it as root, swaps the binary and
+    # rolls back if the new agent does not come up.
+    sudo tee "$UNIT_DIR/musallahboard-agent-update.path" > /dev/null << 'EOF'
+[Unit]
+Description=Watch for a staged MusallahBoard agent update
+Documentation=https://github.com/LensBridge/agent/blob/main/docs/architecture.md
+
+[Path]
+PathExists=/var/lib/musallahboard/agent/staged/ready
+Unit=musallahboard-agent-update.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    sudo tee "$UNIT_DIR/musallahboard-agent-update.service" > /dev/null << 'EOF'
+[Unit]
+Description=Apply a staged MusallahBoard agent update
+Documentation=https://github.com/LensBridge/agent/blob/main/docs/architecture.md
+After=musallahboard-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/musallahboard-agent selfupdate apply
+TimeoutStartSec=5min
+ProtectSystem=strict
+ReadWritePaths=/usr/bin -/usr/lib/musallahboard /var/lib/musallahboard /etc/musallahboard
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+UMask=0022
+EOF
+
+    # USB import helper, started by udev for each USB filesystem. Root (it
+    # mounts), no network, read-only system except the inbox.
+    sudo tee "$UNIT_DIR/musallahboard-usb-import@.service" > /dev/null << 'EOF'
+[Unit]
+Description=Import MusallahBoard packages from USB stick %I
+Documentation=https://github.com/LensBridge/agent/blob/main/docs/architecture.md
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/musallahboard-agent usb-import %I
+TimeoutStartSec=20min
+RuntimeDirectory=musallahboard/usb/%I
+RuntimeDirectoryMode=0700
+PrivateNetwork=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/musallahboard/inbox
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER
+UMask=0022
+EOF
+
     info "Installed systemd units"
+}
+
+# ── Install udev rules ────────────────────────────────────────────────────────
+install_udev_rules() {
+    section "udev rules"
+
+    # KEEP IN SYNC with packaging/udev/.
+    sudo mkdir -p "$UDEV_DIR"
+    sudo tee "$UDEV_DIR/90-musallahboard-usb.rules" > /dev/null << 'EOF'
+# MusallahBoard: import signed update packages (*.mbu) from a USB stick.
+ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z]*", ENV{ID_BUS}=="usb", ENV{ID_FS_USAGE}=="filesystem", ENV{ID_FS_TYPE}=="vfat|exfat|ext4|ntfs|ntfs3", TAG+="systemd", ENV{SYSTEMD_WANTS}+="musallahboard-usb-import@%k.service"
+EOF
+    sudo tee "$UDEV_DIR/90-musallahboard-rtc.rules" > /dev/null << 'EOF'
+# MusallahBoard: let the agent (group musallahdaemon) write the RTC with hwclock.
+SUBSYSTEM=="rtc", KERNEL=="rtc0", GROUP="musallahdaemon", MODE="0660"
+EOF
+    sudo chmod 0644 "$UDEV_DIR/90-musallahboard-usb.rules" "$UDEV_DIR/90-musallahboard-rtc.rules"
+
+    sudo udevadm control --reload || true
+    # Apply the rtc0 permissions now. Not the block subsystem: that would
+    # start an import from a stick that happens to be plugged in.
+    sudo udevadm trigger --subsystem-match=rtc --action=change || true
+    info "USB sticks start musallahboard-usb-import@<dev>.service; rtc0 is writable by $SERVICE_USER"
+}
+
+# ── State directories and trust store ─────────────────────────────────────────
+install_state_dirs() {
+    section "State directories and trust store"
+
+    # Owned by the service user, as StateDirectory= in the unit expects: a
+    # mismatched owner there makes systemd chown the whole tree recursively.
+    sudo install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0750 "$STATE_DIR"
+    # Written by root tools (the USB helper, `musallahboard-agent import`) and
+    # consumed by the daemon.
+    sudo install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0770 "$INBOX_DIR"
+    # The self-updater's rollback copy of the previous agent.
+    sudo install -d -o root -g root -m 0755 "$LIB_DIR"
+    info "$INBOX_DIR ($SERVICE_USER 0770), $LIB_DIR (root 0755)"
+
+    # Root-owned, world-readable, never overwritten: it holds the content keys
+    # pinned at enrollment and any release keys an admin added.
+    if sudo test -e "$TRUST_PATH"; then
+        info "Keeping existing $TRUST_PATH"
+    else
+        printf '{"content":[],"release":[]}\n' | sudo tee "$TRUST_PATH.tmp" > /dev/null
+        sudo chown root:root "$TRUST_PATH.tmp"
+        sudo chmod 0644 "$TRUST_PATH.tmp"
+        sudo mv -f "$TRUST_PATH.tmp" "$TRUST_PATH"
+        info "Created $TRUST_PATH (root 0644, no keys yet)"
+    fi
 }
 
 # ── Install kiosk launcher script ─────────────────────────────────────────────
@@ -841,9 +1037,11 @@ enable_services() {
     sudo systemctl enable musallahboard-agent.service
     sudo systemctl enable musallahboard-kiosk.service
     sudo systemctl enable musallahboard-kiosk-watch.path
+    sudo systemctl enable musallahboard-agent-update.path
 
-    # Start the watcher now so it catches enrollment
+    # Start the watchers now: one catches enrollment, the other a staged update
     sudo systemctl start musallahboard-kiosk-watch.path
+    sudo systemctl start musallahboard-agent-update.path
 
     info "Services enabled"
 }
@@ -879,7 +1077,7 @@ print_summary() {
 
   Hostname   : $HOSTNAME
   Admin SSH  : ssh $ADMIN_USER@<ip>
-  Kiosk URL  : $KIOSK_URL
+  Kiosk URL  : $KIOSK_URL (served by the agent)
 
   FINAL STEP - enroll this device (once, with a token from the admin UI):
 
@@ -888,8 +1086,12 @@ print_summary() {
 
   Until then the kiosk shows the local "waiting" splash, which prints this
   device's IP address on screen once it has one - that is the <ip> to SSH to.
-  On enrollment the agent composes <board-url>?deviceId=<uuid> and the board
-  loads automatically.
+  On enrollment the kiosk switches to the board served by the agent, which
+  starts syncing content right away. (With --board-url it shows that hosted
+  site until the first app release is installed.)
+
+  A board that will not have internet: after enrolling, while it still has
+  internet, run  bash setup.sh --service-port
 
   * Boots multi-user -> musallahboard-kiosk.service -> cage -> browser
   * SSH as $ADMIN_USER to manage the system
@@ -918,42 +1120,185 @@ EOF
     return 0
 }
 
-# ══ Offline mode (setup.sh --offline) ═════════════════════════════════════════
-# Everything below runs only with --offline, on a board that has already been
-# set up and enrolled. See docs/offline.md, "Provisioning". Every step is
-# idempotent: re-running it is safe, and is how you change --board-dist or add
-# --rtc later.
+# ══ v1 cleanup and the trust store (both modes) ═══════════════════════════════
 
-offline_preflight() {
+# Removes what v1 offline mode left on a board and v2 does not use: the
+# restricted push account (user, sudo rule, sshd drop-in, AllowUsers entry)
+# and the unsigned bundle and board-app directories. Safe to run on any board;
+# it only acts on what it finds. $1 is the admin account, which must keep its
+# SSH access.
+cleanup_v1() {
+    local admin="$1" found=0 d
+    if id "$V1_PUSH_USER" &>/dev/null || sudo test -e "$V1_PUSH_SUDOERS" || \
+       sudo test -e "$V1_PUSH_SSHD_CONF" || _allowusers_has_push; then
+        found=1
+    fi
+    for d in "${V1_DIRS[@]}"; do
+        if sudo test -e "$d" || sudo test -L "$d"; then found=1; fi
+    done
+    if [[ "$found" == "0" ]]; then
+        return 0
+    fi
+
+    section "Removing v1 offline mode leftovers"
+
+    # sshd first, while nothing else has changed: if it cannot be done
+    # safely, stop here with everything as it was.
+    _v1_remove_push_sshd "$admin"
+
+    # Removing a sudoers drop-in cannot break sudo; adding one could.
+    if sudo test -e "$V1_PUSH_SUDOERS"; then
+        sudo rm -f "$V1_PUSH_SUDOERS"
+        info "Removed $V1_PUSH_SUDOERS"
+    fi
+
+    if id "$V1_PUSH_USER" &>/dev/null; then
+        # prompt_config refuses mbpush as an admin name, and this refuses to
+        # delete whoever is running the script, so this is only ever v1's
+        # system account.
+        if [[ "$V1_PUSH_USER" == "$admin" || "$V1_PUSH_USER" == "$(id -un)" ]]; then
+            warn "Not removing '$V1_PUSH_USER': it is the account running this script."
+        else
+            sudo pkill -u "$V1_PUSH_USER" 2>/dev/null || true
+            sudo userdel --remove "$V1_PUSH_USER" 2>/dev/null || sudo userdel "$V1_PUSH_USER" || true
+            info "Removed the v1 push account '$V1_PUSH_USER'"
+        fi
+    fi
+
+    # Unsigned v1 data. The agent ignores it; nothing should serve it again.
+    for d in "${V1_DIRS[@]}"; do
+        if sudo test -e "$d" || sudo test -L "$d"; then
+            sudo rm -rf -- "$d"
+            info "Removed $d (v1, unsigned)"
+        fi
+    done
+}
+
+_allowusers_has_push() {
+    sudo grep -qE "^AllowUsers\b.*[[:space:]]$V1_PUSH_USER([[:space:]]|\$)" "$SSHD_HARDENING" 2>/dev/null
+}
+
+# Drops v1's sshd settings for the push account without being able to lock
+# the admin out: the files are backed up, sshd must accept the result
+# (`sshd -t`) and must still admit the admin, and otherwise the backups are
+# restored before anything is reloaded. The same safety net v1 used to add
+# them.
+_v1_remove_push_sshd() {
+    local admin="$1"
+    if ! sudo test -e "$V1_PUSH_SSHD_CONF" && ! _allowusers_has_push; then
+        return 0
+    fi
+    local probe="host=localhost,addr=127.0.0.1"
+    local backup
+    backup="$(mktemp -d)"
+    if sudo test -f "$SSHD_HARDENING"; then sudo cp -p "$SSHD_HARDENING" "$backup/hardening"; fi
+    if sudo test -f "$V1_PUSH_SSHD_CONF"; then sudo cp -p "$V1_PUSH_SSHD_CONF" "$backup/push"; fi
+    _restore_sshd() {
+        if [[ -f "$backup/hardening" ]]; then sudo cp -p "$backup/hardening" "$SSHD_HARDENING"; fi
+        if [[ -f "$backup/push" ]]; then sudo cp -p "$backup/push" "$V1_PUSH_SSHD_CONF"; fi
+        sudo rm -rf "$backup"
+    }
+
+    sudo rm -f "$V1_PUSH_SSHD_CONF"
+    if _allowusers_has_push; then
+        sudo sed -i -E "s/^(AllowUsers\b.*)[[:space:]]$V1_PUSH_USER([[:space:]]|\$)/\1\2/" "$SSHD_HARDENING"
+    fi
+
+    # Captured, not piped into grep -q: under pipefail an early grep exit can
+    # SIGPIPE sshd and turn a pass into a false failure.
+    local problem="" admin_cfg=""
+    if sudo /usr/sbin/sshd -t 2> /dev/null; then
+        admin_cfg="$(sudo /usr/sbin/sshd -T -C "user=$admin,$probe" 2>/dev/null || true)"
+    else
+        problem="sshd rejected the configuration without it"
+    fi
+    if [[ -z "$problem" ]] && sudo grep -qE '^AllowUsers\b' "$SSHD_HARDENING" 2>/dev/null && \
+       ! grep -qE "^allowusers .*\b$admin\b" <<< "$admin_cfg"; then
+        problem="$admin would no longer be allowed to log in"
+    fi
+    if [[ -n "$problem" ]]; then
+        _restore_sshd
+        error "Not removing the v1 push account's sshd settings: $problem. The previous sshd configuration was restored.
+       Check /etc/ssh/sshd_config.d/ by hand, then re-run."
+    fi
+    sudo rm -rf "$backup"
+
+    sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd 2>/dev/null || true
+    info "sshd: v1 push account settings removed; $admin unchanged"
+}
+
+# Pins the backend's content signing keys on a board that has none: one
+# enrolled before v2, whose enrollment response carried no keys. Only on an
+# enrolled board, only when the backend answers, and never fatal: without the
+# keys the board keeps showing what it has and refuses new content until
+# `sudo musallahboard-agent trust fetch` succeeds.
+fetch_trust_if_needed() {
+    sudo test -s "$CONFIG_DIR/agent.toml" || return 0
+    [[ -x "$BINARY_DEST" ]] || return 0
+
+    section "Trust store"
+
+    if ! "$BINARY_DEST" help 2>&1 | grep -q "trust show"; then
+        warn "The installed agent predates signed packages; not fetching signing keys."
+        return 0
+    fi
+    # Compact first, so the check does not depend on how the file is laid out.
+    if tr -d '[:space:]' < "$TRUST_PATH" 2>/dev/null | grep -qF '"content":[{'; then
+        info "A content signing key is already pinned in $TRUST_PATH"
+        return 0
+    fi
+
+    local backend
+    backend="$(sudo sed -n -E 's/^[[:space:]]*backend_url[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' "$CONFIG_DIR/agent.toml" | head -n1)"
+    if [[ -z "$backend" ]]; then
+        warn "No backend_url in $CONFIG_DIR/agent.toml; not fetching signing keys."
+        return 0
+    fi
+    if ! curl -fsS --max-time 15 -o /dev/null "${backend%/}/api/agent/signing-keys" 2>/dev/null; then
+        warn "No content signing key is pinned, and $backend is not reachable right now."
+        warn "Run 'sudo musallahboard-agent trust fetch' once it is, or content updates will be refused."
+        return 0
+    fi
+    if sudo "$BINARY_DEST" trust fetch; then
+        info "Pinned the backend's content signing keys (trust on first use over TLS)"
+        # Picked up on its next start by a daemon that is already running.
+        sudo systemctl try-restart musallahboard-agent.service || true
+    else
+        warn "'musallahboard-agent trust fetch' failed; content updates will be refused until it succeeds."
+    fi
+}
+
+# ══ Service port (setup.sh --service-port) ════════════════════════════════════
+# Everything below runs only with --service-port, on a board that has already
+# been set up and enrolled. See docs/architecture.md, sections 9.5 and 13.
+# Every step is idempotent: re-running it is safe, and is how you add --rtc
+# later. It also brings a board set up for v1 up to date: v2 units, udev
+# rules and directories, and the v1 push account removed.
+
+service_port_preflight() {
     [[ $EUID -eq 0 ]] && error "Do not run as root. Run as a user with sudo access."
     # Not `sudo -v`: it prompts even under NOPASSWD when any other matching
     # sudoers entry (e.g. %sudo) needs a password, which breaks ssh 'setup.sh'.
     sudo -n true 2>/dev/null || sudo -v || error "This script requires sudo access."
     command -v nmcli >/dev/null || \
-        error "nmcli not found. Offline mode needs NetworkManager (the Raspberry Pi OS default)."
+        error "nmcli not found. The service port needs NetworkManager (the Raspberry Pi OS default)."
     [[ -x "$BINARY_DEST" ]] || \
-        error "$BINARY_DEST is not installed. Run the normal setup (without --offline) first."
-    "$BINARY_DEST" help 2>&1 | grep -q "mode online|offline" || \
-        error "The installed agent predates offline mode. Update it first (packaging/update.sh, or make deploy PI=...)."
+        error "$BINARY_DEST is not installed. Run the normal setup (without --service-port) first."
+    "$BINARY_DEST" help 2>&1 | grep -q "service-port on|off" || \
+        error "The installed agent predates the service port (v2). Update it first: re-run the normal
+       setup (bash setup.sh), or packaging/update.sh with a v2 binary."
     sudo test -s "$CONFIG_DIR/agent.toml" || \
         error "This board is not enrolled yet. Enroll it online first:
        sudo musallahboard-agent enroll --token=<token> --backend=<url>"
-
-    if [[ -n "$BOARD_DIST" ]]; then
-        [[ -e "$BOARD_DIST" ]] || error "--board-dist: $BOARD_DIST does not exist"
-    elif [[ ! -f "$KIOSK_SHARE_DIR/board/index.html" ]]; then
-        error "No board app is installed for offline use. Pass --board-dist=<dist-dir-or-tar.gz>
-       (the MusallahBoard frontend build: npm run build, then its dist/ directory)."
-    fi
 }
 
-offline_install_packages() {
-    section "Offline: packages"
+service_port_install_packages() {
+    section "Service port: packages"
     # dnsmasq-base: NetworkManager's "shared" mode runs it for DHCP/DNS.
-    # util-linux-extra: hwclock, which the gate uses to save the time to the RTC.
+    # util-linux-extra: hwclock, which the agent uses to save the time to the RTC.
     local pkgs=(dnsmasq-base util-linux-extra)
-    # Skip apt when they are already there: re-running setup.sh --offline to
-    # add a --push-key happens on a board that has no internet any more.
+    # Skip apt when they are already there: re-running setup.sh --service-port
+    # to add --rtc may happen on a board that has no internet any more.
     if dpkg -s "${pkgs[@]}" &>/dev/null; then
         info "${pkgs[*]} already installed"
         return
@@ -963,13 +1308,14 @@ offline_install_packages() {
     sudo apt-get install -y "${pkgs[@]}"
 }
 
-offline_state_dir() {
-    section "Offline: state directory"
-    # Root installs bundles (bundle install runs under sudo); the agent only
-    # reads them, through its group.
-    sudo install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0750 /var/lib/musallahboard
-    sudo install -d -o root -g "$SERVICE_USER" -m 0750 "$OFFLINE_DIR"
-    info "$OFFLINE_DIR ready (root:$SERVICE_USER 0750)"
+# The units, rules and directories the normal setup installs. Repeated here so
+# that a board set up for v1, whose agent was then replaced by hand, gets them
+# too. On a board set up by this version it rewrites the same files.
+service_port_v2_payload() {
+    install_systemd_units
+    install_udev_rules
+    install_state_dirs
+    enable_services
 }
 
 # Prints the name of a saved (not auto-generated) wired profile eth0 could
@@ -992,15 +1338,15 @@ _saved_wired_profile() {
 
 _nm_has() { nmcli -g NAME connection show | grep -qxF "$1"; }
 
-offline_service_port() {
-    section "Offline: ethernet service port"
+service_port_profiles() {
+    section "Service port: ethernet profiles"
 
-    # Two profiles on eth0, tried in priority order (docs/offline.md):
+    # Two profiles on eth0, tried in priority order (docs/architecture.md, 13):
     #
     #  1. A DHCP client ($LAN_CONN, default priority). Plugged into a real
     #     network, the board just gets an address there, as it does today.
     #     A laptop runs no DHCP server, so with one plugged in this fails
-    #     after ipv4.dhcp-timeout and, with the single retry `mode offline`
+    #     after ipv4.dhcp-timeout and, with the single retry `service-port on`
     #     gives it, NetworkManager moves on to...
     #  2. the service port ($SERVICE_CONN): shared mode, i.e. a DHCP server,
     #     at the lowest priority NetworkManager has (-999). It only ever
@@ -1024,15 +1370,15 @@ offline_service_port() {
     elif existing="$(_saved_wired_profile)"; then
         info "Keeping your saved wired profile '$existing' as eth0's first choice"
         warn "It keeps NetworkManager's default of 4 attempts, so a laptop may wait a few minutes"
-        warn "for an address. Delete it to use $LAN_CONN instead, then re-run setup.sh --offline."
+        warn "for an address. Delete it to use $LAN_CONN instead, then re-run setup.sh --service-port."
     else
         sudo nmcli connection add type ethernet con-name "$LAN_CONN" "${lan_props[@]}"
         info "Created NetworkManager connection $LAN_CONN (DHCP client, tried first)"
     fi
 
-    # autoconnect stays off here: `musallahboard-agent mode offline` below turns
-    # it on and `mode online` turns it off, so the mode alone decides whether
-    # this board can ever act as a DHCP server.
+    # autoconnect stays off here: `musallahboard-agent service-port on` below
+    # turns it on and `service-port off` turns it off, so that switch alone
+    # decides whether this board can ever act as a DHCP server.
     local svc_props=(
         connection.interface-name "$SERVICE_IFACE"
         connection.autoconnect no
@@ -1051,165 +1397,20 @@ offline_service_port() {
     info "$SERVICE_IFACE: shared, ${SERVICE_ADDR}, IPv6 off — a laptop plugged in gets a 10.77.0.x address"
 }
 
-offline_firewall() {
-    section "Offline: firewall"
+service_port_firewall() {
+    section "Service port: firewall"
     # SSH is already allowed on every interface by the normal setup. ufw skips
-    # rules that already exist, so these are safe to re-add.
+    # rules that already exist, so these are safe to re-add. The upload server
+    # (port 80) is reachable only from the service port's own subnet on eth0,
+    # never from Wi-Fi or a building network.
     sudo ufw allow in on "$SERVICE_IFACE" to any port 67 proto udp comment 'musallahboard service port DHCP'
     sudo ufw allow in on "$SERVICE_IFACE" to any port 53 comment 'musallahboard service port DNS'
-    info "Firewall: DHCP and DNS allowed in on $SERVICE_IFACE (alongside SSH)"
+    sudo ufw allow in on "$SERVICE_IFACE" from "$SERVICE_NET" to any port 80 proto tcp comment 'musallahboard upload server'
+    info "Firewall: DHCP, DNS and uploads (80/tcp from $SERVICE_NET) allowed in on $SERVICE_IFACE"
 }
 
-# The restricted account for pushing bundles (docs/offline.md, "Push account").
-# Every session is confined to `musallahboard-agent gate` twice over: by
-# command="..." on each key, and by an sshd ForceCommand for the user, so a key
-# added to authorized_keys by hand without the option is still confined. The
-# account's only sudo right is running the gate.
-offline_push_account() {
-    section "Offline: push account ($PUSH_USER)"
-    local force_cmd="sudo -n $BINARY_DEST gate"
-    local admin="${SUDO_USER:-$(id -un)}"
-
-    "$BINARY_DEST" help 2>&1 | grep -q "gate <request>" || \
-        error "The installed agent has no 'gate' command. Update it first (packaging/update.sh, or make deploy PI=...)."
-
-    if ! id "$PUSH_USER" &>/dev/null; then
-        sudo useradd --system --create-home --home-dir "/home/$PUSH_USER" --shell /bin/sh "$PUSH_USER"
-        info "Created $PUSH_USER"
-    fi
-    # '*' rather than a locked '!' password: no password can ever match, but
-    # sshd does not treat the account as locked and refuse its keys.
-    sudo usermod -p '*' "$PUSH_USER"
-
-    # Keys. root owns the file, so the account could not change its own keys
-    # even if it could run anything.
-    local ssh_dir="/home/$PUSH_USER/.ssh"
-    local keys="$ssh_dir/authorized_keys"
-    sudo install -d -o root -g root -m 0755 "$ssh_dir"
-    sudo touch "$keys"
-    sudo chown root:root "$keys"
-    sudo chmod 0644 "$keys"
-    local key kt blob rest
-    for key in "${PUSH_KEYS[@]}"; do
-        read -r kt blob rest <<< "$key"
-        [[ "$kt" =~ ^(ssh-|ecdsa-|sk-) && -n "$blob" ]] || \
-            error "--push-key is not a public key (expected 'ssh-ed25519 AAAA... name'): $key"
-        if sudo grep -qF " $kt $blob" "$keys"; then
-            info "Key ${rest:-$kt} already allowed"
-        else
-            echo "restrict,command=\"$force_cmd\" $kt $blob${rest:+ $rest}" | sudo tee -a "$keys" > /dev/null
-            info "Allowed key ${rest:-$kt} to push"
-        fi
-    done
-
-    # sudo: the gate as root, nothing else. It needs SSH_ORIGINAL_COMMAND,
-    # which sudo would otherwise strip.
-    local tmp
-    tmp="$(mktemp)"
-    cat > "$tmp" << EOF
-# MusallahBoard push account (setup.sh --offline): may run the gate, and nothing else.
-Defaults:$PUSH_USER env_keep += "SSH_ORIGINAL_COMMAND"
-$PUSH_USER ALL=(root) NOPASSWD: $BINARY_DEST gate
-EOF
-    if ! sudo visudo -cf "$tmp" > /dev/null; then
-        rm -f "$tmp"
-        error "The generated sudoers rule for $PUSH_USER did not validate; nothing was installed."
-    fi
-    sudo install -o root -g root -m 0440 "$tmp" "$PUSH_SUDOERS"
-    rm -f "$tmp"
-    info "sudo: $PUSH_USER may run '$BINARY_DEST gate' only"
-
-    _push_sshd "$admin" "$force_cmd"
-
-    local count
-    count="$(sudo grep -c . "$keys" || true)"
-    if [[ "$count" == "0" ]]; then
-        warn "No push keys yet. Add one (re-running is safe):"
-        warn "  bash setup.sh --offline --push-key=\"ssh-ed25519 AAAA... phone\""
-    else
-        info "$count key(s) can push as $PUSH_USER"
-    fi
-}
-
-# Admit the push account to sshd and confine it, without being able to lock
-# the admin out: the admin's effective sshd settings are captured before and
-# compared after, and any difference (or a config sshd rejects) restores the
-# previous files before sshd is reloaded.
-_push_sshd() {
-    local admin="$1" force_cmd="$2"
-    local probe="host=localhost,addr=127.0.0.1"
-    # allowusers is expected to change (it gains the push account), so it is
-    # left out of the comparison and checked separately below.
-    _effective() {
-        local cfg
-        cfg="$(sudo /usr/sbin/sshd -T -C "user=$1,$probe" 2>/dev/null)" || return 1
-        grep -v '^allowusers ' <<< "$cfg" | sort
-    }
-
-    local before
-    before="$(_effective "$admin")" || true
-    [[ -n "$before" ]] || error "Could not read sshd's effective configuration (sshd -T). Nothing was changed."
-
-    local backup
-    backup="$(mktemp -d)"
-    [[ -f "$SSHD_HARDENING" ]] && sudo cp -p "$SSHD_HARDENING" "$backup/hardening"
-    [[ -f "$PUSH_SSHD_CONF" ]] && sudo cp -p "$PUSH_SSHD_CONF" "$backup/push"
-    _restore() {
-        if [[ -f "$backup/hardening" ]]; then sudo cp -p "$backup/hardening" "$SSHD_HARDENING"; fi
-        if [[ -f "$backup/push" ]]; then sudo cp -p "$backup/push" "$PUSH_SSHD_CONF"; else sudo rm -f "$PUSH_SSHD_CONF"; fi
-        rm -rf "$backup"
-    }
-
-    # The normal setup's AllowUsers admits only the admin.
-    if sudo grep -qE '^AllowUsers\b' "$SSHD_HARDENING" 2>/dev/null && \
-       ! sudo grep -qE "^AllowUsers\b.*[[:space:]]$PUSH_USER([[:space:]]|\$)" "$SSHD_HARDENING"; then
-        sudo sed -i -E "s/^(AllowUsers\b.*)\$/\1 $PUSH_USER/" "$SSHD_HARDENING"
-    fi
-
-    sudo tee "$PUSH_SSHD_CONF" > /dev/null << EOF
-# MusallahBoard push account (setup.sh --offline). Confines every session of
-# $PUSH_USER to the gate, whatever its authorized_keys say.
-Match User $PUSH_USER
-    ForceCommand $force_cmd
-    PermitTTY no
-    AllowTcpForwarding no
-    AllowStreamLocalForwarding no
-    AllowAgentForwarding no
-    X11Forwarding no
-    PermitTunnel no
-    PasswordAuthentication no
-EOF
-    sudo chmod 0644 "$PUSH_SSHD_CONF"
-
-    # Captured, not piped into grep -q: under pipefail an early grep exit can
-    # SIGPIPE sshd and turn a pass into a false failure.
-    local problem="" admin_cfg="" push_cfg=""
-    if sudo /usr/sbin/sshd -t 2> /dev/null; then
-        admin_cfg="$(sudo /usr/sbin/sshd -T -C "user=$admin,$probe" 2>/dev/null || true)"
-        push_cfg="$(sudo /usr/sbin/sshd -T -C "user=$PUSH_USER,$probe" 2>/dev/null || true)"
-    else
-        problem="sshd rejected the new configuration"
-    fi
-    if [[ -z "$problem" && "$(_effective "$admin" || true)" != "$before" ]]; then
-        problem="it would have changed sshd settings for $admin"
-    elif [[ -z "$problem" ]] && sudo grep -qE '^AllowUsers\b' "$SSHD_HARDENING" 2>/dev/null && \
-         ! grep -qE "^allowusers .*\b$admin\b" <<< "$admin_cfg"; then
-        problem="$admin would no longer be allowed to log in"
-    elif [[ -z "$problem" ]] && ! grep -qxF "forcecommand $force_cmd" <<< "$push_cfg"; then
-        problem="sshd did not apply the ForceCommand to $PUSH_USER"
-    fi
-    if [[ -n "$problem" ]]; then
-        _restore
-        error "Not enabling SSH for $PUSH_USER: $problem. The previous sshd configuration was restored."
-    fi
-    rm -rf "$backup"
-
-    sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd 2>/dev/null || true
-    info "sshd: $PUSH_USER allowed, confined to the gate; $admin unchanged"
-}
-
-offline_rtc() {
-    section "Offline: RTC (DS3231)"
+service_port_rtc() {
+    section "Service port: RTC (DS3231)"
     local config_txt=/boot/firmware/config.txt
     [[ -f "$config_txt" ]] || config_txt=/boot/config.txt
 
@@ -1232,14 +1433,15 @@ offline_rtc() {
     # The ds3231 driver is a module, so the kernel's own boot-time read of the
     # RTC is over by the time it loads, and udev cannot set the clock itself
     # (systemd-udevd runs without CAP_SYS_TIME). Instead udev starts a oneshot
-    # unit when rtc0 appears, and that unit reads the RTC.
+    # unit when rtc0 appears, and that unit reads the RTC. Writing it back is
+    # the agent's job (90-musallahboard-rtc.rules gives it access).
     sudo tee /etc/udev/rules.d/85-musallahboard-rtc.rules > /dev/null << 'EOF'
-# MusallahBoard offline mode: set the system clock from the RTC when it appears.
+# MusallahBoard: set the system clock from the RTC when it appears.
 ACTION=="add", SUBSYSTEM=="rtc", KERNEL=="rtc0", TAG+="systemd", ENV{SYSTEMD_WANTS}+="musallahboard-rtc.service"
 EOF
     sudo tee "$UNIT_DIR/musallahboard-rtc.service" > /dev/null << 'EOF'
 [Unit]
-Description=Set the system clock from the RTC (MusallahBoard offline mode)
+Description=Set the system clock from the RTC (MusallahBoard)
 Documentation=https://github.com/LensBridge/agent
 DefaultDependencies=no
 Before=time-set.target
@@ -1252,66 +1454,62 @@ EOF
     sudo systemctl daemon-reload
     sudo udevadm control --reload
     info "RTC read at boot via musallahboard-rtc.service"
-    warn "Reboot once with the RTC fitted, then run 'mbpush status' (or mbpush <bundle>) to set and save the time."
+    warn "Reboot once with the RTC fitted. The agent saves the time to it whenever it corrects the clock,"
+    warn "for example on the next upload from a laptop (mbpush or http://10.77.0.1/)."
 }
 
-offline_board_app() {
-    section "Offline: board app"
-    if [[ -n "$BOARD_DIST" ]]; then
-        sudo "$BINARY_DEST" app install "$BOARD_DIST"
-    else
-        info "Keeping the installed board app ($KIOSK_SHARE_DIR/board)"
-    fi
+service_port_switch_on() {
+    section "Service port: switch on"
+    # If eth0 is on a network right now, `service-port on` leaves the port
+    # stopped (it would serve DHCP there) and says so. It restarts the agent,
+    # which then also runs with the units installed above.
+    sudo "$BINARY_DEST" service-port on
 }
 
-offline_switch_mode() {
-    section "Offline: switch mode"
-    # If eth0 is on this network right now, `mode offline` leaves the service
-    # port stopped (it would serve DHCP here) and says so.
-    sudo "$BINARY_DEST" mode offline
-}
-
-offline_summary() {
-    local admin="${SUDO_USER:-$(id -un)}"
+service_port_summary() {
     cat << EOF
 
   +----------------------------------------------------------+
-  |  Offline mode is ON                                      |
+  |  The service port is ON                                  |
   +----------------------------------------------------------+
 
-  The board now serves its installed bundle and makes no network calls.
+  The board keeps showing what it has installed, and syncs from LensBridge
+  whenever it can reach it. To update it without internet:
 
-  To update it: plug a laptop into its ethernet port, then on the laptop
-    mbpush --user $admin musallahboard-<id>-<date>.zip
-  (mbpush talks to $admin@${SERVICE_ADDR%/*} with the SSH key you use now.
-  Allow up to a minute after plugging in: the board first tries to get an
-  address from the laptop, and only then starts serving one.)
+    - USB stick: copy the .mbu files to it (root, or a MusallahBoard/ folder)
+      and plug it in. The screen says when it is done.
+    - Laptop or phone: plug into the board's ethernet port and open
+        http://${SERVICE_ADDR%/*}/
+      or run  mbpush <file.mbu>...  (it also shows the board's clock).
+      Allow up to a minute after plugging in: the board first tries to get
+      an address from the laptop, and only then starts serving one.
 
-  Check it any time:   sudo musallahboard-agent status
-  Back to online:      sudo musallahboard-agent mode online
+  Check it any time:            sudo musallahboard-agent status
+  Before joining a network:     sudo musallahboard-agent service-port off
 
 EOF
 }
 
-offline_main() {
-    offline_preflight
-    offline_install_packages
-    offline_state_dir
-    offline_service_port
-    offline_firewall
-    offline_push_account
-    if [[ "$OFFLINE_RTC" == "1" ]]; then
-        offline_rtc
+service_port_main() {
+    local admin="${SUDO_USER:-$(id -un)}"
+    service_port_preflight
+    service_port_install_packages
+    cleanup_v1 "$admin"
+    service_port_v2_payload
+    service_port_profiles
+    service_port_firewall
+    if [[ "$SERVICE_PORT_RTC" == "1" ]]; then
+        service_port_rtc
     fi
-    offline_board_app
-    offline_switch_mode
-    offline_summary
+    fetch_trust_if_needed
+    service_port_switch_on
+    service_port_summary
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 main() {
-    if [[ "$OFFLINE" == "1" ]]; then
-        offline_main
+    if [[ "$SERVICE_PORT" == "1" ]]; then
+        service_port_main
         return
     fi
 
@@ -1328,6 +1526,7 @@ main() {
     setup_display_stack
     disable_tty1_autologin
     harden_ssh
+    cleanup_v1 "$ADMIN_USER"
     setup_logind
     setup_journal
     setup_unattended_upgrades
@@ -1336,11 +1535,14 @@ main() {
 
     install_agent_binary
     install_sudoers
+    install_state_dirs
     install_systemd_units
+    install_udev_rules
     install_kiosk_launcher
     install_splash_page
     enable_services
     apply_appliance_policy
+    fetch_trust_if_needed
 
     print_summary
 }

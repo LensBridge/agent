@@ -1,0 +1,97 @@
+name: Release
+
+# Push a tag to publish a release: `git tag 0.3.0 && git push origin 0.3.0`.
+# The tag is the version (a leading "v" is dropped), so it must be
+# MAJOR.MINOR.PATCH: agent packages refuse anything else.
+#
+# Needs, in the repository settings:
+#   - variable MB_RELEASE_PUBLIC_KEYS: comma-separated base64 release public
+#     keys (from `mbpack keygen`), compiled into the agent and mbpack
+#   - secret MB_RELEASE_SIGNING_KEY: the base64 seed of one of those keys,
+#     used to sign the agent packages
+# docs/architecture.md sections 4 and 5; README.md, "Release signing".
+
+on:
+  push:
+    tags: ['*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_KEYS: ${{ vars.MB_RELEASE_PUBLIC_KEYS }}
+      MB_RELEASE_SIGNING_KEY: ${{ secrets.MB_RELEASE_SIGNING_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Version from the tag
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag '$tag' is not MAJOR.MINOR.PATCH (optionally with a leading v)."
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+
+      # A release without a compiled-in key could never update itself, and an
+      # unsigned package is refused by every board. Fail before building.
+      - name: Check signing configuration
+        run: |
+          if [[ -z "$RELEASE_KEYS" ]]; then
+            echo "::error::Repository variable MB_RELEASE_PUBLIC_KEYS is not set."
+            exit 1
+          fi
+          if [[ -z "$MB_RELEASE_SIGNING_KEY" ]]; then
+            echo "::error::Repository secret MB_RELEASE_SIGNING_KEY is not set."
+            exit 1
+          fi
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build release tarballs
+        run: |
+          make package
+          make package-amd64
+
+      - name: Build and sign agent packages
+        run: |
+          make package-mbu
+          make package-mbu-amd64
+
+      # mbpack was built with RELEASE_KEYS, so verify checks the packages
+      # against exactly the keys the new agent trusts.
+      - name: Verify agent packages
+        run: |
+          for f in build/musallahboard-agent-"$VERSION"-*.mbu; do
+            build/mbpack verify "$f"
+          done
+
+      - name: Build mbpush
+        run: make mbpush
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: true
+          files: |
+            build/musallahboard-agent-${{ env.VERSION }}-arm64.tar.gz
+            build/musallahboard-agent-${{ env.VERSION }}-amd64.tar.gz
+            build/musallahboard-agent-${{ env.VERSION }}-arm64.mbu
+            build/musallahboard-agent-${{ env.VERSION }}-amd64.mbu
+            build/agent-channel-arm64.json
+            build/agent-channel-amd64.json
+            build/musallahboard-agent-arm64
+            build/musallahboard-agent-amd64
+            build/mbpush-windows-amd64.exe
+            build/mbpush-darwin-arm64
+            build/mbpush-linux-amd64

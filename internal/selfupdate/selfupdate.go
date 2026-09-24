@@ -171,7 +171,7 @@ func (u *Updater) apply(ctx context.Context, out *Outcome) error {
 	// Consumed; a leftover would only waste space.
 	_ = os.Remove(u.Layout.StagedPackage())
 
-	ring, err := trust.LoadRing(u.TrustPath)
+	ring, err := trust.LoadRingRootOwned(u.TrustPath)
 	if err != nil {
 		return refuse("cannot read the trust store: %v", err)
 	}
@@ -286,7 +286,7 @@ func (u *Updater) extract(pkg *mbu.Package, binary string) error {
 }
 
 func (u *Updater) hasContentKey() bool {
-	s, err := trust.Load(u.TrustPath)
+	s, err := trust.LoadRootOwned(u.TrustPath)
 	return err == nil && len(s.Content) > 0
 }
 

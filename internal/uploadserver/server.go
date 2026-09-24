@@ -174,6 +174,10 @@ type ImportResponse struct {
 var safeNameRE = regexp.MustCompile(`[^A-Za-z0-9._-]`)
 
 func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
+	// The uploader stamps its clock when it starts sending; receiving and
+	// installing can take minutes. Measure the offset now and apply it to the
+	// board's clock at the end, rather than the stale absolute time.
+	received := s.d.Now()
 	mt, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mt != "multipart/form-data" || params["boundary"] == "" {
 		writeJSON(w, http.StatusBadRequest, ImportResponse{Message: "send the packages as multipart/form-data, one 'package' part per file"})
@@ -250,6 +254,7 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	resp := ImportResponse{Results: b.Results}
 	if v := r.Header.Get("X-MB-Client-Time"); v != "" && s.d.ApplyClientTime != nil {
 		if unix, err := strconv.ParseInt(v, 10, 64); err == nil {
+			unix += int64(s.d.Now().Sub(received) / time.Second)
 			rep := s.d.ApplyClientTime(unix, b)
 			resp.Clock = &rep
 		}

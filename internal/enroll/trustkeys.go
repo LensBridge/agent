@@ -40,7 +40,7 @@ func PinContentKeys(trustPath string, keys []SigningKey, note string) ([]string,
 		}
 		pubs = append(pubs, pub)
 	}
-	s, err := trust.Load(trustPath)
+	s, err := trust.LoadForWrite(trustPath)
 	if err != nil {
 		return nil, err
 	}

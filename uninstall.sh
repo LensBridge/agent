@@ -34,10 +34,14 @@ systemctl stop musallahboard-agent.service 2>/dev/null || true
 systemctl stop musallahboard-kiosk.service 2>/dev/null || true
 systemctl stop musallahboard-kiosk-watch.path 2>/dev/null || true
 systemctl stop musallahboard-kiosk-reload.service 2>/dev/null || true
+systemctl stop musallahboard-agent-update.path 2>/dev/null || true
+systemctl stop musallahboard-agent-update.service 2>/dev/null || true
+systemctl stop 'musallahboard-usb-import@*.service' 2>/dev/null || true
 
 systemctl disable musallahboard-agent.service 2>/dev/null || true
 systemctl disable musallahboard-kiosk.service 2>/dev/null || true
 systemctl disable musallahboard-kiosk-watch.path 2>/dev/null || true
+systemctl disable musallahboard-agent-update.path 2>/dev/null || true
 
 info "Services stopped and disabled"
 
@@ -48,14 +52,29 @@ rm -f /lib/systemd/system/musallahboard-agent.service
 rm -f /lib/systemd/system/musallahboard-kiosk.service
 rm -f /lib/systemd/system/musallahboard-kiosk-watch.path
 rm -f /lib/systemd/system/musallahboard-kiosk-reload.service
+rm -f /lib/systemd/system/musallahboard-agent-update.path
+rm -f /lib/systemd/system/musallahboard-agent-update.service
+rm -f '/lib/systemd/system/musallahboard-usb-import@.service'
+rm -f /lib/systemd/system/musallahboard-rtc.service
 
 systemctl daemon-reload
 info "Systemd units removed"
+
+# ── Remove udev rules ─────────────────────────────────────────────────────────
+section "Removing udev rules"
+
+rm -f /etc/udev/rules.d/90-musallahboard-usb.rules
+rm -f /etc/udev/rules.d/90-musallahboard-rtc.rules
+rm -f /etc/udev/rules.d/85-musallahboard-rtc.rules
+udevadm control --reload 2>/dev/null || true
+info "udev rules removed (USB import, RTC access, RTC boot-time read)"
 
 # ── Remove binary and scripts ─────────────────────────────────────────────────
 section "Removing binaries and scripts"
 
 rm -f /usr/bin/musallahboard-agent
+rm -f /usr/bin/.musallahboard-agent.new
+rm -rf /usr/lib/musallahboard
 rm -f /usr/bin/start-kiosk.sh
 info "Binaries removed"
 
@@ -64,6 +83,40 @@ section "Removing sudoers"
 
 rm -f /etc/sudoers.d/musallahboard-agent
 info "Sudoers removed"
+
+# ── Remove the service port ───────────────────────────────────────────────────
+# setup.sh --service-port (v1: --offline). Left behind, the service-port
+# connection would keep eth0 able to act as a DHCP server with no agent to
+# switch it off.
+section "Removing the service port"
+
+if command -v nmcli &>/dev/null; then
+    for conn in musallahboard-service-port musallahboard-lan; do
+        if nmcli -g NAME connection show 2>/dev/null | grep -qxF "$conn"; then
+            nmcli connection delete "$conn" >/dev/null || warn "Could not delete NetworkManager connection $conn"
+        fi
+    done
+fi
+if command -v ufw &>/dev/null; then
+    ufw delete allow in on eth0 to any port 67 proto udp >/dev/null 2>&1 || true
+    ufw delete allow in on eth0 to any port 53 >/dev/null 2>&1 || true
+    ufw delete allow in on eth0 from 10.77.0.0/24 to any port 80 proto tcp >/dev/null 2>&1 || true
+fi
+info "Service port removed (if it was set up)"
+
+# ── Remove the v1 push account ────────────────────────────────────────────────
+# Only on a board set up for v1 offline mode and never re-run through v2
+# setup.sh, which removes it.
+if id mbpush &>/dev/null || [[ -e /etc/sudoers.d/musallahboard-push || -e /etc/ssh/sshd_config.d/99-musallahboard-push.conf ]]; then
+    section "Removing the v1 push account"
+    rm -f /etc/sudoers.d/musallahboard-push
+    rm -f /etc/ssh/sshd_config.d/99-musallahboard-push.conf
+    if id mbpush &>/dev/null; then
+        pkill -9 -u mbpush 2>/dev/null || true
+        userdel --remove mbpush 2>/dev/null || userdel mbpush 2>/dev/null || true
+    fi
+    info "Removed the push account (mbpush), its sudo rule and sshd settings"
+fi
 
 # ── Remove config and state ───────────────────────────────────────────────────
 section "Removing configuration and state"
@@ -127,7 +180,8 @@ cat << 'EOF'
   +----------------------------------------------------------+
 
   Removed:
-    - musallahboard-agent binary and service
+    - musallahboard-agent binary, service, self-updater and USB import
+    - udev rules and the service port (NetworkManager profiles, ufw rules)
     - musallahboard-kiosk service and launcher
     - Service users (musallahdaemon, musallahkiosk)
     - Configuration (/etc/musallahboard)
@@ -139,7 +193,7 @@ cat << 'EOF'
     - Packages (cage, chromium, rpi-connect, ufw, etc.)
     - Admin user and SSH key
     - Hostname and timezone
-    - UFW rules
+    - UFW rules other than the service port's
     - Journal config
     - Unattended upgrades config
 

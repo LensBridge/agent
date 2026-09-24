@@ -262,3 +262,26 @@ func LoadRing(path string) (*Ring, error) {
 	}
 	return s.Ring()
 }
+
+// LoadRootOwned is Load for code running as root (the self-updater, the
+// trust CLI): the file must be a regular, root-owned, singly linked file
+// nobody else can write, or it is refused.
+func LoadRootOwned(path string) (*Store, error) {
+	if err := checkRootOwned(path); err != nil {
+		return nil, err
+	}
+	return Load(path)
+}
+
+// LoadRingRootOwned is LoadRing with LoadRootOwned's checks.
+func LoadRingRootOwned(path string) (*Ring, error) {
+	s, err := LoadRootOwned(path)
+	if err != nil {
+		return nil, err
+	}
+	return s.Ring()
+}
+
+// LoadForWrite is what root commands that rewrite the store use, so a key the
+// daemon planted is never carried into the new root-owned file.
+func LoadForWrite(path string) (*Store, error) { return LoadRootOwned(path) }
