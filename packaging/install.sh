@@ -13,7 +13,6 @@
 #
 #   - switching the default boot target / disabling display managers
 #     → packaging/appliance-policy.sh
-#   - writing /etc/musallahboard/board-url (optional hosted fallback)
 #                                                    → provisioner or firstboot
 #   - the ethernet service port (NetworkManager profiles, ufw rules)
 #                                                    → setup.sh --service-port
@@ -114,13 +113,10 @@ while [[ $# -gt 0 ]]; do
         # ignoring a name here would install a kiosk running as the wrong user.
         --kiosk-user|--kiosk-user=*)
             error "--kiosk-user is gone; the display account is always '$KIOSK_USER'. Use --kiosk." ;;
-        # Per-device state, not payload, and optional since v2: board-url is
-        # only the hosted fallback the kiosk shows until the first signed app
-        # release is installed (docs/architecture.md section 14). The
-        # provisioner writes it (common.sh), or firstboot does from
-        # musallahboard.conf.
+        # There is no hosted board any more: the kiosk always shows the
+        # board the agent serves (docs/architecture.md section 14).
         --board-url|--board-url=*)
-            error "--board-url is gone; write /etc/musallahboard/board-url from the provisioner or musallahboard.conf (optional: a hosted fallback until the first app release is installed)." ;;
+            error "--board-url is gone: the kiosk always shows the board served by the agent." ;;
         --*)        error "Unknown flag: $1" ;;
         *)
             [[ -n "$AGENT_DIR" ]] && error "Unexpected argument: $1"
@@ -234,7 +230,7 @@ mkdir -p "$CONFIG_DIR"
 # rather than root.
 chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR"
 # 0751 (not 0750): the unprivileged kiosk user must traverse this dir to read
-# the agent-written board-url / kiosk-url files. 0751 grants traverse-by-path
+# the agent-written kiosk-url file. 0751 grants traverse-by-path
 # without directory listing; agent.key stays 0600 so it is unreadable anyway.
 chmod 0751 "$CONFIG_DIR"
 

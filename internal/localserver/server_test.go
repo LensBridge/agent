@@ -83,10 +83,6 @@ func TestPayloadPicksDayAndClamps(t *testing.T) {
 			t.Errorf("day %d: %d %s", c.day, w.Code, w.Body)
 		}
 	}
-	s := New(Deps{Layout: l, DeviceID: dev, Now: at(24, 12)})
-	if w := get(t, s, "/api/musallah/payload?deviceId=someone-else"); w.Code != 404 {
-		t.Errorf("wrong device: %d", w.Code)
-	}
 }
 
 func TestWeatherOverlay(t *testing.T) {

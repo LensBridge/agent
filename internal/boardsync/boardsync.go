@@ -52,8 +52,8 @@ const (
 	maxErrorBody = 4 << 10
 	// maxChannelBytes bounds a channel pointer file.
 	maxChannelBytes = 1 << 20
-	// maxWeatherPayload bounds the live payload the weather is taken from.
-	maxWeatherPayload = 16 << 20
+	// maxWeatherResponse bounds GET /api/agent/weather's answer.
+	maxWeatherResponse = 1 << 20
 )
 
 // Deps is what a Syncer needs.
@@ -182,7 +182,7 @@ func (s *Syncer) Status() Status {
 	return st
 }
 
-// Weather returns the latest weather object from the live payload, if it was
+// Weather returns the latest weather object from the backend, if it was
 // fetched less than WeatherMaxAge ago.
 func (s *Syncer) Weather() (json.RawMessage, bool) {
 	s.mu.Lock()
@@ -431,16 +431,17 @@ func (s *Syncer) weatherLoop(ctx context.Context) {
 	}
 }
 
-// FetchWeather fetches the live payload and keeps its weather object. A
-// payload whose weather is not an object (null: the backend has none) clears
-// the overlay; a failed fetch keeps the old one until it ages out.
+// FetchWeather asks the backend for the current weather (GET
+// /api/agent/weather, device-authenticated) and keeps it. A null weather (the
+// backend has none) clears the overlay; a failed fetch keeps the old one until
+// it ages out.
 func (s *Syncer) FetchWeather(ctx context.Context) error {
-	u := s.backend("/api/musallah/payload") + "?deviceId=" + urlQueryEscape(s.d.Cfg.DeviceID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.backend("/api/agent/weather"), nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Accept", "application/json")
+	signRequest(req, nil, s.d.Cfg.DeviceID, s.d.Key, s.now())
 	resp, err := s.do(req)
 	if err != nil {
 		return err
@@ -449,15 +450,16 @@ func (s *Syncer) FetchWeather(ctx context.Context) error {
 	if err := responseError(resp); err != nil {
 		return err
 	}
-	var payload map[string]json.RawMessage
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxWeatherPayload)).Decode(&payload); err != nil {
-		return fmt.Errorf("live payload is not a JSON object: %w", err)
+	var body struct {
+		Weather json.RawMessage `json:"weather"`
 	}
-	w := payload["weather"]
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxWeatherResponse)).Decode(&body); err != nil {
+		return fmt.Errorf("weather response is not JSON: %w", err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if isJSONObject(w) {
-		s.weather = append(json.RawMessage(nil), w...)
+	if isJSONObject(body.Weather) {
+		s.weather = append(json.RawMessage(nil), body.Weather...)
 		s.weatherAt = s.now()
 	} else {
 		s.weather = nil

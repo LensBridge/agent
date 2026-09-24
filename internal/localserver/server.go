@@ -134,12 +134,8 @@ func (s *Server) Status() Status {
 	return st
 }
 
-func (s *Server) handlePayload(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handlePayload(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Cache-Control", cacheNoStore)
-	if id := r.URL.Query().Get("deviceId"); id != "" && id != s.d.DeviceID {
-		writeJSONError(w, http.StatusNotFound, "unknown device")
-		return
-	}
 	c, err := s.d.Layout.CurrentContent()
 	if errors.Is(err, store.ErrNoContent) {
 		writeJSONError(w, http.StatusServiceUnavailable, "no content installed")

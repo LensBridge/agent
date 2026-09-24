@@ -141,8 +141,8 @@ Per type:
 - `content.media` lists every media file with its `contentType`
   (`image/jpeg`, `image/png`, `image/webp`, `image/gif`, `image/avif`,
   `image/svg+xml`, or `application/octet-stream`).
-- Each payload file is a JSON object: exactly what `GET /api/musallah/payload`
-  would return at the start of that day in `timezone`, with `weather: null`,
+- Each payload file is a JSON object: the backend's `MusallahBoardPayload`
+  (built by `BoardPayloadAssembler.assembleForDay`) for the start of that day in `timezone`, with `weather: null`,
   posters active at any point that day, and every non-empty `posterUrl`
   rewritten to `/media/<sha256>.<ext>` naming a listed media file. The agent
   rejects any payload with a `posterUrl` (at any depth) that is not such a path.
@@ -155,8 +155,7 @@ Per type:
   needs. The agent refuses a build needing a newer API than it serves, with
   "update the agent first".
 - `files` are the build output, rooted at the build directory: `index.html`
-  must be one of them. Deploy-only files a hosting plugin adds to the output
-  (Cloudflare's `.assetsignore` and `wrangler.json`) are left out.
+  must be one of them.
 
 **`agent`** (signed by a *release* key)
 
@@ -289,7 +288,7 @@ Loopback only. `GET`/`HEAD` only; anything else is `405`. All JSON errors are
 
 | Path | Behaviour |
 |---|---|
-| `/api/musallah/payload` | Today's payload from the current content bundle, verbatim. `?deviceId=` optional; if present and not this device, `404`. No content: `503 {"message":"no content installed"}`. `Cache-Control: no-store`. |
+| `/api/musallah/payload` | Today's payload from the current content bundle, verbatim (plus the weather overlay). No content: `503 {"message":"no content installed"}`. `Cache-Control: no-store`. |
 | `/api/local/status` | Status object below. `no-store`. |
 | `/api/local/events` | Server-Sent Events, below. |
 | `/api/*` (other) | `404` JSON, never the SPA. |
@@ -298,9 +297,8 @@ Loopback only. `GET`/`HEAD` only; anything else is `405`. All JSON errors are
 | anything else | Static file from the current app release. Unknown paths fall back to `index.html` (`no-cache`); `/assets/*` is immutable, and a missing `/assets/*` file is `404`. No app installed: the agent's built-in "board app not installed" page, `503`. |
 
 **Weather overlay.** Content packages carry `weather: null`. When the board is
-online, the sync loop also fetches the live `GET /api/musallah/payload?deviceId=<id>`
-every 30 minutes and keeps only its `weather` object (display data, fetched over
-TLS from the configured backend). The payload endpoint substitutes it for
+online, the sync loop fetches `GET /api/agent/weather` (device-authenticated,
+section 9.3) every 30 minutes. The payload endpoint substitutes that object for
 `weather` while it is less than 3 hours old; otherwise `weather` stays `null`
 and the page hides the chip.
 
@@ -404,7 +402,7 @@ The daemon, when `content_sync` is on and the board is enrolled:
 
 - syncs at startup, every 30 minutes, and 10 s after any message on the
   backend's refresh channel (`wss://<backend>/api/refresh-musallahboard?deviceId=<id>`,
-  the same channel the hosted board used; debounced),
+  debounced),
 - with `POST /api/agent/content-bundle`, device-authenticated (9.2), body
   `{"days": <content_days, default 7>, "haveMedia": ["<sha256>", ...]}`,
 - and imports the returned package with source `sync`.
@@ -445,6 +443,7 @@ only repeat an idempotent read.
 | Endpoint | Auth | Returns |
 |---|---|---|
 | `POST /api/agent/content-bundle` | device (9.2) | `200 application/vnd.musallahboard.mbu` signed content package. `503` if no content signing key is configured. |
+| `GET /api/agent/weather` | device (9.2) | `{"weather": <object> or null, "fetchedAt": "<ISO-8601>"}`. Never a 5xx for missing weather: `weather` is `null`. |
 | `GET /api/agent/signing-keys` | none | `{"content": [{"keyId", "publicKey"}]}` |
 | `POST /api/agent/enroll` | token | unchanged, plus `contentSigningKeys: [{"keyId", "publicKey"}]` |
 | `GET /api/admin/board/devices/{id}/offline-bundle?days=14` | `BOARD_DEVICE_READ` | now the signed v2 `.mbu` (filename `musallahboard-content-<id8>-<firstDay>.mbu`), media always included |
@@ -606,11 +605,6 @@ connecting a board to a network permanently.
 - `kiosk-url` is `http://127.0.0.1:8080/` once enrolled (no query string; the
   page asks the agent who it is). Before enrollment it is absent and the
   existing `waiting.html` splash shows.
-- Migration guard: until the first app release is installed, a board with a v1
-  `/etc/musallahboard/board-url` keeps loading the hosted site
-  (`<board-url>?deviceId=<id>`), so upgrading an online board's agent before a
-  signed app release reaches it never blanks the screen. The first app install
-  rewrites `kiosk-url` to the local server.
 - `musallahboard-kiosk.service` is ordered `After=` and `Wants=`
   `musallahboard-agent.service`, and the agent reports `READY=1` only after the
   local server is listening, so Chromium never starts before the server.
@@ -619,19 +613,20 @@ connecting a board to a network permanently.
 
 ## 15. Frontend (MusallahBoard)
 
-One build serves both the hosted site (Cloudflare) and the board.
+The board app only ever runs served by the agent; there is no hosted board.
+The backend's live `GET /api/musallah/payload` has been removed: boards read
+per-day payloads from installed content, and weather comes through the agent.
 
-- **Local runtime** when the page is served from `127.0.0.1:8080` or
-  `localhost:8080`, or the URL has `?runtime=local` (or v1's `?mode=offline`).
-  Then: API base is same-origin; the device id comes from
-  `/api/local/status` (no cookie, no URL parameter needed); `/api/local/events`
-  drives in-place refreshes and app reloads; no backend refresh socket.
+- API calls are same-origin to the agent. The device id comes from
+  `/api/local/status`; `/api/local/events` drives in-place refreshes and app
+  reloads.
 - No content yet: a clear "waiting for content" screen that says whether the
   board is syncing (with the last error) or needs a USB stick / upload.
-- Stale content: the existing "Content last updated ..." note when
-  `staleDays > 0`.
-- Diagnostics (Alt+Shift+F) show runtime, agent and app versions, content range
-  and source, days remaining, sync status.
+- Stale content: the "Content last updated ..." note when `staleDays > 0`.
+- Diagnostics (Alt+Shift+F) show agent and app versions, content range and
+  source, days remaining, sync status.
+- Development: `npm run dev` proxies `/api` and `/media` to an agent, for
+  example a real board through `ssh -L 8080:127.0.0.1:8080 <board>`.
 - Releases: `npm run package` builds and writes
   `musallahboard-app-<version>.mbu` signed with `MB_RELEASE_SIGNING_KEY`, plus
   `app-channel.json`.

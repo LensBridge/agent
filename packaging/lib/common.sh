@@ -55,8 +55,6 @@ NTP_SYNC_TIMEOUT_SEC="${NTP_SYNC_TIMEOUT_SEC:-90}"
 #
 #   MB_HOSTNAME  MB_ADMIN_USER  MB_TIMEZONE
 #   MB_ADMIN_SSH_KEY
-#   MB_BOARD_URL      optional, never asked for: the hosted board the kiosk
-#                     falls back to until the first app release is installed
 #   MB_ASSUME_YES=1   take the default for anything unset, confirm nothing
 #   MB_REBOOT=auto|never|ask
 #
@@ -152,10 +150,7 @@ _prompt_config() {
     TIMEZONE="${MB_TIMEZONE-}"
     # The kiosk shows the board served by the local agent
     # (docs/architecture.md section 14), so there is no URL to ask for.
-    # MB_BOARD_URL, if given, is only the hosted fallback shown until the
-    # first signed app release is installed.
     KIOSK_URL="http://127.0.0.1:8080/"
-    BOARD_URL="${MB_BOARD_URL-}"
 
     _ask HOSTNAME   "Hostname for this board"          "musallahboard"
     _ask ADMIN_USER "Admin username (SSH/sudo)"        "ibra"
@@ -206,8 +201,6 @@ _prompt_config() {
     printf "  %-18s %s\n" "Admin user:" "$ADMIN_USER  (SSH key auth, passwordless sudo)"
     printf "  %-18s %s\n" "Kiosk user:" "$KIOSK_USER  (auto-login, browser only, no sudo/SSH/shell)"
     printf "  %-18s %s\n" "Kiosk URL:"  "$KIOSK_URL  (served by the agent)"
-    [[ -n "$BOARD_URL" ]] && \
-        printf "  %-18s %s\n" "Hosted fallback:" "$BOARD_URL  (until the first app release is installed)"
     printf "  %-18s %s\n" "Timezone:"   "$TIMEZONE"
     [[ -z "$SSH_PUB_KEY" ]] && warn "  No SSH key — password auth stays enabled; harden after testing."
     echo
@@ -337,17 +330,6 @@ EOF
     else
         sudo rm -f /etc/musallahboard/kiosk.env
         info "Bare-metal host — keeping hardware GL (no kiosk.env)"
-    fi
-
-    # board-url is optional since v2. Once enrolled, the agent writes
-    # kiosk-url itself, pointing at its own local server; board-url only
-    # decides what the kiosk shows until the first signed app release is
-    # installed (the hosted site, instead of a "board app not installed"
-    # page). Written only when given, and an existing one is left alone.
-    if [[ -n "$BOARD_URL" ]]; then
-        printf '%s\n' "$BOARD_URL" | sudo tee /etc/musallahboard/board-url > /dev/null
-        sudo chmod 0644 /etc/musallahboard/board-url
-        info "Wrote /etc/musallahboard/board-url ($BOARD_URL, hosted fallback until the first app release)"
     fi
 }
 

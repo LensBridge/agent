@@ -324,10 +324,13 @@ func TestRefreshURL(t *testing.T) {
 }
 
 func TestWeather(t *testing.T) {
-	body := `{"frames":[],"weather":{"tempC":12,"icon":"sun"}}`
+	body := `{"weather":{"tempC":12,"icon":"sun"},"fetchedAt":"2026-09-24T12:00:00Z"}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/musallah/payload" || r.URL.Query().Get("deviceId") != testDevice {
-			t.Errorf("unexpected %s", r.URL)
+		if r.URL.Path != "/api/agent/weather" || r.Method != http.MethodGet {
+			t.Errorf("unexpected %s %s", r.Method, r.URL)
+		}
+		if r.Header.Get("X-MB-Device-Id") != testDevice || r.Header.Get("X-MB-Signature") == "" {
+			t.Errorf("weather request is not device-signed: %v", r.Header)
 		}
 		io.WriteString(w, body)
 	}))
@@ -356,7 +359,7 @@ func TestWeather(t *testing.T) {
 		t.Fatal("weather older than 3 h still served")
 	}
 
-	// A payload with no weather object clears it.
+	// No weather object clears it.
 	body = `{"weather":null}`
 	s.FetchWeather(context.Background())
 	if _, ok := s.Weather(); ok {

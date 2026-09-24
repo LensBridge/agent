@@ -61,7 +61,6 @@ NTP_SYNC_TIMEOUT_SEC="${NTP_SYNC_TIMEOUT_SEC:-90}"
 # (stdin is the script itself), prompts cannot work — defaults are used.
 #
 #   MB_HOSTNAME  MB_ADMIN_USER  MB_TIMEZONE  MB_ADMIN_SSH_KEY
-#   MB_BOARD_URL      optional, never asked for (see --board-url)
 #   MB_ASSUME_YES=1   take the default for anything unset, confirm nothing
 #   MB_REBOOT=auto|never|ask
 MB_ASSUME_YES="${MB_ASSUME_YES:-0}"
@@ -103,6 +102,7 @@ V1_PUSH_USER=mbpush
 V1_PUSH_SUDOERS=/etc/sudoers.d/musallahboard-push
 V1_PUSH_SSHD_CONF=/etc/ssh/sshd_config.d/99-musallahboard-push.conf
 V1_DIRS=(
+    /etc/musallahboard/board-url
     /var/lib/musallahboard/offline
     /usr/share/musallahboard/board
     /usr/share/musallahboard/board.tmp
@@ -121,9 +121,6 @@ Usage: bash setup.sh [options]
   --reboot=auto|never|ask
   --yes, -y              answer every prompt with its default
   -h, --help
-  --board-url=URL        optional hosted fallback: the kiosk shows this site
-                         until the first signed app release is installed.
-                         Without it a new board waits for an app package.
 
 Service port (after a normal setup and enrollment, while still online):
   --service-port         provision the ethernet service port, where a laptop
@@ -139,7 +136,10 @@ USAGE
 
 for arg in "$@"; do
     case "$arg" in
-        --board-url=*)     export MB_BOARD_URL="${arg#*=}" ;;
+        --board-url|--board-url=*)
+            echo "--board-url is gone: there is no hosted board any more. The kiosk always shows the board" >&2
+            echo "served by the agent, which fetches the signed board app itself (or from a USB stick or upload)." >&2
+            exit 1 ;;
         --hostname=*)      export MB_HOSTNAME="${arg#*=}" ;;
         --admin-user=*)    export MB_ADMIN_USER="${arg#*=}" ;;
         --timezone=*)      export MB_TIMEZONE="${arg#*=}" ;;
@@ -238,12 +238,6 @@ prompt_config() {
     ADMIN_USER="${MB_ADMIN_USER-}"
     TIMEZONE="${MB_TIMEZONE-}"
 
-    # v1 loaded a hosted board URL. v2 shows the board the agent serves
-    # locally, so the URL is no longer asked for. If given, it is only the
-    # hosted fallback the kiosk shows until the first signed app release is
-    # installed (docs/architecture.md section 14, "Migration guard").
-    BOARD_URL="${MB_BOARD_URL-}"
-
     _ask HOSTNAME   "Hostname for this board"          "musallahboard"
     _ask ADMIN_USER "Admin username (SSH/sudo)"        "ibra"
     _ask TIMEZONE   "Timezone"                         "America/Toronto"
@@ -273,9 +267,6 @@ prompt_config() {
     printf "  %-18s %s\n" "Admin user:" "$ADMIN_USER  (SSH key auth, passwordless sudo)"
     printf "  %-18s %s\n" "Kiosk user:" "$KIOSK_USER  (auto-login, browser only, no sudo/SSH/shell)"
     printf "  %-18s %s\n" "Kiosk URL:"  "$KIOSK_URL  (served by the agent)"
-    if [[ -n "$BOARD_URL" ]]; then
-        printf "  %-18s %s\n" "Hosted fallback:" "$BOARD_URL  (until the first app release is installed)"
-    fi
     printf "  %-18s %s\n" "Timezone:"   "$TIMEZONE"
     echo
     if ! _confirm "Continue? (y/n): "; then
@@ -437,7 +428,7 @@ BASHRC
     info "Kiosk user locked down (no sudo, no shell, video+render only)"
 }
 
-# ── Display stack (config dir, kiosk.env, board-url) ──────────────────────────
+# ── Display stack (config dir, kiosk.env) ──────────────────────────
 setup_display_stack() {
     section "Display stack"
 
@@ -457,17 +448,6 @@ EOF
     else
         sudo rm -f "$CONFIG_DIR/kiosk.env"
         info "Bare-metal host — no kiosk.env needed"
-    fi
-
-    # board-url is optional since v2: once enrolled, the agent writes
-    # kiosk-url itself, pointing at its own local server. board-url only
-    # decides what the kiosk shows until the first signed app release is
-    # installed: the hosted site instead of "board app not installed".
-    # Written only when given; an existing one is left alone.
-    if [[ -n "$BOARD_URL" ]]; then
-        printf '%s\n' "$BOARD_URL" | sudo tee "$CONFIG_DIR/board-url" > /dev/null
-        sudo chmod 0644 "$CONFIG_DIR/board-url"
-        info "Wrote $CONFIG_DIR/board-url ($BOARD_URL, hosted fallback until the first app release)"
     fi
 }
 
@@ -1087,8 +1067,7 @@ print_summary() {
   Until then the kiosk shows the local "waiting" splash, which prints this
   device's IP address on screen once it has one - that is the <ip> to SSH to.
   On enrollment the kiosk switches to the board served by the agent, which
-  starts syncing content right away. (With --board-url it shows that hosted
-  site until the first app release is installed.)
+  starts syncing content and fetches the board app right away.
 
   A board that will not have internet: after enrolling, while it still has
   internet, run  bash setup.sh --service-port

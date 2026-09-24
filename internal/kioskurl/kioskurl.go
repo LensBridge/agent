@@ -8,23 +8,15 @@
 // shows the "waiting for enrollment" splash, and the systemd .path watcher
 // restarts the kiosk when it appears or changes.
 //
-// Migration: until a board app release is installed, a board that has a
-// provisioned /etc/musallahboard/board-url keeps loading the hosted site as in
-// v1 (<board-url>?deviceId=<id>). That way upgrading an online board's agent
-// before a signed app release reaches it never blanks its screen; the first
-// app install switches it to the local server for good.
+// v1 composed <board-url>?deviceId=<id> for the hosted site. The hosted site
+// is gone; /etc/musallahboard/board-url is no longer read.
 package kioskurl
 
 import (
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 )
-
-// DefaultBoardURLPath holds the v1 hosted board URL, if one was provisioned.
-const DefaultBoardURLPath = "/etc/musallahboard/board-url"
 
 // DefaultOutPath is the URL the kiosk launcher reads. It is also the
 // enrollment sentinel the kiosk waits on.
@@ -42,28 +34,6 @@ func WriteLocal(outPath string) error {
 		return fmt.Errorf("kioskurl: empty path")
 	}
 	return writeURL(outPath, LocalURL)
-}
-
-// WriteForBoard writes LocalURL when appInstalled, and otherwise the hosted
-// fallback if board-url is provisioned (see the package comment). It reports
-// which URL it chose.
-func WriteForBoard(outPath, boardURLPath, deviceID string, appInstalled bool) (string, error) {
-	u := LocalURL
-	if !appInstalled {
-		if raw, err := os.ReadFile(boardURLPath); err == nil {
-			if base := strings.TrimSpace(string(raw)); base != "" && deviceID != "" {
-				sep := "?"
-				if strings.Contains(base, "?") {
-					sep = "&"
-				}
-				u = base + sep + "deviceId=" + url.QueryEscape(deviceID)
-			}
-		}
-	}
-	if outPath == "" {
-		return "", fmt.Errorf("kioskurl: empty path")
-	}
-	return u, writeURL(outPath, u)
 }
 
 // writeURL atomically writes u (plus a trailing newline) to outPath.

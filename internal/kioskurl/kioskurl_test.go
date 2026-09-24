@@ -36,20 +36,3 @@ func TestWriteLocalRejectsEmpty(t *testing.T) {
 	}
 }
 
-func TestWriteForBoardFallsBackToHostedUntilAppInstalled(t *testing.T) {
-	dir := t.TempDir()
-	out, board := filepath.Join(dir, "kiosk-url"), filepath.Join(dir, "board-url")
-	os.WriteFile(board, []byte("https://board.example\n"), 0o644)
-
-	u, err := WriteForBoard(out, board, "abc", false)
-	if err != nil || u != "https://board.example?deviceId=abc" {
-		t.Fatalf("no app: %q %v", u, err)
-	}
-	if u, _ := WriteForBoard(out, board, "abc", true); u != LocalURL {
-		t.Fatalf("app installed: %q", u)
-	}
-	os.Remove(board)
-	if u, _ := WriteForBoard(out, board, "abc", false); u != LocalURL {
-		t.Fatalf("no board-url: %q", u)
-	}
-}

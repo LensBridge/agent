@@ -9,8 +9,7 @@
 # lightdm + labwc autologin stack: one systemd unit == the whole display.
 #
 # The agent writes the URL to KIOSK_URL_FILE once the device is enrolled:
-# its own local server, http://127.0.0.1:8080/ (or, on a v1 board with a
-# board-url and no app release yet, the hosted site). Until then the file is
+# its own local server, http://127.0.0.1:8080/. Until then the file is
 # absent and we show the local "waiting for enrollment" splash; the kiosk
 # .path watcher restarts us when the agent writes it.
 #

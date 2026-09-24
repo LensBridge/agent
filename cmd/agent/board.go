@@ -56,7 +56,7 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 		AgentVersion: version.Version,
 		Ring:         func() (*trust.Ring, error) { return trust.LoadRing(trust.DefaultPath) },
 		Screen:       screen,
-		Events:       kioskOnApp{hub, cfg.DeviceID, logger},
+		Events:       hub,
 		Logger:       logger,
 	})
 	keeper := clock.New(layout, logger)
@@ -105,11 +105,8 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 	})
 
 	// Only now can the kiosk find something at the URL it is given.
-	_, appErr := layout.CurrentApp()
-	if u, err := kioskurl.WriteForBoard(kioskurl.DefaultOutPath, kioskurl.DefaultBoardURLPath, cfg.DeviceID, appErr == nil); err != nil {
+	if err := kioskurl.WriteLocal(kioskurl.DefaultOutPath); err != nil {
 		logger.Warn("could not write kiosk url", "err", err)
-	} else if u != kioskurl.LocalURL {
-		logger.Warn("no board app installed yet: the kiosk keeps loading the hosted board until one arrives", "url", u)
 	}
 	_, _ = daemon.SdNotify(false, daemon.SdNotifyReady)
 	_, _ = daemon.SdNotify(false, "STATUS=serving the board on "+localserver.ListenAddr)
@@ -166,7 +163,7 @@ func startCommandChannel(ctx context.Context, logger *slog.Logger, cfg *config.C
 	registry := commands.NewRegistry()
 	registry.Register(&commands.ChromeReload{CDP: cdpClient})
 	registry.Register(&commands.ChromeScreenshot{CDP: cdpClient})
-	registry.Register(&commands.ConfigRefresh{CDP: cdpClient, DeviceID: cfg.DeviceID, Before: syncer.Trigger})
+	registry.Register(&commands.ConfigRefresh{CDP: cdpClient, Before: syncer.Trigger})
 	registry.Register(&commands.KioskRestart{})
 	registry.Register(&commands.SystemReboot{})
 	registry.Register(&commands.LogsTail{})
@@ -223,20 +220,3 @@ func goRun(wg *sync.WaitGroup, f func()) {
 	}()
 }
 
-// kioskOnApp passes install events to the page, and on the first app install
-// moves a board still on the hosted fallback to the local server (the kiosk
-// .path watcher restarts the browser when kiosk-url changes).
-type kioskOnApp struct {
-	hub      *events.Hub
-	deviceID string
-	logger   *slog.Logger
-}
-
-func (k kioskOnApp) ContentChanged(seq int64) { k.hub.ContentChanged(seq) }
-
-func (k kioskOnApp) AppChanged(version string) {
-	k.hub.AppChanged(version)
-	if _, err := kioskurl.WriteForBoard(kioskurl.DefaultOutPath, kioskurl.DefaultBoardURLPath, k.deviceID, true); err != nil {
-		k.logger.Warn("could not point the kiosk at the local server", "err", err)
-	}
-}
