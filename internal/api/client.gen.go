@@ -27,8 +27,8 @@ type AgentEnrollRequest struct {
 
 // AgentEnrollResponse defines model for AgentEnrollResponse.
 type AgentEnrollResponse struct {
-	// ContentSigningKeys Public content signing keys the agent pins at enrollment. Empty when the server has no content key configured. Optional so agents built before it existed still decode the response.
-	ContentSigningKeys *[]SigningKeyView   `json:"contentSigningKeys,omitempty"`
+	// ContentSigningKeys Public content signing keys the agent pins at enrollment. Always present; empty when the server has no content key configured.
+	ContentSigningKeys []SigningKeyView    `json:"contentSigningKeys"`
 	DeviceId           *openapi_types.UUID `json:"deviceId,omitempty"`
 	WebsocketUrl       *string             `json:"websocketUrl,omitempty"`
 }

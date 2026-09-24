@@ -95,10 +95,8 @@ func Run(ctx context.Context, logger *slog.Logger, p Params) error {
 	deviceID := enrolled.DeviceId.String()
 
 	var contentKeys []SigningKey
-	if enrolled.ContentSigningKeys != nil {
-		for _, k := range *enrolled.ContentSigningKeys {
-			contentKeys = append(contentKeys, SigningKey{KeyID: k.KeyId, PublicKey: k.PublicKey})
-		}
+	for _, k := range enrolled.ContentSigningKeys {
+		contentKeys = append(contentKeys, SigningKey{KeyID: k.KeyId, PublicKey: k.PublicKey})
 	}
 
 	// The backend sometimes constructs the WebSocket URL from the HTTP request's
