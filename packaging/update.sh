@@ -3,8 +3,16 @@
 # MusallahBoard Agent Update Script
 # =====================================================
 # Replaces the agent binary in place and restarts the service. Preserves
-# /etc/musallahboard (device identity) and the systemd unit / sudoers config —
-# use install.sh instead if you also need to update those.
+# /etc/musallahboard (device identity and trust.json) and the systemd unit /
+# sudoers config — use install.sh instead if you also need to update those.
+#
+# This is the manual, admin-over-SSH path. Boards normally update themselves
+# from signed agent packages (.mbu) instead: online through the release
+# channel, offline from a USB stick or an upload on the service port. Those go
+# through the root self-updater, which verifies signatures and rolls back a
+# release that does not come up. This script does neither: it trusts the
+# binary you give it, and it does not touch the version high-water mark, so it
+# can also downgrade.
 #
 # Usage:
 #   sudo bash update.sh                 # uses ./musallahboard-agent next to script
@@ -29,6 +37,8 @@ error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BINARY_DEST=/usr/bin/musallahboard-agent
 SERVICE=musallahboard-agent.service
+LIB_DIR=/usr/lib/musallahboard
+PREV_DEST=${LIB_DIR}/agent.prev
 
 BINARY_SRC="${1:-}"
 if [[ -z "$BINARY_SRC" ]]; then
@@ -56,6 +66,15 @@ OLD_VERSION=""
 info "Replacing $BINARY_DEST"
 info "  old: ${OLD_VERSION:-<none>}"
 info "  new: $NEW_VERSION"
+
+# Keep the running binary where the self-updater keeps its rollback copy, so
+# a bad manual update can be undone the same way:
+#   sudo install -m 0755 /usr/lib/musallahboard/agent.prev /usr/bin/musallahboard-agent
+if [[ -x "$BINARY_DEST" ]]; then
+    install -d -o root -g root -m 0755 "$LIB_DIR"
+    install -o root -g root -m 0755 "$BINARY_DEST" "$PREV_DEST"
+    info "Saved the previous binary as $PREV_DEST"
+fi
 
 # Atomic replace: install(1) handles temp file + rename.
 install -o root -g root -m 0755 "$BINARY_SRC" "$BINARY_DEST"

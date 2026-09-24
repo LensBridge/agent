@@ -2,15 +2,13 @@ package main
 
 import (
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 )
 
-// clockTolerance is how far the board's clock may be from the laptop's
-// before mbpush corrects it (docs/offline.md, "mbpush"). `date +%s` has
-// one-second resolution and the round trip adds a little more, so anything
-// much tighter would "fix" clocks that are already right.
+// clockTolerance is how far apart the board's clock and the laptop's may be
+// and still count as in step. It matches the board, which ignores an
+// uploader's time closer than this (docs/architecture.md, section 10):
+// the clocks are compared to the second, over a link with some latency.
 const clockTolerance = 5 * time.Second
 
 // clockCheck is the outcome of comparing the two clocks.
@@ -21,27 +19,13 @@ type clockCheck struct {
 	NeedsSet bool
 }
 
-// compareClocks decides whether the board's clock needs setting. sentAt and
-// gotAt bracket the remote `date +%s` call; the laptop's time is taken as
-// their midpoint, so a slow link does not read as drift.
+// compareClocks compares the board's clock, read by a request sent at sentAt
+// and answered at gotAt, with the laptop's. The laptop's time is taken as the
+// midpoint of the request, so a slow link does not read as drift.
 func compareClocks(sentAt, gotAt time.Time, boardEpoch int64) clockCheck {
 	laptop := sentAt.Add(gotAt.Sub(sentAt) / 2)
 	drift := time.Unix(boardEpoch, 0).Sub(laptop.Truncate(time.Second))
-	abs := drift
-	if abs < 0 {
-		abs = -abs
-	}
-	return clockCheck{Drift: drift, NeedsSet: abs > clockTolerance}
-}
-
-// parseEpoch reads the output of `date +%s`.
-func parseEpoch(out string) (int64, error) {
-	s := strings.TrimSpace(out)
-	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil || n <= 0 {
-		return 0, fmt.Errorf("the board answered %q instead of a time", s)
-	}
-	return n, nil
+	return clockCheck{Drift: drift, NeedsSet: drift.Abs() > clockTolerance}
 }
 
 // describeDrift puts a drift in words: "3 s behind this laptop".

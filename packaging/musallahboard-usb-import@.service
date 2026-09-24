@@ -1,0 +1,58 @@
+[Unit]
+Description=Import MusallahBoard packages from USB stick %I
+Documentation=https://github.com/LensBridge/agent/blob/main/docs/architecture.md
+# Started by udev (/etc/udev/rules.d/90-musallahboard-usb.rules) for a USB
+# block device that carries a filesystem; %I is its kernel name, e.g. sda1.
+# The helper re-checks the name and the filesystem type, mounts it read-only
+# with nosuid,nodev,noexec at /run/musallahboard/usb/%I, copies at most 16
+# *.mbu regular files into the inbox, unmounts, and then waits for the
+# daemon's results so they land in this unit's journal
+# (docs/architecture.md section 9.6). `usb_import = false` in agent.toml makes
+# it exit at once.
+#
+# No BindsTo= on the device: once the files are copied the stick may be pulled
+# while the daemon is still installing, and the helper should keep waiting for
+# the results rather than be stopped.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/musallahboard-agent usb-import %I
+# Copying up to 16 x 512 MiB from a slow stick, then up to 15 min waiting for
+# the daemon.
+TimeoutStartSec=20min
+
+# The mount point. systemd creates it before start and removes it after.
+RuntimeDirectory=musallahboard/usb/%I
+RuntimeDirectoryMode=0700
+
+# Hardening. Root is needed to mount, but a hostile stick gets as little as
+# possible to work with: no network at all, a read-only view of the system
+# except the inbox, and its own mount namespace (from ProtectSystem= and
+# PrivateTmp=), so the stick's mount is not propagated to the rest of the
+# system and goes away with the unit even if the helper dies before
+# unmounting.
+#
+# Deliberately NOT set, because mount needs them: PrivateDevices= (it hides
+# /dev/sdX), DevicePolicy=/DeviceAllow= (FUSE-backed ntfs would also need
+# /dev/fuse), SystemCallFilter=@mount exclusions, and a CapabilityBoundingSet
+# without CAP_SYS_ADMIN. ProtectKernelModules= is fine: the kernel still
+# autoloads the exfat/ntfs3 module on mount.
+PrivateNetwork=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/musallahboard/inbox
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER
+UMask=0022

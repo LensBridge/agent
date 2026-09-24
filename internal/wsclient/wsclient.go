@@ -204,7 +204,7 @@ func (c *Client) runOnce(ctx context.Context) (authed bool, err error) {
 // server's clock would defeat the replay protection the timestamp exists for.
 func (c *Client) warnOnClockSkew(serverTimeMs, localTimeMs int64) {
 	if serverTimeMs == 0 {
-		return // older backend, or a hello without serverTime
+		return // a hello without serverTime
 	}
 	skew := time.Duration(localTimeMs-serverTimeMs) * time.Millisecond
 	if skew < 0 {

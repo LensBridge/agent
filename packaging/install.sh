@@ -13,7 +13,9 @@
 #
 #   - switching the default boot target / disabling display managers
 #     → packaging/appliance-policy.sh
-#   - writing /etc/musallahboard/board-url          → provisioner or firstboot
+#                                                    → provisioner or firstboot
+#   - the ethernet service port (NetworkManager profiles, ufw rules)
+#                                                    → setup.sh --service-port
 #   - enrollment                                     → firstboot, or by hand
 #   - hostname, SSH, UFW, watchdog, timezone, LUKS  → common.sh / setup.sh
 #
@@ -82,6 +84,16 @@ KIOSK_WATCH_DEST=${UNIT_DIR}/musallahboard-kiosk-watch.path
 KIOSK_RELOAD_DEST=${UNIT_DIR}/musallahboard-kiosk-reload.service
 KIOSK_LAUNCHER_DEST=/usr/bin/start-kiosk.sh
 KIOSK_SHARE_DIR=/usr/share/musallahboard
+# The root self-updater, the USB import helper and the udev rules that feed
+# them (docs/architecture.md, sections 9.6 and 12).
+UPDATE_PATH_DEST=${UNIT_DIR}/musallahboard-agent-update.path
+UPDATE_SERVICE_DEST=${UNIT_DIR}/musallahboard-agent-update.service
+USB_SERVICE_DEST=${UNIT_DIR}/musallahboard-usb-import@.service
+UDEV_DIR=/etc/udev/rules.d
+UDEV_RULES=(90-musallahboard-usb.rules 90-musallahboard-rtc.rules)
+INBOX_DIR=${STATE_DIR}/inbox
+LIB_DIR=/usr/lib/musallahboard
+TRUST_PATH=${CONFIG_DIR}/trust.json
 
 # ── Arg parsing ───────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -97,14 +109,6 @@ while [[ $# -gt 0 ]]; do
         --backend)  BACKEND_URL="$2";  shift 2 ;;
         --backend=*) BACKEND_URL="${1#--backend=}"; shift ;;
         --kiosk)        WANT_KIOSK=yes; shift ;;
-        # Accepted only to fail loudly: the account is fixed now, and silently
-        # ignoring a name here would install a kiosk running as the wrong user.
-        --kiosk-user|--kiosk-user=*)
-            error "--kiosk-user is gone; the display account is always '$KIOSK_USER'. Use --kiosk." ;;
-        # Per-device state, not payload. The provisioner writes board-url
-        # (common.sh), or firstboot does from musallahboard.conf.
-        --board-url|--board-url=*)
-            error "--board-url is gone; write /etc/musallahboard/board-url from the provisioner or musallahboard.conf." ;;
         --*)        error "Unknown flag: $1" ;;
         *)
             [[ -n "$AGENT_DIR" ]] && error "Unexpected argument: $1"
@@ -153,9 +157,17 @@ done
 
 SUDOERS_SRC="${AGENT_DIR}/packaging/sudoers.d/musallahboard-agent"
 SERVICE_SRC="${AGENT_DIR}/packaging/musallahboard-agent.service"
+UPDATE_PATH_SRC="${AGENT_DIR}/packaging/musallahboard-agent-update.path"
+UPDATE_SERVICE_SRC="${AGENT_DIR}/packaging/musallahboard-agent-update.service"
+USB_SERVICE_SRC="${AGENT_DIR}/packaging/musallahboard-usb-import@.service"
+UDEV_SRC_DIR="${AGENT_DIR}/packaging/udev"
 
-[[ -f "$SUDOERS_SRC" ]] || error "Missing: $SUDOERS_SRC"
-[[ -f "$SERVICE_SRC" ]] || error "Missing: $SERVICE_SRC"
+for f in "$SUDOERS_SRC" "$SERVICE_SRC" "$UPDATE_PATH_SRC" "$UPDATE_SERVICE_SRC" "$USB_SERVICE_SRC"; do
+    [[ -f "$f" ]] || error "Missing: $f"
+done
+for r in "${UDEV_RULES[@]}"; do
+    [[ -f "$UDEV_SRC_DIR/$r" ]] || error "Missing: $UDEV_SRC_DIR/$r"
+done
 
 info "Agent directory : $AGENT_DIR"
 info "Binary          : $BINARY  (arch: $ARCH_SUFFIX)"
@@ -210,12 +222,45 @@ mkdir -p "$CONFIG_DIR"
 # rather than root.
 chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR"
 # 0751 (not 0750): the unprivileged kiosk user must traverse this dir to read
-# the agent-written board-url / kiosk-url files. 0751 grants traverse-by-path
+# the agent-written kiosk-url file. 0751 grants traverse-by-path
 # without directory listing; agent.key stays 0600 so it is unreadable anyway.
 chmod 0751 "$CONFIG_DIR"
 
 info "Created $CONFIG_DIR  ($SERVICE_USER 0751)"
-info "$STATE_DIR + $LOG_DIR: created by systemd at first start"
+
+# The state dir is also StateDirectory= in the unit, but the inbox inside it is
+# written by root tools (the USB helper, `musallahboard-agent import`) before
+# the daemon may ever have started, so both are created here. The owner must
+# match User= exactly: systemd recursively chowns a StateDirectory= whose top
+# directory has the wrong owner, which would also hand the daemon the
+# root-owned agent/last-update.json.
+install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0750 "$STATE_DIR"
+install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0770 "$INBOX_DIR"
+info "Created $INBOX_DIR  ($SERVICE_USER 0770)"
+info "$LOG_DIR: created by systemd at first start"
+
+# Where the root self-updater keeps the previous agent binary for rollback.
+install -d -o root -g root -m 0755 "$LIB_DIR"
+info "Created $LIB_DIR  (root 0755)"
+
+# ── Trust store ───────────────────────────────────────────────────────────────
+section "Trust store"
+
+# Root-owned and world-readable: the daemon reads it, only root changes it
+# (`musallahboard-agent trust ...`, enrollment, the self-updater). Never
+# overwritten: it holds the content keys pinned at enrollment, and release
+# keys an admin may have added. An empty store is fine; release keys are also
+# compiled into the agent, and content keys arrive with enrollment or
+# `trust fetch`.
+if [[ -e "$TRUST_PATH" ]]; then
+    info "Keeping existing $TRUST_PATH"
+else
+    printf '{"content":[],"release":[]}\n' > "$TRUST_PATH.tmp"
+    chown root:root "$TRUST_PATH.tmp"
+    chmod 0644 "$TRUST_PATH.tmp"
+    mv -f "$TRUST_PATH.tmp" "$TRUST_PATH"
+    info "Created $TRUST_PATH  (root 0644, no keys yet)"
+fi
 
 # ── Binary ────────────────────────────────────────────────────────────────────
 section "Binary"
@@ -238,9 +283,35 @@ info "Installed $SUDOERS_DEST"
 section "Systemd service"
 
 install -o root -g root -m 0644 "$SERVICE_SRC" "$SERVICE_DEST"
+
+# Root self-updater (docs/architecture.md section 12): the .path unit watches
+# for agent/staged/ready and starts the oneshot. Only the .path is enabled.
+install -o root -g root -m 0644 "$UPDATE_PATH_SRC"    "$UPDATE_PATH_DEST"
+install -o root -g root -m 0644 "$UPDATE_SERVICE_SRC" "$UPDATE_SERVICE_DEST"
+# USB import helper (section 9.6): a template started by udev, never enabled.
+install -o root -g root -m 0644 "$USB_SERVICE_SRC"    "$USB_SERVICE_DEST"
+
 systemd_running && systemctl daemon-reload
 systemctl enable musallahboard-agent.service
-info "Service installed and enabled"
+systemctl enable musallahboard-agent-update.path
+info "Service, self-updater and USB import units installed and enabled"
+
+# ── udev rules ────────────────────────────────────────────────────────────────
+section "udev rules"
+
+# USB sticks -> musallahboard-usb-import@<dev>.service, and rtc0 writable by
+# the agent's group so it can save a corrected clock to the RTC.
+mkdir -p "$UDEV_DIR"
+for r in "${UDEV_RULES[@]}"; do
+    install -o root -g root -m 0644 "$UDEV_SRC_DIR/$r" "$UDEV_DIR/$r"
+done
+if systemd_running && command -v udevadm >/dev/null; then
+    udevadm control --reload || true
+    # Apply the rtc0 permissions now rather than at the next boot. Not a
+    # block-device trigger: that would import from a stick already plugged in.
+    udevadm trigger --subsystem-match=rtc --action=change || true
+fi
+info "Installed ${UDEV_RULES[*]} in $UDEV_DIR"
 
 # ── Kiosk (cage + Chromium) ───────────────────────────────────────────────────
 if [[ "$WANT_KIOSK" == "yes" ]]; then
@@ -334,14 +405,21 @@ if [[ -n "$ENROLL_TOKEN" ]]; then
         warn "Config already exists at $CONFIG_PATH — skipping enrollment."
         warn "Delete it and re-run with --token to re-enroll."
     else
-        # Run enroll as the service user so files end up owned by it directly.
-        # (The agent's enroll path also chowns to the parent dir's owner as a
-        # belt-and-suspenders measure when run via `sudo`.)
-        sudo -u "$SERVICE_USER" "$BINARY_DEST" enroll \
+        # Run as root: enrollment also pins the backend's content signing keys
+        # in the root-owned trust.json. agent.toml and agent.key still end up
+        # owned by $SERVICE_USER, because enroll chowns the files it creates to
+        # the owner of the config directory.
+        "$BINARY_DEST" enroll \
             --token="$ENROLL_TOKEN" \
             --backend="$BACKEND_URL" \
             --config="$CONFIG_PATH"
         info "Device enrolled. Config: $CONFIG_PATH"
+    fi
+
+    # Whatever wrote it, trust.json is root's.
+    if [[ -f "$TRUST_PATH" ]]; then
+        chown root:root "$TRUST_PATH"
+        chmod 0644 "$TRUST_PATH"
     fi
 fi
 
@@ -361,6 +439,8 @@ else
     systemctl restart musallahboard-agent.service
     sleep 1
     systemctl status musallahboard-agent.service --no-pager --lines=5
+
+    systemctl start musallahboard-agent-update.path
 
     # Kiosk shows the splash immediately and the .path watcher swaps it for
     # the board when the agent writes kiosk-url — safe to start either way.
@@ -387,10 +467,15 @@ cat << EOF
   Config    : $CONFIG_PATH
   State     : $STATE_DIR
   Service   : musallahboard-agent.service
+  Trust     : $TRUST_PATH
+  Updates   : USB stick, upload on the service port, or the release channel
+              (docs/architecture.md)
 
   Useful commands:
     sudo systemctl status musallahboard-agent
     sudo journalctl -u musallahboard-agent -f
     sudo musallahboard-agent enroll --token=X --backend=Y
+    sudo musallahboard-agent status
+    sudo musallahboard-agent import <file.mbu>
 
 EOF

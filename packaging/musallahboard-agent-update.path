@@ -1,0 +1,17 @@
+[Unit]
+Description=Watch for a staged MusallahBoard agent update
+Documentation=https://github.com/LensBridge/agent/blob/main/docs/architecture.md
+# The daemon (unprivileged) verifies an agent package, writes it to
+# agent/staged/package.mbu and then creates agent/staged/ready. This starts the
+# root updater, which removes `ready` first thing, re-verifies the package from
+# a private copy against root-trusted keys only, swaps the binary and
+# health-checks the new agent (docs/architecture.md section 12).
+
+[Path]
+# PathExists, not PathModified: a `ready` left behind by a power cut between
+# staging and the updater starting still triggers the update on next boot.
+PathExists=/var/lib/musallahboard/agent/staged/ready
+Unit=musallahboard-agent-update.service
+
+[Install]
+WantedBy=multi-user.target

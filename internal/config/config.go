@@ -1,15 +1,17 @@
 // Package config persists the agent's runtime identity at /etc/musallahboard/agent.toml.
 //
-// Schema (v2 — Ed25519 era):
+// Schema:
 //
 //	device_id      = "uuid"
 //	backend_url    = "https://api.utmmsa.ca"
 //	websocket_url  = "wss://api.utmmsa.ca/api/agent/ws"
 //	key_path       = "/etc/musallahboard/agent.key"
-//	mode           = "offline"   # optional; absent means "online"
 //
-// The HMAC `device_secret` field from the v1 schema is gone; identity is now
-// proved by signing a server-issued challenge with the Ed25519 key at KeyPath.
+// Optional keys (docs/architecture.md, section 11): service_port, usb_import,
+// content_sync, content_days, auto_update, app_channel_url, agent_channel_url.
+//
+// Identity is proved by signing a server-issued challenge with the Ed25519 key
+// at KeyPath.
 package config
 
 import (
@@ -23,35 +25,77 @@ import (
 // DefaultKeyPath is where Save writes if the caller leaves Config.KeyPath empty.
 const DefaultKeyPath = "/etc/musallahboard/agent.key"
 
-// Operating modes. Online is the original behaviour: WebSocket to the backend,
-// telemetry, remote commands. Offline makes no network calls and serves an
-// installed content bundle to the kiosk from 127.0.0.1 (see docs/offline.md).
+// Channel defaults (section 9.4). %s is the board's GOARCH.
 const (
-	ModeOnline  = "online"
-	ModeOffline = "offline"
+	DefaultAppChannelURL   = "https://github.com/LensBridge/MusallahBoard/releases/latest/download/app-channel.json"
+	DefaultAgentChannelURL = "https://github.com/LensBridge/agent/releases/latest/download/agent-channel-%s.json"
+	DefaultContentDays     = 7
 )
 
 // Config is the persisted agent configuration written at enrollment.
 //
 // The first four fields are required at runtime; Load returns an error if any
-// is empty. Mode is optional and Load normalizes an absent one to ModeOnline, so
-// every config written before offline mode existed keeps behaving as it did.
+// is empty. Everything else is optional: a nil pointer means "not set", and
+// the accessor methods supply the default, so a freshly enrolled config needs
+// none of them.
 type Config struct {
 	DeviceID     string `toml:"device_id"`
 	BackendURL   string `toml:"backend_url"`
 	WebSocketURL string `toml:"websocket_url"`
 	KeyPath      string `toml:"key_path"`
-	Mode         string `toml:"mode,omitempty"`
+
+	ServicePortSet  *bool   `toml:"service_port,omitempty"`
+	USBImportSet    *bool   `toml:"usb_import,omitempty"`
+	ContentSyncSet  *bool   `toml:"content_sync,omitempty"`
+	ContentDaysSet  *int    `toml:"content_days,omitempty"`
+	AutoUpdateSet   *bool   `toml:"auto_update,omitempty"`
+	AppChannelSet   *string `toml:"app_channel_url,omitempty"`
+	AgentChannelSet *string `toml:"agent_channel_url,omitempty"`
 }
 
-// ValidateMode reports whether m is a mode the agent can run in. The empty
-// string is not accepted here; Load maps it to ModeOnline before validating.
-func ValidateMode(m string) error {
-	switch m {
-	case ModeOnline, ModeOffline:
-		return nil
+func boolOr(p *bool, def bool) bool {
+	if p == nil {
+		return def
 	}
-	return fmt.Errorf("unknown mode %q (want %q or %q)", m, ModeOnline, ModeOffline)
+	return *p
+}
+
+// ServicePort reports whether the eth0 service port and upload server run.
+func (c *Config) ServicePort() bool {
+	return boolOr(c.ServicePortSet, false)
+}
+
+// USBImport reports whether USB sticks are accepted.
+func (c *Config) USBImport() bool { return boolOr(c.USBImportSet, true) }
+
+// ContentSync reports whether content is synced from the backend.
+func (c *Config) ContentSync() bool { return boolOr(c.ContentSyncSet, true) }
+
+// AutoUpdate reports whether the release channels are followed.
+func (c *Config) AutoUpdate() bool { return boolOr(c.AutoUpdateSet, true) }
+
+// ContentDays is the window of a synced content package, 1-31.
+func (c *Config) ContentDays() int {
+	if c.ContentDaysSet == nil || *c.ContentDaysSet < 1 || *c.ContentDaysSet > 31 {
+		return DefaultContentDays
+	}
+	return *c.ContentDaysSet
+}
+
+// AppChannelURL is the app release channel, "" when disabled.
+func (c *Config) AppChannelURL() string {
+	if c.AppChannelSet != nil {
+		return *c.AppChannelSet
+	}
+	return DefaultAppChannelURL
+}
+
+// AgentChannelURL is the agent release channel for arch, "" when disabled.
+func (c *Config) AgentChannelURL(arch string) string {
+	if c.AgentChannelSet != nil {
+		return *c.AgentChannelSet
+	}
+	return fmt.Sprintf(DefaultAgentChannelURL, arch)
 }
 
 func Load(path string) (*Config, error) {
@@ -65,29 +109,21 @@ func Load(path string) (*Config, error) {
 	if c.DeviceID == "" || c.BackendURL == "" || c.WebSocketURL == "" {
 		return nil, fmt.Errorf("config %s is incomplete (run `agent enroll` first)", path)
 	}
-	if c.Mode == "" {
-		c.Mode = ModeOnline
-	}
-	if err := ValidateMode(c.Mode); err != nil {
-		return nil, fmt.Errorf("config %s: %w", path, err)
-	}
 	return &c, nil
 }
 
-// SetMode rewrites the mode key of the config at path, leaving every other
-// field as it was. The file keeps its owner: `mode` runs as root via sudo, but
-// the daemon reading the result runs as the service user, and Save creates a
-// fresh 0600 file that would otherwise belong to root.
-func SetMode(path, mode string) error {
-	if err := ValidateMode(mode); err != nil {
-		return err
-	}
+// SetServicePort rewrites service_port in the config at path, leaving every
+// other field as it was. The file
+// keeps its owner: this runs as root via sudo, but the daemon reading the
+// result runs as the service user, and Save creates a fresh 0600 file that
+// would otherwise belong to root.
+func SetServicePort(path string, on bool) error {
 	c, err := Load(path)
 	if err != nil {
 		return err
 	}
 	owner, haveOwner := fileOwner(path)
-	c.Mode = mode
+	c.ServicePortSet = &on
 	if err := Save(path, c); err != nil {
 		return err
 	}

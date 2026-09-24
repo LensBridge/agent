@@ -1,0 +1,9 @@
+# MusallahBoard: import signed update packages (*.mbu) from a USB stick.
+# docs/architecture.md section 9.6.
+#
+# For a USB disk or partition with a filesystem on it, start the root oneshot
+# musallahboard-usb-import@<kernel name>.service. SYSTEMD_WANTS rather than
+# RUN+=: udev kills RUN programs after a few seconds and forbids mounting from
+# them; a unit has neither problem. The filesystem allow-list here is only a
+# first filter; the helper checks the name and type again with blkid.
+ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z]*", ENV{ID_BUS}=="usb", ENV{ID_FS_USAGE}=="filesystem", ENV{ID_FS_TYPE}=="vfat|exfat|ext4|ntfs|ntfs3", TAG+="systemd", ENV{SYSTEMD_WANTS}+="musallahboard-usb-import@%k.service"

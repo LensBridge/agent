@@ -22,83 +22,48 @@ func writeConfig(t *testing.T, body string) string {
 	return p
 }
 
-func TestLoadMode(t *testing.T) {
-	cases := []struct {
-		name    string
-		extra   string
-		want    string
-		wantErr string
-	}{
-		// Every config written before offline mode existed has no mode key.
-		{name: "absent means online", extra: "", want: ModeOnline},
-		{name: "explicit online", extra: `mode = "online"`, want: ModeOnline},
-		{name: "offline", extra: `mode = "offline"`, want: ModeOffline},
-		{name: "empty string means online", extra: `mode = ""`, want: ModeOnline},
-		{name: "unknown", extra: `mode = "airplane"`, wantErr: `unknown mode "airplane"`},
-		{name: "wrong case", extra: `mode = "Offline"`, wantErr: "unknown mode"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			c, err := Load(writeConfig(t, baseTOML+tc.extra+"\n"))
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("err = %v, want containing %q", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if c.Mode != tc.want {
-				t.Errorf("Mode = %q, want %q", c.Mode, tc.want)
-			}
-		})
+func TestServicePort(t *testing.T) {
+	for extra, want := range map[string]bool{"": false, "service_port = true": true, "service_port = false": false} {
+		c, err := Load(writeConfig(t, baseTOML+extra+"\n"))
+		if err != nil {
+			t.Fatalf("%q: %v", extra, err)
+		}
+		if got := c.ServicePort(); got != want {
+			t.Errorf("%q: ServicePort = %v, want %v", extra, got, want)
+		}
 	}
 }
 
-func TestSetModeKeepsOtherFields(t *testing.T) {
-	p := writeConfig(t, baseTOML)
+func TestDefaults(t *testing.T) {
+	c, err := Load(writeConfig(t, baseTOML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.USBImport() || !c.ContentSync() || !c.AutoUpdate() || c.ContentDays() != DefaultContentDays {
+		t.Errorf("defaults wrong: %+v", c)
+	}
+	if !strings.HasSuffix(c.AgentChannelURL("arm64"), "agent-channel-arm64.json") {
+		t.Errorf("agent channel = %s", c.AgentChannelURL("arm64"))
+	}
+	c, _ = Load(writeConfig(t, baseTOML+"app_channel_url = \"\"\ncontent_days = 99\n"))
+	if c.AppChannelURL() != "" || c.ContentDays() != DefaultContentDays {
+		t.Errorf("overrides wrong: app=%q days=%d", c.AppChannelURL(), c.ContentDays())
+	}
+}
 
-	if err := SetMode(p, ModeOffline); err != nil {
+func TestSetServicePortKeepsOtherFields(t *testing.T) {
+	p := writeConfig(t, baseTOML+"service_port = true\n")
+	if err := SetServicePort(p, false); err != nil {
 		t.Fatal(err)
 	}
 	c, err := Load(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Mode != ModeOffline {
-		t.Errorf("Mode = %q, want offline", c.Mode)
+	if c.ServicePort() || c.DeviceID != "3f2a1b4c-0000-4000-8000-000000000001" {
+		t.Errorf("after SetServicePort(false): %+v", c)
 	}
-	if c.DeviceID != "3f2a1b4c-0000-4000-8000-000000000001" || c.BackendURL != "https://api.example.com" ||
-		c.WebSocketURL != "wss://api.example.com/api/agent/ws" || c.KeyPath != "/etc/musallahboard/agent.key" {
-		t.Errorf("other fields changed: %+v", c)
-	}
-
-	if err := SetMode(p, ModeOnline); err != nil {
-		t.Fatal(err)
-	}
-	if c, _ = Load(p); c.Mode != ModeOnline {
-		t.Errorf("Mode = %q, want online", c.Mode)
-	}
-	if _, err := os.Stat(p + ".tmp"); !os.IsNotExist(err) {
-		t.Errorf("temp file left behind: %v", err)
-	}
-}
-
-func TestSetModeRejectsUnknownWithoutWriting(t *testing.T) {
-	p := writeConfig(t, baseTOML)
-	before, _ := os.ReadFile(p)
-	if err := SetMode(p, "sideways"); err == nil {
-		t.Fatal("expected an error")
-	}
-	after, _ := os.ReadFile(p)
-	if string(before) != string(after) {
-		t.Error("config was rewritten despite an invalid mode")
-	}
-}
-
-func TestSetModeRequiresEnrolledConfig(t *testing.T) {
-	if err := SetMode(filepath.Join(t.TempDir(), "missing.toml"), ModeOffline); err == nil {
+	if err := SetServicePort(filepath.Join(t.TempDir(), "missing.toml"), true); err == nil {
 		t.Fatal("expected an error for a missing config")
 	}
 }

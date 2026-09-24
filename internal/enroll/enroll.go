@@ -2,7 +2,9 @@
 //
 // On the Pi: generate a fresh Ed25519 keypair, send the public key (raw 32
 // bytes, base64) along with a one-time admin-issued token to the backend, and
-// persist the (deviceId, websocketUrl) reply alongside the private key.
+// persist the (deviceId, websocketUrl) reply alongside the private key. The
+// reply also carries the backend's content signing keys, which are pinned in
+// the trust store so the board can verify the content packages it syncs.
 //
 // The private key never leaves the device. The token is single-use and
 // time-bound — the backend rejects replays, so re-running `agent enroll`
@@ -24,14 +26,17 @@ import (
 	"github.com/LensBridge/agent/internal/api"
 	"github.com/LensBridge/agent/internal/config"
 	"github.com/LensBridge/agent/internal/keystore"
-	"github.com/LensBridge/agent/internal/kioskurl"
+	"github.com/LensBridge/agent/internal/trust"
 )
 
 type Params struct {
-	Token        string
-	BackendURL   string
-	ConfigPath   string
-	KeyPath      string // optional; defaults to config.DefaultKeyPath
+	Token      string
+	BackendURL string
+	ConfigPath string
+	KeyPath    string // optional; defaults to config.DefaultKeyPath
+	// TrustPath is the trust store the backend's content keys are pinned
+	// in; optional, defaults to trust.DefaultPath.
+	TrustPath    string
 	AgentVersion string
 }
 
@@ -89,6 +94,11 @@ func Run(ctx context.Context, logger *slog.Logger, p Params) error {
 
 	deviceID := enrolled.DeviceId.String()
 
+	var contentKeys []SigningKey
+	for _, k := range enrolled.ContentSigningKeys {
+		contentKeys = append(contentKeys, SigningKey{KeyID: k.KeyId, PublicKey: k.PublicKey})
+	}
+
 	// The backend sometimes constructs the WebSocket URL from the HTTP request's
 	// Host header, which drops the port when behind a reverse proxy or when the
 	// client connects directly without a Host: port. Patch it back in if the
@@ -114,14 +124,25 @@ func Run(ctx context.Context, logger *slog.Logger, p Params) error {
 	}
 	_ = chownToDirOwner(p.ConfigPath, filepath.Dir(p.ConfigPath))
 
-	// Compose the kiosk URL now. This file is also the kiosk unit's enrollment
-	// sentinel — writing it here is what releases cage/Chromium to launch the
-	// board for the first time. Non-fatal: if the operator hasn't provisioned
-	// the base board URL yet, the daemon retries this on every startup.
-	if err := kioskurl.Write(kioskurl.DefaultBoardURLPath, kioskurl.DefaultOutPath, deviceID); err != nil {
-		logger.Warn("could not compose kiosk url (kiosk will wait)", "err", err)
+	// The kiosk URL is not written here any more: in v2 the kiosk always
+	// loads the agent's own local server, and the daemon writes kiosk-url
+	// itself once it sees the config (docs/architecture.md, section 14).
+
+	// Pin the backend's content keys. They arrive over the same TLS
+	// connection that just established this device's identity, which is as
+	// much as any later fetch could offer. Failing here would strand a
+	// device the backend already counts as enrolled, so it is a warning
+	// with the fix in it, not an error.
+	trustPath := p.TrustPath
+	if trustPath == "" {
+		trustPath = trust.DefaultPath
+	}
+	if len(contentKeys) == 0 {
+		logger.Warn("the backend sent no content signing keys, so this board cannot verify content until they are fetched: run `sudo musallahboard-agent trust fetch` once the backend has a content key configured")
+	} else if added, err := PinContentKeys(trustPath, contentKeys, "lensbridge"); err != nil {
+		logger.Warn("could not pin the backend's content signing keys; run `sudo musallahboard-agent trust fetch`", "err", err, "path", trustPath)
 	} else {
-		logger.Info("kiosk url written", "path", kioskurl.DefaultOutPath)
+		logger.Info("content signing keys pinned", "received", len(contentKeys), "added", len(added), "path", trustPath)
 	}
 
 	logger.Info("device enrolled",

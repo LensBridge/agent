@@ -1,7 +1,10 @@
 package enroll
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -13,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/LensBridge/agent/internal/config"
+	"github.com/LensBridge/agent/internal/trust"
 )
 
 func quietLogger() *slog.Logger {
@@ -24,6 +28,18 @@ func paths(t *testing.T) (cfgPath, keyPath string) {
 	t.Helper()
 	dir := t.TempDir()
 	return filepath.Join(dir, "agent.toml"), filepath.Join(dir, "agent.key")
+}
+
+// trustPathBeside is the trust store tests use: next to the config, never
+// the real /etc/musallahboard/trust.json.
+func trustPathBeside(cfgPath string) string {
+	return filepath.Join(filepath.Dir(cfgPath), "trust.json")
+}
+
+var contentPub = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{5}, 32)).Public().(ed25519.PublicKey)
+
+func signingKeyJSON(pub ed25519.PublicKey) map[string]any {
+	return map[string]any{"keyId": trust.KeyID(pub), "publicKey": base64.StdEncoding.EncodeToString(pub)}
 }
 
 func TestRunEnrollsAndPersistsConfig(t *testing.T) {
@@ -44,8 +60,9 @@ func TestRunEnrollsAndPersistsConfig(t *testing.T) {
 		// Carries an explicit port so restorePort leaves it untouched; the
 		// port-patching behaviour has its own test below.
 		json.NewEncoder(w).Encode(map[string]any{
-			"deviceId":     deviceID,
-			"websocketUrl": "ws://board.example:8080/api/agent/ws",
+			"deviceId":           deviceID,
+			"websocketUrl":       "ws://board.example:8080/api/agent/ws",
+			"contentSigningKeys": []any{signingKeyJSON(contentPub)},
 		})
 	}))
 	defer server.Close()
@@ -56,6 +73,7 @@ func TestRunEnrollsAndPersistsConfig(t *testing.T) {
 		BackendURL:   server.URL,
 		ConfigPath:   cfgPath,
 		KeyPath:      keyPath,
+		TrustPath:    trustPathBeside(cfgPath),
 		AgentVersion: "1.2.3",
 	})
 	if err != nil {
@@ -89,6 +107,82 @@ func TestRunEnrollsAndPersistsConfig(t *testing.T) {
 	if _, err := os.Stat(keyPath); err != nil {
 		t.Errorf("private key not written: %v", err)
 	}
+
+	// The backend's content key is pinned, as a content key only.
+	ts, err := trust.Load(trustPathBeside(cfgPath))
+	if err != nil {
+		t.Fatalf("load trust store: %v", err)
+	}
+	if len(ts.Content) != 1 || ts.Content[0].KeyID != trust.KeyID(contentPub) || len(ts.Release) != 0 {
+		t.Errorf("trust store = %+v, want exactly the backend's content key", ts)
+	}
+}
+
+// A backend with no content signing key configured sends no keys; the board
+// still enrolls, and gets them later from `trust fetch`.
+func TestRunWithoutContentKeys(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"deviceId":     "6f1e1d94-1f4a-4a1e-9a1e-2f3c4d5e6a7b",
+			"websocketUrl": "ws://board.example:8080/api/agent/ws",
+		})
+	}))
+	defer server.Close()
+
+	cfgPath, keyPath := paths(t)
+	if err := Run(context.Background(), quietLogger(), Params{
+		Token: "t", BackendURL: server.URL, ConfigPath: cfgPath, KeyPath: keyPath,
+		TrustPath: trustPathBeside(cfgPath),
+	}); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if _, err := os.Stat(trustPathBeside(cfgPath)); err == nil {
+		t.Error("trust store written with no keys to pin")
+	}
+}
+
+func TestPinContentKeys(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "trust.json")
+	k := SigningKey{KeyID: trust.KeyID(contentPub), PublicKey: base64.StdEncoding.EncodeToString(contentPub)}
+	added, err := PinContentKeys(p, []SigningKey{k}, "lensbridge")
+	if err != nil || len(added) != 1 {
+		t.Fatalf("first pin: %v, %v", added, err)
+	}
+	// Idempotent.
+	if added, err := PinContentKeys(p, []SigningKey{k}, "lensbridge"); err != nil || len(added) != 0 {
+		t.Fatalf("second pin: %v, %v", added, err)
+	}
+	// A key whose id does not match is refused, and nothing else in the
+	// same response is taken either.
+	other := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{6}, 32)).Public().(ed25519.PublicKey)
+	bad := SigningKey{KeyID: "0000000000000000", PublicKey: base64.StdEncoding.EncodeToString(other)}
+	good := SigningKey{PublicKey: base64.StdEncoding.EncodeToString(other)}
+	if _, err := PinContentKeys(p, []SigningKey{good, bad}, "x"); err == nil {
+		t.Fatal("mismatched key id accepted")
+	}
+	ts, _ := trust.Load(p)
+	if len(ts.Content) != 1 {
+		t.Fatalf("trust store changed by a refused response: %+v", ts)
+	}
+}
+
+func TestFetchSigningKeys(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/agent/signing-keys" {
+			http.NotFound(w, r)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"content": []any{signingKeyJSON(contentPub)}})
+	}))
+	defer server.Close()
+	keys, err := FetchSigningKeys(context.Background(), server.URL+"/", nil)
+	if err != nil || len(keys) != 1 || keys[0].KeyID != trust.KeyID(contentPub) {
+		t.Fatalf("FetchSigningKeys = %v, %v", keys, err)
+	}
+	if _, err := FetchSigningKeys(context.Background(), server.URL+"/nope", nil); err == nil {
+		t.Fatal("404 not reported")
+	}
 }
 
 // A rejected token must surface the server's message rather than a bare status.
@@ -110,6 +204,7 @@ func TestRunReportsRejectionMessage(t *testing.T) {
 		BackendURL: server.URL,
 		ConfigPath: cfgPath,
 		KeyPath:    keyPath,
+		TrustPath:  trustPathBeside(cfgPath),
 	})
 	if err == nil {
 		t.Fatal("Run() = nil, want error")
@@ -142,6 +237,7 @@ func TestRunRejectsIncompleteResponse(t *testing.T) {
 		BackendURL: server.URL,
 		ConfigPath: cfgPath,
 		KeyPath:    keyPath,
+		TrustPath:  trustPathBeside(cfgPath),
 	})
 	if err == nil || !strings.Contains(err.Error(), "missing deviceId or websocketUrl") {
 		t.Fatalf("Run() = %v, want missing-field error", err)

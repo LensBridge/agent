@@ -53,7 +53,7 @@ NTP_SYNC_TIMEOUT_SEC="${NTP_SYNC_TIMEOUT_SEC:-90}"
 # person — a bare `read` there consumes the rest of the script instead of an
 # answer, and does it silently.
 #
-#   MB_HOSTNAME  MB_ADMIN_USER  MB_BOARD_URL  MB_TIMEZONE
+#   MB_HOSTNAME  MB_ADMIN_USER  MB_TIMEZONE
 #   MB_ADMIN_SSH_KEY
 #   MB_ASSUME_YES=1   take the default for anything unset, confirm nothing
 #   MB_REBOOT=auto|never|ask
@@ -61,9 +61,8 @@ NTP_SYNC_TIMEOUT_SEC="${NTP_SYNC_TIMEOUT_SEC:-90}"
 # Anything left unset is still asked for interactively, so `bash setup.sh` by
 # hand behaves exactly as it always has.
 #
-# MB_KIOSK_USER is gone: the display account is fixed at `musallahkiosk`
-# because musallahboard-kiosk.service names it in User= and ExecStopPost, and
-# a .deb ships that unit as a static file.
+# The display account is fixed at `musallahkiosk`: musallahboard-kiosk.service
+# names it in User= and ExecStopPost, and a .deb ships that unit as a static file.
 MB_ASSUME_YES="${MB_ASSUME_YES:-0}"
 MB_REBOOT="${MB_REBOOT:-ask}"
 
@@ -147,12 +146,13 @@ _prompt_config() {
     # an answer somebody supplied and never ask the question.
     HOSTNAME="${MB_HOSTNAME-}"
     ADMIN_USER="${MB_ADMIN_USER-}"
-    KIOSK_URL="${MB_BOARD_URL-}"
     TIMEZONE="${MB_TIMEZONE-}"
+    # The kiosk shows the board served by the local agent
+    # (docs/architecture.md section 14), so there is no URL to ask for.
+    KIOSK_URL="http://127.0.0.1:8080/"
 
     _ask HOSTNAME   "Hostname for this board"          "musallahboard"
     _ask ADMIN_USER "Admin username (SSH/sudo)"        "ibra"
-    _ask KIOSK_URL  "Kiosk URL"                        "https://board.lensbridge.tech"
     _ask TIMEZONE   "Timezone"                         "America/Toronto"
 
     # Three accounts, three trust levels, no overlap:
@@ -199,7 +199,7 @@ _prompt_config() {
     printf "  %-18s %s\n" "Hostname:"   "$HOSTNAME"
     printf "  %-18s %s\n" "Admin user:" "$ADMIN_USER  (SSH key auth, passwordless sudo)"
     printf "  %-18s %s\n" "Kiosk user:" "$KIOSK_USER  (auto-login, browser only, no sudo/SSH/shell)"
-    printf "  %-18s %s\n" "Kiosk URL:"  "$KIOSK_URL"
+    printf "  %-18s %s\n" "Kiosk URL:"  "$KIOSK_URL  (served by the agent)"
     printf "  %-18s %s\n" "Timezone:"   "$TIMEZONE"
     [[ -z "$SSH_PUB_KEY" ]] && warn "  No SSH key — password auth stays enabled; harden after testing."
     echo
@@ -330,15 +330,6 @@ EOF
         sudo rm -f /etc/musallahboard/kiosk.env
         info "Bare-metal host — keeping hardware GL (no kiosk.env)"
     fi
-
-    # Persist the board base URL. This is the only writer on the setup.sh path
-    # — install.sh no longer takes --board-url, because a base URL is per-device
-    # state rather than package payload. Without it the agent composes an empty
-    # kiosk-url and the kiosk waits forever. The agent owns appending
-    # ?deviceId=<uuid> → /etc/musallahboard/kiosk-url.
-    printf '%s\n' "$KIOSK_URL" | sudo tee /etc/musallahboard/board-url > /dev/null
-    sudo chmod 0644 /etc/musallahboard/board-url
-    info "Wrote /etc/musallahboard/board-url ($KIOSK_URL)"
 }
 
 # ── Disable tty1 autologin ────────────────────────────────────────────────────
@@ -479,8 +470,7 @@ _install_agent() {
 
     info "Agent binary : $AGENT_BINARY"
     # install.sh is payload only: files, accounts, unit enablement. It does not
-    # touch the boot target — that is appliance-policy.sh, below. board-url was
-    # already written unconditionally by _setup_display_stack.
+    # touch the boot target — that is appliance-policy.sh, below.
     sudo bash "$REPO_ROOT/packaging/install.sh" "$REPO_ROOT" --kiosk
     sudo bash "$REPO_ROOT/packaging/appliance-policy.sh"
     AGENT_INSTALLED="yes"
@@ -497,9 +487,7 @@ _print_summary() {
 
   Hostname   : $HOSTNAME
   Admin SSH  : ssh $ADMIN_USER@<ip>
-  Kiosk URL  : $KIOSK_URL
-               Change later: sudo nano /etc/musallahboard/board-url
-               then:         sudo systemctl restart musallahboard-agent
+  Kiosk URL  : $KIOSK_URL (served by the agent)
 
 EOF
 
@@ -511,8 +499,8 @@ EOF
          --token=<one-time-token> --backend=<backend-url>
 
   Until then the kiosk shows the local "waiting" splash. On enrollment the
-  agent composes <board-url>?deviceId=<uuid> and the board loads automatically
-  — no reboot needed.
+  kiosk switches to the board served by the agent, which starts syncing
+  content right away, with no reboot needed.
 
   ✓  Boots multi-user → musallahboard-kiosk.service → cage → browser
   ✓  SSH as $ADMIN_USER to manage the system

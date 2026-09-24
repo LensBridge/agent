@@ -3,6 +3,12 @@ Description=MusallahBoard device agent
 Documentation=https://github.com/LensBridge/agent
 After=network-online.target
 Wants=network-online.target
+# Crash-loop guard: if the agent fails 5 times in 60s, stop trying. These are
+# [Unit] settings; systemd ignores StartLimitIntervalSec= under [Service].
+# A bad self-update is caught earlier than this by the updater's health check
+# and rollback (musallahboard-agent-update.service).
+StartLimitBurst=5
+StartLimitIntervalSec=60
 
 [Service]
 Type=notify
@@ -12,15 +18,21 @@ ExecStart=/usr/bin/musallahboard-agent run
 Restart=always
 RestartSec=5
 
-# Crash-loop guard: if the agent fails 5 times in 60s, stop trying.
-# Prevents a bad agent update from death-looping across the fleet.
-StartLimitBurst=5
-StartLimitIntervalSec=60
-
 # sd_notify watchdog: agent must call WATCHDOG=1 every 30s or systemd
 # kills it. Catches goroutine deadlocks where the process is alive but
 # not making progress.
 WatchdogSec=60s
+
+# Capabilities (docs/architecture.md sections 9.5 and 10). The daemon runs as
+# an unprivileged user but holds exactly these two:
+#   CAP_SYS_TIME          step the clock forward to a signed package's
+#                         createdAt, and write the RTC with hwclock (rtc0 is
+#                         group musallahdaemon via 90-musallahboard-rtc.rules)
+#   CAP_NET_BIND_SERVICE  the upload server on the service port, 10.77.0.1:80
+# Ambient, so they survive exec into hwclock. They do not survive exec into
+# sudo (setuid clears the ambient set), so the allow-list below is unaffected.
+# ProtectClock= must stay unset for the same reason CAP_SYS_TIME is here.
+AmbientCapabilities=CAP_SYS_TIME CAP_NET_BIND_SERVICE
 
 # Hardening
 # NoNewPrivileges is intentionally NOT set: the agent's kiosk.restart and
@@ -43,7 +55,19 @@ LogsDirectoryMode=0750
 
 # Redundant with the two directives above (systemd makes those writable even
 # under ProtectSystem=strict) but kept explicit for /etc/musallahboard, which
-# is not managed by a *Directory= directive.
+# is not managed by a *Directory= directive. The daemon writes kiosk-url there
+# (write .tmp, rename), so the directory has to stay writable.
+#
+# Writable here means "not read-only mounted", nothing more: ordinary
+# permissions still apply. trust.json in the same directory is root:root 0644,
+# so the daemon cannot write it. It is only read here; `trust add|remove|fetch`
+# and the root self-updater run as root, outside this unit. Note that because
+# the directory itself is owned by musallahdaemon, the daemon can still unlink
+# or rename directory entries, including trust.json, so root code must check
+# that trust.json is a root-owned regular file before trusting it.
+#
+# /var/lib/musallahboard covers the content and app stores, state.json, the
+# inbox and agent/staged/, which the root updater watches.
 ReadWritePaths=/etc/musallahboard /var/lib/musallahboard /var/log/musallahboard
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

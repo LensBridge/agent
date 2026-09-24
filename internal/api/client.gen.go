@@ -27,13 +27,21 @@ type AgentEnrollRequest struct {
 
 // AgentEnrollResponse defines model for AgentEnrollResponse.
 type AgentEnrollResponse struct {
-	DeviceId     *openapi_types.UUID `json:"deviceId,omitempty"`
-	WebsocketUrl *string             `json:"websocketUrl,omitempty"`
+	// ContentSigningKeys Public content signing keys the agent pins at enrollment. Always present; empty when the server has no content key configured.
+	ContentSigningKeys []SigningKeyView    `json:"contentSigningKeys"`
+	DeviceId           *openapi_types.UUID `json:"deviceId,omitempty"`
+	WebsocketUrl       *string             `json:"websocketUrl,omitempty"`
 }
 
 // MessageResponse defines model for MessageResponse.
 type MessageResponse struct {
 	Message *string `json:"message,omitempty"`
+}
+
+// SigningKeyView defines model for SigningKeyView.
+type SigningKeyView struct {
+	KeyId     string `json:"keyId"`
+	PublicKey string `json:"publicKey"`
 }
 
 // EnrollAgentJSONRequestBody defines body for EnrollAgent for application/json ContentType.
@@ -115,7 +123,7 @@ type ClientInterface interface {
 
 	// EnrollAgentWithBody Exchange a one-time enrollment token for a device identity
 	//
-	// Called once per device by the MusallahBoard agent. The returned websocketUrl is persisted verbatim into the agent's config and never requested again.
+	// Called once per device by the MusallahBoard agent. The returned websocketUrl is persisted verbatim into the agent's config and never requested again. contentSigningKeys are the public content keys the agent pins in its trust store.
 	//
 	// Takes any type of body and a specified content type.
 	//
@@ -124,7 +132,7 @@ type ClientInterface interface {
 
 	// EnrollAgent Exchange a one-time enrollment token for a device identity
 	//
-	// Called once per device by the MusallahBoard agent. The returned websocketUrl is persisted verbatim into the agent's config and never requested again.
+	// Called once per device by the MusallahBoard agent. The returned websocketUrl is persisted verbatim into the agent's config and never requested again. contentSigningKeys are the public content keys the agent pins in its trust store.
 	//
 	// Takes a body of the `application/json` content type.
 	//
@@ -134,7 +142,7 @@ type ClientInterface interface {
 
 // EnrollAgentWithBody Exchange a one-time enrollment token for a device identity
 //
-// Called once per device by the MusallahBoard agent. The returned websocketUrl is persisted verbatim into the agent's config and never requested again.
+// Called once per device by the MusallahBoard agent. The returned websocketUrl is persisted verbatim into the agent's config and never requested again. contentSigningKeys are the public content keys the agent pins in its trust store.
 //
 // Takes any type of body and a specified content type.
 //
@@ -153,7 +161,7 @@ func (c *Client) EnrollAgentWithBody(ctx context.Context, contentType string, bo
 
 // EnrollAgent Exchange a one-time enrollment token for a device identity
 //
-// Called once per device by the MusallahBoard agent. The returned websocketUrl is persisted verbatim into the agent's config and never requested again.
+// Called once per device by the MusallahBoard agent. The returned websocketUrl is persisted verbatim into the agent's config and never requested again. contentSigningKeys are the public content keys the agent pins in its trust store.
 //
 // Takes a body of the `application/json` content type.
 //
@@ -256,7 +264,7 @@ type ClientWithResponsesInterface interface {
 
 	// EnrollAgentWithBodyWithResponse Exchange a one-time enrollment token for a device identity
 	//
-	// Called once per device by the MusallahBoard agent. The returned websocketUrl is persisted verbatim into the agent's config and never requested again.
+	// Called once per device by the MusallahBoard agent. The returned websocketUrl is persisted verbatim into the agent's config and never requested again. contentSigningKeys are the public content keys the agent pins in its trust store.
 	//
 	// Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -265,7 +273,7 @@ type ClientWithResponsesInterface interface {
 
 	// EnrollAgentWithResponse Exchange a one-time enrollment token for a device identity
 	//
-	// Called once per device by the MusallahBoard agent. The returned websocketUrl is persisted verbatim into the agent's config and never requested again.
+	// Called once per device by the MusallahBoard agent. The returned websocketUrl is persisted verbatim into the agent's config and never requested again. contentSigningKeys are the public content keys the agent pins in its trust store.
 	//
 	// Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 	//
@@ -337,7 +345,7 @@ func (r EnrollAgentResponse) ContentType() string {
 
 // EnrollAgentWithBodyWithResponse Exchange a one-time enrollment token for a device identity
 //
-// Called once per device by the MusallahBoard agent. The returned websocketUrl is persisted verbatim into the agent's config and never requested again.
+// Called once per device by the MusallahBoard agent. The returned websocketUrl is persisted verbatim into the agent's config and never requested again. contentSigningKeys are the public content keys the agent pins in its trust store.
 //
 // Takes any type of body and a specified content type, and returns a wrapper object for the known response body format(s).
 //
@@ -352,7 +360,7 @@ func (c *ClientWithResponses) EnrollAgentWithBodyWithResponse(ctx context.Contex
 
 // EnrollAgentWithResponse Exchange a one-time enrollment token for a device identity
 //
-// Called once per device by the MusallahBoard agent. The returned websocketUrl is persisted verbatim into the agent's config and never requested again.
+// Called once per device by the MusallahBoard agent. The returned websocketUrl is persisted verbatim into the agent's config and never requested again. contentSigningKeys are the public content keys the agent pins in its trust store.
 //
 // Takes a body of the `application/json` content type, and returns a wrapper object for the known response body format(s).
 //

@@ -1,0 +1,5 @@
+# MusallahBoard: let the agent (group musallahdaemon) write the RTC with
+# hwclock after it corrects the system clock. docs/architecture.md section 10.
+# Setting the RTC also needs CAP_SYS_TIME, which the agent's unit grants.
+# Harmless on a board with no RTC fitted: the rule never matches.
+SUBSYSTEM=="rtc", KERNEL=="rtc0", GROUP="musallahdaemon", MODE="0660"

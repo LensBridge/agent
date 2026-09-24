@@ -15,16 +15,12 @@ import (
 	"github.com/coreos/go-systemd/v22/daemon"
 
 	"github.com/LensBridge/agent/internal/cdp"
-	"github.com/LensBridge/agent/internal/commands"
 	"github.com/LensBridge/agent/internal/config"
 	"github.com/LensBridge/agent/internal/enroll"
-	"github.com/LensBridge/agent/internal/keystore"
-	"github.com/LensBridge/agent/internal/kioskurl"
 	"github.com/LensBridge/agent/internal/netinfo"
 	"github.com/LensBridge/agent/internal/safemode"
 	"github.com/LensBridge/agent/internal/splash"
 	"github.com/LensBridge/agent/internal/version"
-	"github.com/LensBridge/agent/internal/wsclient"
 )
 
 const (
@@ -55,16 +51,18 @@ func main() {
 		runDaemon()
 	case "enroll":
 		runEnroll(os.Args[2:])
-	case "bundle":
-		runBundle(os.Args[2:])
 	case "status":
 		runStatus(os.Args[2:])
-	case "mode":
-		runMode(os.Args[2:])
-	case "app":
-		runApp(os.Args[2:])
-	case "gate":
-		runGate(os.Args[2:])
+	case "import":
+		runImport(os.Args[2:])
+	case "service-port":
+		runServicePort(os.Args[2:])
+	case "trust":
+		runTrust(os.Args[2:])
+	case "selfupdate":
+		runSelfUpdate(os.Args[2:])
+	case "usb-import":
+		runUSBImport(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Printf("musallahboard-agent %s\n", version.Version)
 	case "-h", "--help", "help":
@@ -77,21 +75,22 @@ func main() {
 }
 
 func printHelp() {
-	fmt.Print(`musallahboard-agent — device agent for MusallahBoard kiosk Pis
+	fmt.Print(`musallahboard-agent: device agent for MusallahBoard kiosk Pis (docs/architecture.md)
 
 Usage:
   musallahboard-agent run                          Run the daemon (default)
   musallahboard-agent enroll --token=X --backend=Y Register this device
-  musallahboard-agent status [--json]              Show mode, content bundle and clock
+  musallahboard-agent status [--json]              Show versions, content, sync, trust and clock
   musallahboard-agent version                      Print version
 
-Offline mode (see docs/offline.md; these need sudo):
-  musallahboard-agent bundle install <bundle.zip>  Check and install a content bundle
-  musallahboard-agent mode online|offline          Switch mode (restarts the agent)
-  musallahboard-agent app install <dir|tar.gz>     Install a board app build for offline use
-  musallahboard-agent gate <request>               Restricted entry point for the push account:
-                                                   status [--json] | clock | clock-set <seconds> |
-                                                   bundle-install | app-install (file on stdin)
+Administration (need sudo):
+  musallahboard-agent import <file.mbu>... | -     Install signed update packages
+  musallahboard-agent service-port on|off          eth0 service port + upload server at http://10.77.0.1/
+  musallahboard-agent trust show|add|remove|fetch  Keys this board accepts packages from
+
+Run by systemd (root):
+  musallahboard-agent selfupdate apply             Install a staged agent update, with rollback
+  musallahboard-agent usb-import <device>          Copy update packages from a USB stick
 
 Enroll flags:
   --token     One-time enrollment token from the admin portal
@@ -160,15 +159,9 @@ func runDaemon() {
 		logger.Warn("agent starting in safe mode (repeated crashes detected)")
 	}
 
-	if cfg.Mode == config.ModeOffline {
-		// No backend WebSocket, telemetry or remote commands: offline mode
-		// makes no network calls at all. See docs/offline.md, Contract 2.
-		if err := startOffline(ctx, logger, cfg, &wg); err != nil {
-			logger.Error("could not start offline mode", "err", err)
-			os.Exit(1)
-		}
-	} else {
-		startOnline(ctx, logger, cfg, safeMode, &wg)
+	if err := startBoard(ctx, logger, cfg, safeMode, &wg); err != nil {
+		logger.Error("could not start", "err", err)
+		os.Exit(1)
 	}
 
 	wg.Add(1)
@@ -187,62 +180,6 @@ func runDaemon() {
 	_, _ = daemon.SdNotify(false, daemon.SdNotifyStopping)
 	wg.Wait()
 	logger.Info("shutdown complete")
-}
-
-// startOnline is the original run mode: load the device key, point the kiosk
-// at the provisioned board URL, and hold the backend WebSocket open with the
-// command dispatcher behind it. It returns once everything is started; the
-// goroutines it adds to wg stop when ctx is cancelled.
-func startOnline(ctx context.Context, logger *slog.Logger, cfg *config.Config, safeMode bool, wg *sync.WaitGroup) {
-	priv, err := keystore.Load(cfg.KeyPath)
-	if err != nil {
-		logger.Error("failed to load device key", "err", err, "keyPath", cfg.KeyPath)
-		os.Exit(1)
-	}
-	logger.Info("agent identity loaded",
-		"deviceId", cfg.DeviceID,
-		"websocketUrl", cfg.WebSocketURL,
-		"safeMode", safeMode,
-	)
-
-	// Re-compose the kiosk URL on every startup. Covers the case where enroll
-	// ran before the operator provisioned the base board URL, and picks up a
-	// changed base URL after an agent restart. The kiosk unit waits on this
-	// file, so a successful write here is what unblocks the board on first boot.
-	if err := kioskurl.Write(kioskurl.DefaultBoardURLPath, kioskurl.DefaultOutPath, cfg.DeviceID); err != nil {
-		logger.Warn("could not compose kiosk url (kiosk will wait)", "err", err)
-	} else {
-		logger.Info("kiosk url written", "path", kioskurl.DefaultOutPath)
-	}
-
-	wsClient := wsclient.New(cfg, priv, logger, version.Version, safeMode)
-
-	cdpClient := cdp.New("")
-	// Heartbeats ask the browser what it's showing rather than trusting the
-	// kiosk unit's state, which Restart=always keeps "active" through a crash
-	// loop or a stuck splash.
-	wsClient.SetPageProber(cdpClient)
-	registry := commands.NewRegistry()
-	registry.Register(&commands.ChromeReload{CDP: cdpClient})
-	registry.Register(&commands.ChromeScreenshot{CDP: cdpClient})
-	registry.Register(&commands.ConfigRefresh{CDP: cdpClient, DeviceID: cfg.DeviceID})
-	registry.Register(&commands.KioskRestart{})
-	registry.Register(&commands.SystemReboot{})
-	registry.Register(&commands.LogsTail{})
-	logger.Info("command handlers registered", "kinds", registry.Kinds())
-
-	dispatcher := commands.NewDispatcher(registry, logger)
-	wsClient.SetCommandHandler(dispatcher.Handle)
-
-	// Re-sent, and harmless, when awaitEnrollment already reported ready.
-	_, _ = daemon.SdNotify(false, daemon.SdNotifyReady)
-	_, _ = daemon.SdNotify(false, "STATUS=enrolled")
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		wsClient.Run(ctx)
-	}()
 }
 
 // awaitEnrollment blocks until a usable config appears at defaultConfigPath,

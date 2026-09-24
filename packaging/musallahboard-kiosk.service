@@ -6,9 +6,16 @@ Documentation=https://github.com/LensBridge/agent
 # kiosk-url is absent/empty). There is deliberately NO ExecStartPre gate any
 # more — gating before ExecStart left tty1 black until enrollment. Instead,
 # musallahboard-kiosk-watch.path watches kiosk-url and restarts this unit the
-# moment the agent composes it (on enrollment, or a board-url change), so the
-# board replaces the splash within ~2s with no operator action.
+# moment the agent writes it on enrollment, so the board replaces the splash
+# within ~2s with no operator action.
 After=systemd-user-sessions.service
+# The kiosk loads http://127.0.0.1:8080/, served by the agent, and the agent
+# reports READY=1 (Type=notify) only once that server is listening. So ordering
+# after it means Chromium never starts against a closed port
+# (docs/architecture.md section 14). Wants=, not Requires=: a crashing agent
+# must not take the screen down with it.
+After=musallahboard-agent.service
+Wants=musallahboard-agent.service
 # We take over the console getty would otherwise own.
 After=getty@tty1.service
 Conflicts=getty@tty1.service
