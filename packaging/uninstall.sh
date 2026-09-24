@@ -15,6 +15,10 @@
 #   - /usr/bin/musallahboard-agent
 #   - /var/lib/musallahboard
 #   - /var/log/musallahboard
+#   - offline mode, if set up: the musallahboard-service-port and
+#     musallahboard-lan NetworkManager connections, the service port's ufw
+#     rules, the RTC boot-time clock unit, and the 'mbpush' push account
+#     (user, sudoers rule, sshd settings)
 #
 # What is preserved (unless --purge):
 #   - /etc/musallahboard/agent.toml      (device id, backend url)
@@ -73,10 +77,57 @@ rm -f /usr/bin/start-kiosk.sh
 rm -rf /usr/share/musallahboard
 info "Removed binary, units (agent + kiosk watcher), launcher, splash, sudoers"
 
-# State / logs: never preserved — they don't contain identity, just runtime crud
+# State / logs: never preserved — they don't contain identity, just runtime crud.
+# Includes offline mode's installed bundles (/var/lib/musallahboard/offline).
 rm -rf /var/lib/musallahboard
 rm -rf /var/log/musallahboard
 info "Removed /var/lib/musallahboard and /var/log/musallahboard"
+
+# Offline mode (setup.sh --offline). Left behind, the service-port connection
+# would keep eth0 able to act as a DHCP server with no agent to switch it off.
+section "Removing offline mode"
+if command -v nmcli &>/dev/null; then
+    for conn in musallahboard-service-port musallahboard-lan; do
+        if nmcli -g NAME connection show 2>/dev/null | grep -qxF "$conn"; then
+            if nmcli connection delete "$conn" >/dev/null; then
+                info "Deleted NetworkManager connection $conn"
+            else
+                warn "Could not delete NetworkManager connection $conn"
+            fi
+        fi
+    done
+fi
+if command -v ufw &>/dev/null; then
+    ufw delete allow in on eth0 to any port 67 proto udp >/dev/null 2>&1 || true
+    ufw delete allow in on eth0 to any port 53 >/dev/null 2>&1 || true
+    info "Removed the service port's DHCP/DNS firewall rules (if present)"
+fi
+if [[ -e /etc/udev/rules.d/85-musallahboard-rtc.rules || -e /lib/systemd/system/musallahboard-rtc.service ]]; then
+    rm -f /etc/udev/rules.d/85-musallahboard-rtc.rules
+    rm -f /lib/systemd/system/musallahboard-rtc.service
+    udevadm control --reload 2>/dev/null || true
+    # The dtoverlay line in config.txt stays (the RTC is still fitted, and
+    # harmless), and fake-hwclock is not reinstalled.
+    info "Removed the RTC boot-time clock unit"
+fi
+# The push account. Its only permission was running the agent's gate, which
+# is gone now, but a login nobody uses should not outlive its purpose.
+if id mbpush &>/dev/null || [[ -e /etc/sudoers.d/musallahboard-push || -e /etc/ssh/sshd_config.d/99-musallahboard-push.conf ]]; then
+    rm -f /etc/sudoers.d/musallahboard-push
+    rm -f /etc/ssh/sshd_config.d/99-musallahboard-push.conf
+    if [[ -f /etc/ssh/sshd_config.d/kiosk-hardening.conf ]]; then
+        sed -i -E 's/^(AllowUsers\b.*)[[:space:]]mbpush([[:space:]]|$)/\1\2/' /etc/ssh/sshd_config.d/kiosk-hardening.conf
+    fi
+    if /usr/sbin/sshd -t 2>/dev/null; then
+        systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+    else
+        warn "sshd's configuration does not validate after removing the push account; check /etc/ssh before logging out"
+    fi
+    if id mbpush &>/dev/null; then
+        userdel --remove mbpush 2>/dev/null || userdel mbpush || true
+    fi
+    info "Removed the push account (mbpush), its sudo rule and sshd settings"
+fi
 
 if [[ "$PURGE" == "yes" ]]; then
     warn "--purge: deleting device identity at /etc/musallahboard"

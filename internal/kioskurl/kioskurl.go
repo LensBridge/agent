@@ -16,10 +16,15 @@
 // This file is the provisioning path for a board that is starting up. To fix
 // a board that is already running — wrong cookie, wiped profile — the agent
 // pushes the id into the live page instead, via the config.refresh command.
+//
+// In offline mode the base URL is not the provisioned one but the agent's own
+// local server (OfflineBaseURL), and the page is told so with &mode=offline.
+// board-url is left alone, so switching back to online needs nothing restored.
 package kioskurl
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,6 +36,10 @@ const DefaultBoardURLPath = "/etc/musallahboard/board-url"
 // DefaultOutPath is the composed URL the kiosk launcher reads. It is also the
 // enrollment sentinel the kiosk systemd unit waits on.
 const DefaultOutPath = "/etc/musallahboard/kiosk-url"
+
+// OfflineBaseURL is the agent's local server, which serves the board in
+// offline mode. It must match the listen address in internal/offline.
+const OfflineBaseURL = "http://127.0.0.1:8080/"
 
 // Write reads the base board URL from boardURLPath, appends ?deviceId=<deviceID>,
 // and atomically writes the result to outPath (0644 so the unprivileged kiosk
@@ -52,11 +61,35 @@ func Write(boardURLPath, outPath, deviceID string) error {
 		return fmt.Errorf("kioskurl: base url %s is empty", boardURLPath)
 	}
 
+	return writeURL(outPath, Compose(base, deviceID))
+}
+
+// WriteOffline writes the offline-mode kiosk URL for deviceID to outPath:
+// the local server, with the device id and mode=offline. It ignores board-url.
+func WriteOffline(outPath, deviceID string) error {
+	if deviceID == "" {
+		return fmt.Errorf("kioskurl: empty deviceID")
+	}
+	return writeURL(outPath, OfflineURL(deviceID))
+}
+
+// Compose appends deviceId to base, respecting a query base already has.
+func Compose(base, deviceID string) string {
 	sep := "?"
 	if strings.Contains(base, "?") {
 		sep = "&"
 	}
-	composed := base + sep + "deviceId=" + deviceID + "\n"
+	return base + sep + "deviceId=" + deviceID
+}
+
+// OfflineURL is the URL the kiosk loads in offline mode.
+func OfflineURL(deviceID string) string {
+	return OfflineBaseURL + "?deviceId=" + url.QueryEscape(deviceID) + "&mode=offline"
+}
+
+// writeURL atomically writes u (plus a trailing newline) to outPath.
+func writeURL(outPath, u string) error {
+	composed := u + "\n"
 
 	// Skip the write entirely when the composed URL is unchanged. The kiosk
 	// reload is driven by a systemd.path unit watching outPath; an identical

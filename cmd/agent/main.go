@@ -55,6 +55,16 @@ func main() {
 		runDaemon()
 	case "enroll":
 		runEnroll(os.Args[2:])
+	case "bundle":
+		runBundle(os.Args[2:])
+	case "status":
+		runStatus(os.Args[2:])
+	case "mode":
+		runMode(os.Args[2:])
+	case "app":
+		runApp(os.Args[2:])
+	case "gate":
+		runGate(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Printf("musallahboard-agent %s\n", version.Version)
 	case "-h", "--help", "help":
@@ -72,7 +82,16 @@ func printHelp() {
 Usage:
   musallahboard-agent run                          Run the daemon (default)
   musallahboard-agent enroll --token=X --backend=Y Register this device
+  musallahboard-agent status [--json]              Show mode, content bundle and clock
   musallahboard-agent version                      Print version
+
+Offline mode (see docs/offline.md; these need sudo):
+  musallahboard-agent bundle install <bundle.zip>  Check and install a content bundle
+  musallahboard-agent mode online|offline          Switch mode (restarts the agent)
+  musallahboard-agent app install <dir|tar.gz>     Install a board app build for offline use
+  musallahboard-agent gate <request>               Restricted entry point for the push account:
+                                                   status [--json] | clock | clock-set <seconds> |
+                                                   bundle-install | app-install (file on stdin)
 
 Enroll flags:
   --token     One-time enrollment token from the admin portal
@@ -141,6 +160,40 @@ func runDaemon() {
 		logger.Warn("agent starting in safe mode (repeated crashes detected)")
 	}
 
+	if cfg.Mode == config.ModeOffline {
+		// No backend WebSocket, telemetry or remote commands: offline mode
+		// makes no network calls at all. See docs/offline.md, Contract 2.
+		if err := startOffline(ctx, logger, cfg, &wg); err != nil {
+			logger.Error("could not start offline mode", "err", err)
+			os.Exit(1)
+		}
+	} else {
+		startOnline(ctx, logger, cfg, safeMode, &wg)
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		select {
+		case <-time.After(stableRunDuration):
+			sm.OnSuccessfulRun()
+			logger.Info("crash counter reset (agent stable)")
+		case <-ctx.Done():
+		}
+	}()
+
+	<-ctx.Done()
+	logger.Info("shutdown signal received")
+	_, _ = daemon.SdNotify(false, daemon.SdNotifyStopping)
+	wg.Wait()
+	logger.Info("shutdown complete")
+}
+
+// startOnline is the original run mode: load the device key, point the kiosk
+// at the provisioned board URL, and hold the backend WebSocket open with the
+// command dispatcher behind it. It returns once everything is started; the
+// goroutines it adds to wg stop when ctx is cancelled.
+func startOnline(ctx context.Context, logger *slog.Logger, cfg *config.Config, safeMode bool, wg *sync.WaitGroup) {
 	priv, err := keystore.Load(cfg.KeyPath)
 	if err != nil {
 		logger.Error("failed to load device key", "err", err, "keyPath", cfg.KeyPath)
@@ -190,23 +243,6 @@ func runDaemon() {
 		defer wg.Done()
 		wsClient.Run(ctx)
 	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		select {
-		case <-time.After(stableRunDuration):
-			sm.OnSuccessfulRun()
-			logger.Info("crash counter reset (agent stable)")
-		case <-ctx.Done():
-		}
-	}()
-
-	<-ctx.Done()
-	logger.Info("shutdown signal received")
-	_, _ = daemon.SdNotify(false, daemon.SdNotifyStopping)
-	wg.Wait()
-	logger.Info("shutdown complete")
 }
 
 // awaitEnrollment blocks until a usable config appears at defaultConfigPath,

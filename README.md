@@ -71,6 +71,25 @@ make build-arm64
 
 Requires Go 1.23+. Binaries land in `build/`.
 
+## Offline mode
+
+A board with no internet connection can run in offline mode: the agent serves the board app and a content bundle (14 days of payloads and posters, exported from LensBridge) to the kiosk from `127.0.0.1:8080`, and makes no network calls. An admin refreshes the content every week or two by plugging a laptop into the board's ethernet port and running `mbpush`, which also corrects the board's clock.
+
+```bash
+# On the board, once, after a normal setup and enrollment, while still online:
+bash setup.sh --offline --board-dist=<frontend dist dir or .tar.gz> [--rtc]
+
+# On the laptop (build with: make mbpush):
+mbpush musallahboard-3f2a1b4c-2026-09-24.zip   # set clock, install bundle, show status
+mbpush status                                  # check only
+
+# On the board:
+sudo musallahboard-agent status
+sudo musallahboard-agent mode online           # switch back; before joining a real network
+```
+
+[docs/offline.md](docs/offline.md) is the full design and the contract between the backend exporter, this agent and the frontend, including how to convert an existing online board.
+
 ## Roadmap
 
 Eventually I would like to create a premade Pi image (or an image builder) with the agent preinstalled, so that users can just flash an SD card and have a ready-to-go kiosk. Unfortunately, everything has been testing my patience lately and I gave up on that for now.

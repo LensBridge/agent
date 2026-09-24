@@ -6,7 +6,8 @@ PKG     := github.com/LensBridge/agent
 LDFLAGS := -s -w -X $(PKG)/internal/version.Version=$(VERSION)
 
 .PHONY: build build-arm64 build-amd64 tidy test clean \
-        deploy install-remote install-remote-x86 package package-amd64
+        deploy install-remote install-remote-x86 package package-amd64 \
+        mbpush mbpush-windows mbpush-macos mbpush-linux
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o build/musallahboard-agent ./cmd/agent
@@ -18,6 +19,22 @@ build-arm64:
 build-amd64:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 		go build -trimpath -ldflags "$(LDFLAGS)" -o build/musallahboard-agent-amd64 ./cmd/agent
+
+# mbpush: the admin-laptop side of offline mode (docs/offline.md). Pure Go,
+# shells out to the system ssh/scp, so a plain cross-compile is enough.
+mbpush: mbpush-windows mbpush-macos mbpush-linux
+
+mbpush-windows:
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+		go build -trimpath -ldflags "$(LDFLAGS)" -o build/mbpush-windows-amd64.exe ./cmd/mbpush
+
+mbpush-macos:
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
+		go build -trimpath -ldflags "$(LDFLAGS)" -o build/mbpush-darwin-arm64 ./cmd/mbpush
+
+mbpush-linux:
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+		go build -trimpath -ldflags "$(LDFLAGS)" -o build/mbpush-linux-amd64 ./cmd/mbpush
 
 tidy:
 	go mod tidy

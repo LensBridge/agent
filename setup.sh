@@ -16,6 +16,11 @@
 # After setup completes, enroll the device:
 #   sudo musallahboard-agent enroll --token=<token> --backend=<url>
 #
+# Offline boards (docs/offline.md): once the board is set up and enrolled,
+# and while it still has internet, run
+#   bash setup.sh --offline --board-dist=<dist-dir-or-tar.gz> [--rtc]
+# to provision the ethernet service port and switch it to offline mode.
+#
 # The kiosk shows a "waiting for enrollment" splash until then; once enrolled
 # the board loads automatically with no reboot.
 # =====================================================
@@ -59,6 +64,25 @@ UNIT_DIR=/lib/systemd/system
 SUDOERS_DEST=/etc/sudoers.d/musallahboard-agent
 KIOSK_SHARE_DIR=/usr/share/musallahboard
 
+# Offline mode (setup.sh --offline). Connection names and the address are
+# shared with cmd/agent (offline_cli.go) and cmd/mbpush — change them together.
+OFFLINE=0
+OFFLINE_RTC=0
+BOARD_DIST=""
+SERVICE_CONN=musallahboard-service-port
+LAN_CONN=musallahboard-lan
+SERVICE_IFACE=eth0
+SERVICE_ADDR=10.77.0.1/24
+OFFLINE_DIR=/var/lib/musallahboard/offline
+RTC_OVERLAY="dtoverlay=i2c-rtc,ds3231"
+# The restricted account mbpush and the Android app log in as. Shared with
+# cmd/agent (gate.go) and cmd/mbpush — change them together.
+PUSH_USER=mbpush
+PUSH_KEYS=()
+PUSH_SUDOERS=/etc/sudoers.d/musallahboard-push
+PUSH_SSHD_CONF=/etc/ssh/sshd_config.d/99-musallahboard-push.conf
+SSHD_HARDENING=/etc/ssh/sshd_config.d/kiosk-hardening.conf
+
 # ── Argument parsing ──────────────────────────────────────────────────────────
 usage() {
     cat <<'USAGE'
@@ -72,6 +96,16 @@ Usage: bash setup.sh [options]
   --reboot=auto|never|ask
   --yes, -y              answer every prompt with its default
   -h, --help
+
+Offline mode (after a normal setup and enrollment, while still online):
+  --offline              provision the ethernet service port and switch this
+                         board to offline mode; skips the normal setup
+  --board-dist=PATH      board app build (dist dir or .tar.gz) to serve offline;
+                         required the first time
+  --rtc                  a DS3231 RTC is fitted: enable it, remove fake-hwclock
+  --push-key=KEY         public key allowed to push bundles as the restricted
+                         'mbpush' account (repeatable; re-run to add more).
+                         That account can only run `musallahboard-agent gate`.
 USAGE
 }
 
@@ -84,10 +118,19 @@ for arg in "$@"; do
         --admin-ssh-key=*) export MB_ADMIN_SSH_KEY="${arg#*=}" ;;
         --reboot=*)        export MB_REBOOT="${arg#*=}" ;;
         --yes|-y)          export MB_ASSUME_YES=1 ;;
+        --offline)         OFFLINE=1 ;;
+        --rtc)             OFFLINE_RTC=1 ;;
+        --board-dist=*)    BOARD_DIST="${arg#*=}" ;;
+        --push-key=*)      PUSH_KEYS+=("${arg#*=}") ;;
         -h|--help)         usage; exit 0 ;;
         *) echo "Unknown option: $arg" >&2; usage >&2; exit 1 ;;
     esac
 done
+
+if [[ "$OFFLINE" != "1" ]] && { [[ "$OFFLINE_RTC" == "1" ]] || [[ -n "$BOARD_DIST" ]] || (( ${#PUSH_KEYS[@]} )); }; then
+    echo "--rtc, --board-dist and --push-key only apply with --offline" >&2
+    exit 1
+fi
 
 # ── Helper: read one answer ───────────────────────────────────────────────────
 # $1 variable to set   $2 prompt text   $3 default
@@ -163,7 +206,7 @@ prompt_config() {
     _ask TIMEZONE   "Timezone"                         "America/Toronto"
 
     # Validate admin user is not a reserved name
-    for _reserved in musallahdaemon "$KIOSK_USER"; do
+    for _reserved in musallahdaemon "$KIOSK_USER" "$PUSH_USER"; do
         [[ "$ADMIN_USER" == "$_reserved" ]] && \
             error "'$_reserved' is reserved for a MusallahBoard service account."
     done
@@ -875,8 +918,403 @@ EOF
     return 0
 }
 
+# ══ Offline mode (setup.sh --offline) ═════════════════════════════════════════
+# Everything below runs only with --offline, on a board that has already been
+# set up and enrolled. See docs/offline.md, "Provisioning". Every step is
+# idempotent: re-running it is safe, and is how you change --board-dist or add
+# --rtc later.
+
+offline_preflight() {
+    [[ $EUID -eq 0 ]] && error "Do not run as root. Run as a user with sudo access."
+    # Not `sudo -v`: it prompts even under NOPASSWD when any other matching
+    # sudoers entry (e.g. %sudo) needs a password, which breaks ssh 'setup.sh'.
+    sudo -n true 2>/dev/null || sudo -v || error "This script requires sudo access."
+    command -v nmcli >/dev/null || \
+        error "nmcli not found. Offline mode needs NetworkManager (the Raspberry Pi OS default)."
+    [[ -x "$BINARY_DEST" ]] || \
+        error "$BINARY_DEST is not installed. Run the normal setup (without --offline) first."
+    "$BINARY_DEST" help 2>&1 | grep -q "mode online|offline" || \
+        error "The installed agent predates offline mode. Update it first (packaging/update.sh, or make deploy PI=...)."
+    sudo test -s "$CONFIG_DIR/agent.toml" || \
+        error "This board is not enrolled yet. Enroll it online first:
+       sudo musallahboard-agent enroll --token=<token> --backend=<url>"
+
+    if [[ -n "$BOARD_DIST" ]]; then
+        [[ -e "$BOARD_DIST" ]] || error "--board-dist: $BOARD_DIST does not exist"
+    elif [[ ! -f "$KIOSK_SHARE_DIR/board/index.html" ]]; then
+        error "No board app is installed for offline use. Pass --board-dist=<dist-dir-or-tar.gz>
+       (the MusallahBoard frontend build: npm run build, then its dist/ directory)."
+    fi
+}
+
+offline_install_packages() {
+    section "Offline: packages"
+    # dnsmasq-base: NetworkManager's "shared" mode runs it for DHCP/DNS.
+    # util-linux-extra: hwclock, which the gate uses to save the time to the RTC.
+    local pkgs=(dnsmasq-base util-linux-extra)
+    # Skip apt when they are already there: re-running setup.sh --offline to
+    # add a --push-key happens on a board that has no internet any more.
+    if dpkg -s "${pkgs[@]}" &>/dev/null; then
+        info "${pkgs[*]} already installed"
+        return
+    fi
+    export DEBIAN_FRONTEND=noninteractive
+    sudo apt-get update -qq
+    sudo apt-get install -y "${pkgs[@]}"
+}
+
+offline_state_dir() {
+    section "Offline: state directory"
+    # Root installs bundles (bundle install runs under sudo); the agent only
+    # reads them, through its group.
+    sudo install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0750 /var/lib/musallahboard
+    sudo install -d -o root -g "$SERVICE_USER" -m 0750 "$OFFLINE_DIR"
+    info "$OFFLINE_DIR ready (root:$SERVICE_USER 0750)"
+}
+
+# Prints the name of a saved (not auto-generated) wired profile eth0 could
+# use, other than ours; fails if there is none. NetworkManager's automatic
+# "Wired connection 1" lives under /run and is not counted: it stops being
+# generated once any saved profile for eth0 exists, including ours.
+_saved_wired_profile() {
+    local name type file iface
+    while IFS=: read -r name type file; do
+        [[ "$type" == "802-3-ethernet" ]] || continue
+        [[ "$name" == "$SERVICE_CONN" || "$name" == "$LAN_CONN" ]] && continue
+        [[ -z "$file" || "$file" == /run/* ]] && continue
+        iface="$(nmcli -g connection.interface-name connection show "$name" 2>/dev/null || true)"
+        [[ -z "$iface" || "$iface" == "$SERVICE_IFACE" ]] || continue
+        echo "$name"
+        return 0
+    done < <(nmcli -t -f NAME,TYPE,FILENAME connection show)
+    return 1
+}
+
+_nm_has() { nmcli -g NAME connection show | grep -qxF "$1"; }
+
+offline_service_port() {
+    section "Offline: ethernet service port"
+
+    # Two profiles on eth0, tried in priority order (docs/offline.md):
+    #
+    #  1. A DHCP client ($LAN_CONN, default priority). Plugged into a real
+    #     network, the board just gets an address there, as it does today.
+    #     A laptop runs no DHCP server, so with one plugged in this fails
+    #     after ipv4.dhcp-timeout and, with the single retry `mode offline`
+    #     gives it, NetworkManager moves on to...
+    #  2. the service port ($SERVICE_CONN): shared mode, i.e. a DHCP server,
+    #     at the lowest priority NetworkManager has (-999). It only ever
+    #     autoconnects after every other eth0 profile has failed.
+    #
+    # This is what stops a board booted on a building's network from handing
+    # out addresses there. The remaining exposure is a network whose DHCP
+    # server does not answer within 30 s.
+    local lan_props=(
+        connection.interface-name "$SERVICE_IFACE"
+        connection.autoconnect yes
+        connection.autoconnect-priority 0
+        ipv4.method auto
+        ipv4.dhcp-timeout 30
+        ipv6.method auto
+    )
+    local existing
+    if _nm_has "$LAN_CONN"; then
+        sudo nmcli connection modify "$LAN_CONN" "${lan_props[@]}"
+        info "Updated NetworkManager connection $LAN_CONN (DHCP client, tried first)"
+    elif existing="$(_saved_wired_profile)"; then
+        info "Keeping your saved wired profile '$existing' as eth0's first choice"
+        warn "It keeps NetworkManager's default of 4 attempts, so a laptop may wait a few minutes"
+        warn "for an address. Delete it to use $LAN_CONN instead, then re-run setup.sh --offline."
+    else
+        sudo nmcli connection add type ethernet con-name "$LAN_CONN" "${lan_props[@]}"
+        info "Created NetworkManager connection $LAN_CONN (DHCP client, tried first)"
+    fi
+
+    # autoconnect stays off here: `musallahboard-agent mode offline` below turns
+    # it on and `mode online` turns it off, so the mode alone decides whether
+    # this board can ever act as a DHCP server.
+    local svc_props=(
+        connection.interface-name "$SERVICE_IFACE"
+        connection.autoconnect no
+        connection.autoconnect-priority -999
+        ipv4.method shared
+        ipv4.addresses "$SERVICE_ADDR"
+        ipv6.method disabled
+    )
+    if _nm_has "$SERVICE_CONN"; then
+        sudo nmcli connection modify "$SERVICE_CONN" "${svc_props[@]}"
+        info "Updated NetworkManager connection $SERVICE_CONN"
+    else
+        sudo nmcli connection add type ethernet con-name "$SERVICE_CONN" "${svc_props[@]}"
+        info "Created NetworkManager connection $SERVICE_CONN"
+    fi
+    info "$SERVICE_IFACE: shared, ${SERVICE_ADDR}, IPv6 off — a laptop plugged in gets a 10.77.0.x address"
+}
+
+offline_firewall() {
+    section "Offline: firewall"
+    # SSH is already allowed on every interface by the normal setup. ufw skips
+    # rules that already exist, so these are safe to re-add.
+    sudo ufw allow in on "$SERVICE_IFACE" to any port 67 proto udp comment 'musallahboard service port DHCP'
+    sudo ufw allow in on "$SERVICE_IFACE" to any port 53 comment 'musallahboard service port DNS'
+    info "Firewall: DHCP and DNS allowed in on $SERVICE_IFACE (alongside SSH)"
+}
+
+# The restricted account for pushing bundles (docs/offline.md, "Push account").
+# Every session is confined to `musallahboard-agent gate` twice over: by
+# command="..." on each key, and by an sshd ForceCommand for the user, so a key
+# added to authorized_keys by hand without the option is still confined. The
+# account's only sudo right is running the gate.
+offline_push_account() {
+    section "Offline: push account ($PUSH_USER)"
+    local force_cmd="sudo -n $BINARY_DEST gate"
+    local admin="${SUDO_USER:-$(id -un)}"
+
+    "$BINARY_DEST" help 2>&1 | grep -q "gate <request>" || \
+        error "The installed agent has no 'gate' command. Update it first (packaging/update.sh, or make deploy PI=...)."
+
+    if ! id "$PUSH_USER" &>/dev/null; then
+        sudo useradd --system --create-home --home-dir "/home/$PUSH_USER" --shell /bin/sh "$PUSH_USER"
+        info "Created $PUSH_USER"
+    fi
+    # '*' rather than a locked '!' password: no password can ever match, but
+    # sshd does not treat the account as locked and refuse its keys.
+    sudo usermod -p '*' "$PUSH_USER"
+
+    # Keys. root owns the file, so the account could not change its own keys
+    # even if it could run anything.
+    local ssh_dir="/home/$PUSH_USER/.ssh"
+    local keys="$ssh_dir/authorized_keys"
+    sudo install -d -o root -g root -m 0755 "$ssh_dir"
+    sudo touch "$keys"
+    sudo chown root:root "$keys"
+    sudo chmod 0644 "$keys"
+    local key kt blob rest
+    for key in "${PUSH_KEYS[@]}"; do
+        read -r kt blob rest <<< "$key"
+        [[ "$kt" =~ ^(ssh-|ecdsa-|sk-) && -n "$blob" ]] || \
+            error "--push-key is not a public key (expected 'ssh-ed25519 AAAA... name'): $key"
+        if sudo grep -qF " $kt $blob" "$keys"; then
+            info "Key ${rest:-$kt} already allowed"
+        else
+            echo "restrict,command=\"$force_cmd\" $kt $blob${rest:+ $rest}" | sudo tee -a "$keys" > /dev/null
+            info "Allowed key ${rest:-$kt} to push"
+        fi
+    done
+
+    # sudo: the gate as root, nothing else. It needs SSH_ORIGINAL_COMMAND,
+    # which sudo would otherwise strip.
+    local tmp
+    tmp="$(mktemp)"
+    cat > "$tmp" << EOF
+# MusallahBoard push account (setup.sh --offline): may run the gate, and nothing else.
+Defaults:$PUSH_USER env_keep += "SSH_ORIGINAL_COMMAND"
+$PUSH_USER ALL=(root) NOPASSWD: $BINARY_DEST gate
+EOF
+    if ! sudo visudo -cf "$tmp" > /dev/null; then
+        rm -f "$tmp"
+        error "The generated sudoers rule for $PUSH_USER did not validate; nothing was installed."
+    fi
+    sudo install -o root -g root -m 0440 "$tmp" "$PUSH_SUDOERS"
+    rm -f "$tmp"
+    info "sudo: $PUSH_USER may run '$BINARY_DEST gate' only"
+
+    _push_sshd "$admin" "$force_cmd"
+
+    local count
+    count="$(sudo grep -c . "$keys" || true)"
+    if [[ "$count" == "0" ]]; then
+        warn "No push keys yet. Add one (re-running is safe):"
+        warn "  bash setup.sh --offline --push-key=\"ssh-ed25519 AAAA... phone\""
+    else
+        info "$count key(s) can push as $PUSH_USER"
+    fi
+}
+
+# Admit the push account to sshd and confine it, without being able to lock
+# the admin out: the admin's effective sshd settings are captured before and
+# compared after, and any difference (or a config sshd rejects) restores the
+# previous files before sshd is reloaded.
+_push_sshd() {
+    local admin="$1" force_cmd="$2"
+    local probe="host=localhost,addr=127.0.0.1"
+    # allowusers is expected to change (it gains the push account), so it is
+    # left out of the comparison and checked separately below.
+    _effective() {
+        local cfg
+        cfg="$(sudo /usr/sbin/sshd -T -C "user=$1,$probe" 2>/dev/null)" || return 1
+        grep -v '^allowusers ' <<< "$cfg" | sort
+    }
+
+    local before
+    before="$(_effective "$admin")" || true
+    [[ -n "$before" ]] || error "Could not read sshd's effective configuration (sshd -T). Nothing was changed."
+
+    local backup
+    backup="$(mktemp -d)"
+    [[ -f "$SSHD_HARDENING" ]] && sudo cp -p "$SSHD_HARDENING" "$backup/hardening"
+    [[ -f "$PUSH_SSHD_CONF" ]] && sudo cp -p "$PUSH_SSHD_CONF" "$backup/push"
+    _restore() {
+        if [[ -f "$backup/hardening" ]]; then sudo cp -p "$backup/hardening" "$SSHD_HARDENING"; fi
+        if [[ -f "$backup/push" ]]; then sudo cp -p "$backup/push" "$PUSH_SSHD_CONF"; else sudo rm -f "$PUSH_SSHD_CONF"; fi
+        rm -rf "$backup"
+    }
+
+    # The normal setup's AllowUsers admits only the admin.
+    if sudo grep -qE '^AllowUsers\b' "$SSHD_HARDENING" 2>/dev/null && \
+       ! sudo grep -qE "^AllowUsers\b.*[[:space:]]$PUSH_USER([[:space:]]|\$)" "$SSHD_HARDENING"; then
+        sudo sed -i -E "s/^(AllowUsers\b.*)\$/\1 $PUSH_USER/" "$SSHD_HARDENING"
+    fi
+
+    sudo tee "$PUSH_SSHD_CONF" > /dev/null << EOF
+# MusallahBoard push account (setup.sh --offline). Confines every session of
+# $PUSH_USER to the gate, whatever its authorized_keys say.
+Match User $PUSH_USER
+    ForceCommand $force_cmd
+    PermitTTY no
+    AllowTcpForwarding no
+    AllowStreamLocalForwarding no
+    AllowAgentForwarding no
+    X11Forwarding no
+    PermitTunnel no
+    PasswordAuthentication no
+EOF
+    sudo chmod 0644 "$PUSH_SSHD_CONF"
+
+    # Captured, not piped into grep -q: under pipefail an early grep exit can
+    # SIGPIPE sshd and turn a pass into a false failure.
+    local problem="" admin_cfg="" push_cfg=""
+    if sudo /usr/sbin/sshd -t 2> /dev/null; then
+        admin_cfg="$(sudo /usr/sbin/sshd -T -C "user=$admin,$probe" 2>/dev/null || true)"
+        push_cfg="$(sudo /usr/sbin/sshd -T -C "user=$PUSH_USER,$probe" 2>/dev/null || true)"
+    else
+        problem="sshd rejected the new configuration"
+    fi
+    if [[ -z "$problem" && "$(_effective "$admin" || true)" != "$before" ]]; then
+        problem="it would have changed sshd settings for $admin"
+    elif [[ -z "$problem" ]] && sudo grep -qE '^AllowUsers\b' "$SSHD_HARDENING" 2>/dev/null && \
+         ! grep -qE "^allowusers .*\b$admin\b" <<< "$admin_cfg"; then
+        problem="$admin would no longer be allowed to log in"
+    elif [[ -z "$problem" ]] && ! grep -qxF "forcecommand $force_cmd" <<< "$push_cfg"; then
+        problem="sshd did not apply the ForceCommand to $PUSH_USER"
+    fi
+    if [[ -n "$problem" ]]; then
+        _restore
+        error "Not enabling SSH for $PUSH_USER: $problem. The previous sshd configuration was restored."
+    fi
+    rm -rf "$backup"
+
+    sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd 2>/dev/null || true
+    info "sshd: $PUSH_USER allowed, confined to the gate; $admin unchanged"
+}
+
+offline_rtc() {
+    section "Offline: RTC (DS3231)"
+    local config_txt=/boot/firmware/config.txt
+    [[ -f "$config_txt" ]] || config_txt=/boot/config.txt
+
+    if grep -qxF "$RTC_OVERLAY" "$config_txt"; then
+        info "$RTC_OVERLAY already in $config_txt"
+    else
+        echo "$RTC_OVERLAY" | sudo tee -a "$config_txt" > /dev/null
+        info "Added $RTC_OVERLAY to $config_txt (takes effect after a reboot)"
+    fi
+
+    # fake-hwclock restores the time saved at the last shutdown, which is
+    # wrong by however long the board was off and would fight the RTC.
+    if dpkg -s fake-hwclock &>/dev/null; then
+        sudo apt-get purge -y fake-hwclock
+        info "Removed fake-hwclock"
+    else
+        info "fake-hwclock not installed"
+    fi
+
+    # The ds3231 driver is a module, so the kernel's own boot-time read of the
+    # RTC is over by the time it loads, and udev cannot set the clock itself
+    # (systemd-udevd runs without CAP_SYS_TIME). Instead udev starts a oneshot
+    # unit when rtc0 appears, and that unit reads the RTC.
+    sudo tee /etc/udev/rules.d/85-musallahboard-rtc.rules > /dev/null << 'EOF'
+# MusallahBoard offline mode: set the system clock from the RTC when it appears.
+ACTION=="add", SUBSYSTEM=="rtc", KERNEL=="rtc0", TAG+="systemd", ENV{SYSTEMD_WANTS}+="musallahboard-rtc.service"
+EOF
+    sudo tee "$UNIT_DIR/musallahboard-rtc.service" > /dev/null << 'EOF'
+[Unit]
+Description=Set the system clock from the RTC (MusallahBoard offline mode)
+Documentation=https://github.com/LensBridge/agent
+DefaultDependencies=no
+Before=time-set.target
+Wants=time-set.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/hwclock --rtc=/dev/rtc0 --hctosys --utc
+EOF
+    sudo systemctl daemon-reload
+    sudo udevadm control --reload
+    info "RTC read at boot via musallahboard-rtc.service"
+    warn "Reboot once with the RTC fitted, then run 'mbpush status' (or mbpush <bundle>) to set and save the time."
+}
+
+offline_board_app() {
+    section "Offline: board app"
+    if [[ -n "$BOARD_DIST" ]]; then
+        sudo "$BINARY_DEST" app install "$BOARD_DIST"
+    else
+        info "Keeping the installed board app ($KIOSK_SHARE_DIR/board)"
+    fi
+}
+
+offline_switch_mode() {
+    section "Offline: switch mode"
+    # If eth0 is on this network right now, `mode offline` leaves the service
+    # port stopped (it would serve DHCP here) and says so.
+    sudo "$BINARY_DEST" mode offline
+}
+
+offline_summary() {
+    local admin="${SUDO_USER:-$(id -un)}"
+    cat << EOF
+
+  +----------------------------------------------------------+
+  |  Offline mode is ON                                      |
+  +----------------------------------------------------------+
+
+  The board now serves its installed bundle and makes no network calls.
+
+  To update it: plug a laptop into its ethernet port, then on the laptop
+    mbpush --user $admin musallahboard-<id>-<date>.zip
+  (mbpush talks to $admin@${SERVICE_ADDR%/*} with the SSH key you use now.
+  Allow up to a minute after plugging in: the board first tries to get an
+  address from the laptop, and only then starts serving one.)
+
+  Check it any time:   sudo musallahboard-agent status
+  Back to online:      sudo musallahboard-agent mode online
+
+EOF
+}
+
+offline_main() {
+    offline_preflight
+    offline_install_packages
+    offline_state_dir
+    offline_service_port
+    offline_firewall
+    offline_push_account
+    if [[ "$OFFLINE_RTC" == "1" ]]; then
+        offline_rtc
+    fi
+    offline_board_app
+    offline_switch_mode
+    offline_summary
+}
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 main() {
+    if [[ "$OFFLINE" == "1" ]]; then
+        offline_main
+        return
+    fi
+
     preflight
     banner
     prompt_config
