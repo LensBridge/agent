@@ -1,25 +1,18 @@
-// Package kioskurl composes the URL the on-device kiosk browser loads and
-// persists it where the cage/Chromium launcher can read it.
+// Package kioskurl persists the URL the on-device kiosk browser loads, where
+// the cage/Chromium launcher can read it.
 //
-// The board's base URL (e.g. https://board.lensbridge.tech) is provisioned by
-// the setup scripts into BoardURLPath. The agent owns the device identity, so
-// it is the only component that can append ?deviceId=<uuid>. It writes the
-// composed URL to OutPath, which doubles as the launcher's enrollment sentinel:
-// the kiosk systemd unit blocks until this file exists, guaranteeing the board
-// never loads without a device id.
+// In v2 every board is served by its own agent (docs/architecture.md,
+// section 14), so once a device is enrolled the URL is always the local
+// server, with no query string: the page asks the agent who it is. The file
+// doubles as the launcher's enrollment sentinel: until it exists the kiosk
+// shows the "waiting for enrollment" splash, and the systemd .path watcher
+// restarts the kiosk when it appears or changes.
 //
-// The frontend reads ?deviceId off the URL before its first render, persists
-// it to a cookie, and strips the query in place (history.replaceState — no
-// reload; an extra navigation here would flash the screen on every boot). So
-// re-asserting the param on every launch is idempotent and self-healing.
-//
-// This file is the provisioning path for a board that is starting up. To fix
-// a board that is already running — wrong cookie, wiped profile — the agent
-// pushes the id into the live page instead, via the config.refresh command.
-//
-// In offline mode the base URL is not the provisioned one but the agent's own
-// local server (OfflineBaseURL), and the page is told so with &mode=offline.
-// board-url is left alone, so switching back to online needs nothing restored.
+// Migration: until a board app release is installed, a board that has a
+// provisioned /etc/musallahboard/board-url keeps loading the hosted site as in
+// v1 (<board-url>?deviceId=<id>). That way upgrading an online board's agent
+// before a signed app release reaches it never blanks its screen; the first
+// app install switches it to the local server for good.
 package kioskurl
 
 import (
@@ -30,61 +23,47 @@ import (
 	"strings"
 )
 
-// DefaultBoardURLPath holds the operator-provisioned base board URL (no query).
+// DefaultBoardURLPath holds the v1 hosted board URL, if one was provisioned.
 const DefaultBoardURLPath = "/etc/musallahboard/board-url"
 
-// DefaultOutPath is the composed URL the kiosk launcher reads. It is also the
-// enrollment sentinel the kiosk systemd unit waits on.
+// DefaultOutPath is the URL the kiosk launcher reads. It is also the
+// enrollment sentinel the kiosk waits on.
 const DefaultOutPath = "/etc/musallahboard/kiosk-url"
 
-// OfflineBaseURL is the agent's local server, which serves the board in
-// offline mode. It must match the listen address in internal/offline.
-const OfflineBaseURL = "http://127.0.0.1:8080/"
+// LocalURL is the agent's local server. It must match
+// localserver.BaseURL; a test checks.
+const LocalURL = "http://127.0.0.1:8080/"
 
-// Write reads the base board URL from boardURLPath, appends ?deviceId=<deviceID>,
-// and atomically writes the result to outPath (0644 so the unprivileged kiosk
-// user can read it across the 0751 config dir).
-//
-// Returns an error if the base URL file is missing/empty or deviceID is empty —
-// callers treat a write failure as non-fatal (the launcher keeps waiting) but
-// should log it.
-func Write(boardURLPath, outPath, deviceID string) error {
-	if deviceID == "" {
-		return fmt.Errorf("kioskurl: empty deviceID")
+// WriteLocal writes LocalURL to outPath (0644 so the unprivileged kiosk user
+// can read it across the 0751 config dir). An unchanged file is not
+// rewritten, so a restart of the agent never bounces the kiosk.
+func WriteLocal(outPath string) error {
+	if outPath == "" {
+		return fmt.Errorf("kioskurl: empty path")
 	}
-	raw, err := os.ReadFile(boardURLPath)
-	if err != nil {
-		return fmt.Errorf("kioskurl: read base url %s: %w", boardURLPath, err)
-	}
-	base := strings.TrimSpace(string(raw))
-	if base == "" {
-		return fmt.Errorf("kioskurl: base url %s is empty", boardURLPath)
-	}
-
-	return writeURL(outPath, Compose(base, deviceID))
+	return writeURL(outPath, LocalURL)
 }
 
-// WriteOffline writes the offline-mode kiosk URL for deviceID to outPath:
-// the local server, with the device id and mode=offline. It ignores board-url.
-func WriteOffline(outPath, deviceID string) error {
-	if deviceID == "" {
-		return fmt.Errorf("kioskurl: empty deviceID")
+// WriteForBoard writes LocalURL when appInstalled, and otherwise the hosted
+// fallback if board-url is provisioned (see the package comment). It reports
+// which URL it chose.
+func WriteForBoard(outPath, boardURLPath, deviceID string, appInstalled bool) (string, error) {
+	u := LocalURL
+	if !appInstalled {
+		if raw, err := os.ReadFile(boardURLPath); err == nil {
+			if base := strings.TrimSpace(string(raw)); base != "" && deviceID != "" {
+				sep := "?"
+				if strings.Contains(base, "?") {
+					sep = "&"
+				}
+				u = base + sep + "deviceId=" + url.QueryEscape(deviceID)
+			}
+		}
 	}
-	return writeURL(outPath, OfflineURL(deviceID))
-}
-
-// Compose appends deviceId to base, respecting a query base already has.
-func Compose(base, deviceID string) string {
-	sep := "?"
-	if strings.Contains(base, "?") {
-		sep = "&"
+	if outPath == "" {
+		return "", fmt.Errorf("kioskurl: empty path")
 	}
-	return base + sep + "deviceId=" + deviceID
-}
-
-// OfflineURL is the URL the kiosk loads in offline mode.
-func OfflineURL(deviceID string) string {
-	return OfflineBaseURL + "?deviceId=" + url.QueryEscape(deviceID) + "&mode=offline"
+	return u, writeURL(outPath, u)
 }
 
 // writeURL atomically writes u (plus a trailing newline) to outPath.

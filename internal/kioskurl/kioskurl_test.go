@@ -4,82 +4,52 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
-const id = "3f2a1b4c-0000-4000-8000-000000000001"
-
-func TestCompose(t *testing.T) {
-	cases := []struct{ base, want string }{
-		{"https://board.example.com", "https://board.example.com?deviceId=" + id},
-		{"https://board.example.com/", "https://board.example.com/?deviceId=" + id},
-		{"https://board.example.com/?theme=dark", "https://board.example.com/?theme=dark&deviceId=" + id},
+func TestWriteLocal(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "kiosk-url")
+	if err := WriteLocal(out); err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range cases {
-		if got := Compose(tc.base, id); got != tc.want {
-			t.Errorf("Compose(%q) = %q, want %q", tc.base, got, tc.want)
-		}
+	got, _ := os.ReadFile(out)
+	if string(got) != LocalURL+"\n" {
+		t.Fatalf("kiosk-url = %q", got)
 	}
-}
-
-func TestOfflineURL(t *testing.T) {
-	want := "http://127.0.0.1:8080/?deviceId=" + id + "&mode=offline"
-	if got := OfflineURL(id); got != want {
-		t.Errorf("OfflineURL = %q, want %q", got, want)
+	fi, _ := os.Stat(out)
+	// An identical rewrite must not touch the file: the kiosk .path watcher
+	// would restart the browser.
+	old := time.Now().Add(-time.Hour)
+	os.Chtimes(out, old, old)
+	if err := WriteLocal(out); err != nil {
+		t.Fatal(err)
 	}
-	// Not a real device id, but the query must stay well-formed regardless.
-	if got := OfflineURL("a&b c"); got != "http://127.0.0.1:8080/?deviceId=a%26b+c&mode=offline" {
-		t.Errorf("OfflineURL did not escape: %q", got)
+	fi2, _ := os.Stat(out)
+	if !fi2.ModTime().Equal(old) || fi.Mode().Perm() != 0o644 {
+		t.Fatalf("rewrote an unchanged kiosk-url, or wrong mode %v", fi.Mode())
 	}
 }
 
-func TestWriteAndWriteOffline(t *testing.T) {
+func TestWriteLocalRejectsEmpty(t *testing.T) {
+	if err := WriteLocal(""); err == nil {
+		t.Fatal("expected an error")
+	}
+}
+
+func TestWriteForBoardFallsBackToHostedUntilAppInstalled(t *testing.T) {
 	dir := t.TempDir()
-	board := filepath.Join(dir, "board-url")
-	out := filepath.Join(dir, "kiosk-url")
-	if err := os.WriteFile(board, []byte("  https://board.example.com \n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	out, board := filepath.Join(dir, "kiosk-url"), filepath.Join(dir, "board-url")
+	os.WriteFile(board, []byte("https://board.example\n"), 0o644)
 
-	if err := Write(board, out, id); err != nil {
-		t.Fatal(err)
+	u, err := WriteForBoard(out, board, "abc", false)
+	if err != nil || u != "https://board.example?deviceId=abc" {
+		t.Fatalf("no app: %q %v", u, err)
 	}
-	assertFile(t, out, "https://board.example.com?deviceId="+id+"\n")
-
-	if err := WriteOffline(out, id); err != nil {
-		t.Fatal(err)
+	if u, _ := WriteForBoard(out, board, "abc", true); u != LocalURL {
+		t.Fatalf("app installed: %q", u)
 	}
-	assertFile(t, out, "http://127.0.0.1:8080/?deviceId="+id+"&mode=offline\n")
-
-	// Switching back needs nothing restored: board-url was never touched.
-	if err := Write(board, out, id); err != nil {
-		t.Fatal(err)
-	}
-	assertFile(t, out, "https://board.example.com?deviceId="+id+"\n")
-}
-
-func TestWriteRejectsEmpty(t *testing.T) {
-	dir := t.TempDir()
-	out := filepath.Join(dir, "kiosk-url")
-	if err := WriteOffline(out, ""); err == nil {
-		t.Error("WriteOffline accepted an empty device id")
-	}
-	board := filepath.Join(dir, "board-url")
-	_ = os.WriteFile(board, []byte("\n"), 0o644)
-	if err := Write(board, out, id); err == nil {
-		t.Error("Write accepted an empty board-url")
-	}
-	if _, err := os.Stat(out); !os.IsNotExist(err) {
-		t.Error("kiosk-url written despite errors")
-	}
-}
-
-func assertFile(t *testing.T, p, want string) {
-	t.Helper()
-	got, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != want {
-		t.Errorf("%s = %q, want %q", filepath.Base(p), got, want)
+	os.Remove(board)
+	if u, _ := WriteForBoard(out, board, "abc", false); u != LocalURL {
+		t.Fatalf("no board-url: %q", u)
 	}
 }

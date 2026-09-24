@@ -10,8 +10,7 @@ import (
 	"github.com/LensBridge/agent/internal/kioskurl"
 )
 
-// ConfigRefresh re-composes the on-disk kiosk URL (so an operator's board-url
-// change is picked up), re-asserts this device's identity in the live page,
+// ConfigRefresh re-asserts the on-disk kiosk URL (the local server), re-asserts this device's identity in the live page,
 // and asks it to re-fetch its board payload in place — no reload, so the
 // screen never flashes.
 //
@@ -27,6 +26,10 @@ import (
 type ConfigRefresh struct {
 	CDP      *cdp.Client
 	DeviceID string
+	// Before, when set, runs first. The daemon passes the content syncer's
+	// Trigger, so "refresh" from the admin portal also pulls fresh content:
+	// in v2 the page only shows what the agent has installed.
+	Before func()
 }
 
 func (h *ConfigRefresh) Kind() string { return "config.refresh" }
@@ -62,10 +65,11 @@ type pageResult struct {
 }
 
 func (h *ConfigRefresh) Execute(ctx context.Context, _ json.RawMessage, progress ProgressFn) (any, error) {
-	if h.DeviceID != "" {
-		if err := kioskurl.Write(kioskurl.DefaultBoardURLPath, kioskurl.DefaultOutPath, h.DeviceID); err != nil {
-			progress("warn", "kiosk url not rewritten: "+err.Error(), nil)
-		}
+	if h.Before != nil {
+		h.Before()
+	}
+	if err := kioskurl.WriteLocal(kioskurl.DefaultOutPath); err != nil {
+		progress("warn", "kiosk url not rewritten: "+err.Error(), nil)
 	}
 
 	progress("evaluating", "window.MusallahBoard.refresh()", nil)
