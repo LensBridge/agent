@@ -75,6 +75,10 @@ type Telemetry struct {
 	// not an id. The backend typed it as a UUID once; every heartbeat from a
 	// working board failed to parse and the session was closed as a bad frame.
 	DisplayedFrameKey string `json:"displayedFrameKey,omitempty"`
+
+	// Board is what the board runs and shows (localserver.BoardReport): the
+	// admin portal's view of a board it cannot see.
+	Board any `json:"board,omitempty"`
 }
 
 // CommandAckFrame, CommandProgressFrame, CommandResultFrame are the three

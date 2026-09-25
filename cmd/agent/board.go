@@ -152,7 +152,8 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 
 	if syncer != nil {
 		goRun(wg, func() { syncer.Run(ctx) })
-		startCommandChannel(ctx, logger, cfg, priv, safeMode, cdpClient, syncer, sched, wg)
+		startCommandChannel(ctx, logger, cfg, priv, safeMode, cdpClient, syncer, sched,
+			func() any { return local.Status().Board() }, wg)
 	}
 	return nil
 }
@@ -187,9 +188,11 @@ func startUploadServer(ctx context.Context, logger *slog.Logger, cfg *config.Con
 // commands) open. config.refresh also asks the content syncer for a sync now;
 // update.install_now checks the release channels and installs at once.
 func startCommandChannel(ctx context.Context, logger *slog.Logger, cfg *config.Config, priv []byte,
-	safeMode bool, cdpClient *cdp.Client, syncer *boardsync.Syncer, sched *updates.Scheduler, wg *sync.WaitGroup) {
+	safeMode bool, cdpClient *cdp.Client, syncer *boardsync.Syncer, sched *updates.Scheduler,
+	boardReport func() any, wg *sync.WaitGroup) {
 	wsClient := wsclient.New(cfg, priv, logger, version.Version, safeMode)
 	wsClient.SetPageProber(cdpClient)
+	wsClient.SetBoardReport(boardReport)
 	registry := commands.NewRegistry()
 	registry.Register(&commands.ChromeReload{CDP: cdpClient})
 	registry.Register(&commands.ChromeScreenshot{CDP: cdpClient})

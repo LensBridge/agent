@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"github.com/LensBridge/agent/internal/clock"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -147,5 +148,25 @@ func TestStatus(t *testing.T) {
 	if st.App.Version != "2.0.0" || st.Content.FirstDay != "2026-09-24" || *st.DaysRemaining != 0 ||
 		*st.StaleDays != 0 || st.Content.Source != "cli" || st.Sync == nil {
 		t.Errorf("status %+v", st)
+	}
+}
+
+func TestBoardReport(t *testing.T) {
+	days, stale := 5, 0
+	errMsg := "no route to the backend"
+	st := Status{
+		App:           &AppInfo{Version: "2.2.0"},
+		Content:       &ContentInfo{FirstDay: "2026-09-25", LastDay: "2026-10-01", CreatedAt: "2026-09-25T12:00:00Z", Source: "usb"},
+		DaysRemaining: &days, StaleDays: &stale,
+		Sync:  map[string]any{"enabled": true, "lastError": &errMsg},
+		Clock: &clock.Info{Source: clock.SourceUnverified},
+	}
+	r := st.Board()
+	if r.AppVersion != "2.2.0" || r.Content == nil || r.Content.DaysRemaining != 5 || r.Content.Source != "usb" ||
+		r.SyncError != errMsg || r.Clock == nil || r.Clock.Trusted {
+		t.Fatalf("report = %+v", r)
+	}
+	if r := (Status{}).Board(); r.Content != nil || r.SyncError != "" || r.AppVersion != "" {
+		t.Fatalf("empty status: %+v", r)
 	}
 }

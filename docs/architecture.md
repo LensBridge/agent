@@ -475,6 +475,14 @@ The backend rejects: unknown or revoked device (`401`), timestamp more than 5
 minutes from its clock (`401`), bad signature (`401`). Replays inside the window
 only repeat an idempotent read.
 
+**Board report.** Every heartbeat on the backend WebSocket carries
+`telemetry.board` (`localserver.BoardReport`): `appVersion`, `content`
+(`firstDay`, `lastDay`, `createdAt`, `source`, `installedAt`,
+`daysRemaining`, `staleDays`), `updates` (as in the status), `lastAgentUpdate`,
+`clock` (`source`, `trusted`), `syncError` and `error`. The backend keeps the
+latest per device and the admin portal shows it: a board nobody is standing
+in front of still says what it runs, what it shows, and what is wrong.
+
 ### 9.3 Backend endpoints (additions)
 
 | Endpoint | Auth | Returns |

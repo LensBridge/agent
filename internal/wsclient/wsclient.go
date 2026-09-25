@@ -33,7 +33,7 @@ const (
 	dialTimeout              = 15 * time.Second
 	authTimeout              = 10 * time.Second
 	writeTimeout             = 10 * time.Second
-	maxFrameBytes = 20 << 20 // 20 MiB	
+	maxFrameBytes            = 20 << 20 // 20 MiB
 	minBackoff               = time.Second
 	maxBackoff               = 5 * time.Minute
 
@@ -69,8 +69,9 @@ type Client struct {
 	agentVersion string
 	safeMode     bool
 
-	onCommand CommandHandler
-	prober    telemetry.PageProber
+	onCommand   CommandHandler
+	prober      telemetry.PageProber
+	boardReport func() any
 }
 
 func New(cfg *config.Config, priv ed25519.PrivateKey, logger *slog.Logger, agentVersion string, safeMode bool) *Client {
@@ -91,6 +92,10 @@ func (c *Client) SetCommandHandler(h CommandHandler) { c.onCommand = h }
 // displayedFrameKey. Optional — without one, heartbeats fall back to the
 // systemd unit state. Must be called before Run.
 func (c *Client) SetPageProber(p telemetry.PageProber) { c.prober = p }
+
+// SetBoardReport supplies the board's own report for every heartbeat
+// (localserver.BoardReport). Optional. Must be called before Run.
+func (c *Client) SetBoardReport(f func() any) { c.boardReport = f }
 
 // Run blocks until ctx is cancelled, repeatedly attempting to maintain a live
 // authenticated session. Errors are logged and trigger a backoff-and-retry.
@@ -245,6 +250,9 @@ func (c *Client) heartbeatLoop(ctx context.Context, sess *session, interval time
 			Seq:       sess.nextSeq(),
 			SessionID: sess.sessionID,
 			Telemetry: TelemetryFromSnapshot(snap),
+		}
+		if c.boardReport != nil {
+			hb.Telemetry.Board = c.boardReport()
 		}
 		wctx, cancel := context.WithTimeout(ctx, writeTimeout)
 		defer cancel()

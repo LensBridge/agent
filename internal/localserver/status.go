@@ -1,6 +1,7 @@
 package localserver
 
 import (
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -86,4 +87,59 @@ func BuildStatus(l store.Layout, deviceID, agentVersion string, now time.Time) S
 		s.ServingDay, s.DaysRemaining, s.StaleDays = &d.Serving, &d.DaysRemaining, &d.StaleDays
 	}
 	return s
+}
+
+// BoardReport is what the board tells LensBridge about itself with every
+// heartbeat, for the admin portal: what it runs and shows, what is waiting to
+// install, how its last agent update went, and whether its clock is right.
+type BoardReport struct {
+	AppVersion      string              `json:"appVersion,omitempty"`
+	Content         *BoardContent       `json:"content,omitempty"`
+	Updates         *updates.Info       `json:"updates,omitempty"`
+	LastAgentUpdate *selfupdate.Outcome `json:"lastAgentUpdate,omitempty"`
+	Clock           *clock.Info         `json:"clock,omitempty"`
+	// SyncError is why the last content sync failed, if it did.
+	SyncError string `json:"syncError,omitempty"`
+	// Error is set when the installed content cannot be read.
+	Error string `json:"error,omitempty"`
+}
+
+// BoardContent is the installed content, as the portal shows it.
+type BoardContent struct {
+	FirstDay      string `json:"firstDay"`
+	LastDay       string `json:"lastDay"`
+	CreatedAt     string `json:"createdAt"`
+	Source        string `json:"source,omitempty"`
+	InstalledAt   string `json:"installedAt,omitempty"`
+	DaysRemaining int    `json:"daysRemaining"`
+	StaleDays     int    `json:"staleDays"`
+}
+
+// Board is the heartbeat's report, taken from the status.
+func (s Status) Board() BoardReport {
+	r := BoardReport{Updates: s.Updates, LastAgentUpdate: s.LastAgentUpdate, Clock: s.Clock, Error: s.Error}
+	if s.App != nil {
+		r.AppVersion = s.App.Version
+	}
+	if c := s.Content; c != nil {
+		r.Content = &BoardContent{FirstDay: c.FirstDay, LastDay: c.LastDay, CreatedAt: c.CreatedAt,
+			Source: c.Source, InstalledAt: c.InstalledAt}
+		if s.DaysRemaining != nil {
+			r.Content.DaysRemaining = *s.DaysRemaining
+		}
+		if s.StaleDays != nil {
+			r.Content.StaleDays = *s.StaleDays
+		}
+	}
+	// Sync is the syncer's status object, whatever its type; only its
+	// lastError is reported.
+	if raw, err := json.Marshal(s.Sync); err == nil {
+		var sync struct {
+			LastError *string `json:"lastError"`
+		}
+		if json.Unmarshal(raw, &sync) == nil && sync.LastError != nil {
+			r.SyncError = *sync.LastError
+		}
+	}
+	return r
 }
