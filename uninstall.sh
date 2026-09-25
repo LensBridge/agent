@@ -66,6 +66,7 @@ section "Removing udev rules"
 rm -f /etc/udev/rules.d/90-musallahboard-usb.rules
 rm -f /etc/udev/rules.d/90-musallahboard-rtc.rules
 rm -f /etc/udev/rules.d/85-musallahboard-rtc.rules
+rm -f /etc/modules-load.d/musallahboard.conf
 udevadm control --reload 2>/dev/null || true
 info "udev rules removed (USB import, RTC access, RTC boot-time read)"
 

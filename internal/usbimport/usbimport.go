@@ -59,8 +59,6 @@ type Helper struct {
 	DevDir    string
 	// Exec runs a command and returns its combined output.
 	Exec func(ctx context.Context, name string, args ...string) (string, error)
-	// NTFS3 reports whether the kernel's ntfs3 driver can be used.
-	NTFS3 func() bool
 	// Chown gives a copied file the inbox directory's owner, so the
 	// unprivileged daemon can read it and delete it once processed.
 	Chown func(path, dir string)
@@ -82,7 +80,6 @@ func New() *Helper {
 		WaitTimeout: WaitTimeout,
 		Poll:        time.Second,
 	}
-	h.NTFS3 = h.ntfs3Available
 	return h
 }
 
@@ -141,37 +138,19 @@ func (h *Helper) Run(ctx context.Context, name string) error {
 }
 
 // mountType maps blkid's type to the mount -t value, and whether it is
-// accepted at all. NTFS goes through the kernel's ntfs3 driver when there is
-// one; the FUSE ntfs-3g driver is not used, it runs a userspace process over
-// the stick's contents.
+// accepted at all. NTFS goes through the kernel's ntfs3 driver; the FUSE
+// ntfs-3g driver is not used, it runs a userspace process over the stick's
+// contents. The exfat and ntfs3 modules are loaded at boot
+// (/etc/modules-load.d/musallahboard.conf): this helper's sandbox
+// (ProtectKernelModules=yes) cannot load them itself.
 func (h *Helper) mountType(fsType string) (string, bool) {
 	switch fsType {
 	case "vfat", "exfat", "ext4", "ntfs3":
 		return fsType, true
 	case "ntfs":
-		if h.NTFS3 != nil && h.NTFS3() {
-			return "ntfs3", true
-		}
+		return "ntfs3", true
 	}
 	return "", false
-}
-
-func (h *Helper) ntfs3Available() bool {
-	if b, err := os.ReadFile("/proc/filesystems"); err == nil && hasFS(string(b), "ntfs3") {
-		return true
-	}
-	_, err := h.Exec(context.Background(), "modprobe", "ntfs3")
-	return err == nil
-}
-
-func hasFS(procFilesystems, name string) bool {
-	for _, line := range strings.Split(procFilesystems, "\n") {
-		f := strings.Fields(line)
-		if len(f) > 0 && f[len(f)-1] == name {
-			return true
-		}
-	}
-	return false
 }
 
 func (h *Helper) unmount(ctx context.Context, name, mp string) {

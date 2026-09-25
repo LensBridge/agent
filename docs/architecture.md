@@ -520,6 +520,9 @@ folder on it, and plug it into the board.
 - The daemon shows the update screen while it works; the stick can be removed
   once the screen says "Update complete".
 - `usb_import = false` in `agent.toml` disables it (the helper exits at once).
+- The helper's sandbox (`ProtectKernelModules=yes`) cannot load filesystem
+  drivers, so `exfat` and `ntfs3` are loaded at boot from
+  `/etc/modules-load.d/musallahboard.conf`. NTFS always mounts with `ntfs3`.
 
 ### 9.7 Admin CLI
 
