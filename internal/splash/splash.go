@@ -11,7 +11,7 @@
 //
 // The page contract (see packaging/waiting.html):
 //
-//	window.MusallahBoard.setNetInfo({ipv4, ssid, hostname}) → renders, no return
+//	window.MusallahBoard.setNetInfo({ipv4, ssid, hostname, agentVersion}) → renders, no return
 //
 // Pushes are idempotent and stateless: the caller re-sends on a timer, so a
 // kiosk restart (which wipes the injected values) self-heals on the next tick
@@ -48,8 +48,11 @@ const pushTimeout = 5 * time.Second
 // rather than string concatenation: hostname and SSID are attacker-adjacent
 // (a hostile AP picks the SSID) and must not be able to break out of the
 // literal and run as code in the kiosk browser.
-func netInfoScript(info netinfo.Info) (string, error) {
-	payload, err := json.Marshal(info)
+func netInfoScript(info netinfo.Info, agentVersion string) (string, error) {
+	payload, err := json.Marshal(struct {
+		netinfo.Info
+		AgentVersion string `json:"agentVersion,omitempty"`
+	}{info, agentVersion})
 	if err != nil {
 		return "", fmt.Errorf("splash: marshal net info: %w", err)
 	}
@@ -61,13 +64,14 @@ func netInfoScript(info netinfo.Info) (string, error) {
 })()`, nil
 }
 
-// PushNetInfo renders info onto the enrollment splash.
+// PushNetInfo renders info, and the running agent's version, onto the
+// enrollment splash.
 //
 // Returns ErrNoSplash when the current page has no setNetInfo hook, and a
 // wrapped transport error when Chromium is unreachable (not yet started, or
 // mid-restart) — both are expected states while a board waits to be enrolled.
-func PushNetInfo(ctx context.Context, ev Evaluator, info netinfo.Info) error {
-	script, err := netInfoScript(info)
+func PushNetInfo(ctx context.Context, ev Evaluator, info netinfo.Info, agentVersion string) error {
+	script, err := netInfoScript(info, agentVersion)
 	if err != nil {
 		return err
 	}

@@ -65,6 +65,8 @@ func main() {
 		runSelfUpdate(os.Args[2:])
 	case "usb-import":
 		runUSBImport(os.Args[2:])
+	case "splash":
+		runSplash(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Printf("musallahboard-agent %s\n", version.Version)
 	case "-h", "--help", "help":
@@ -94,6 +96,7 @@ Administration (need sudo):
 Run by systemd (root):
   musallahboard-agent selfupdate apply             Install a staged agent update, with rollback
   musallahboard-agent usb-import <device>          Copy update packages from a USB stick
+  musallahboard-agent splash install [path]        Install the enrollment splash page
 
 Enroll flags:
   --token     One-time enrollment token from the admin portal
@@ -225,7 +228,7 @@ func awaitEnrollment(ctx context.Context, logger *slog.Logger) *config.Config {
 		// Chromium may not be up yet, or may be mid-restart, and once enrolled
 		// the board replaces the splash entirely — a push that finds no hook is
 		// the normal case, not an error worth a log line every tick.
-		switch err := splash.PushNetInfo(ctx, cdpClient, info); {
+		switch err := splash.PushNetInfo(ctx, cdpClient, info, version.Version); {
 		case err == nil, errors.Is(err, splash.ErrNoSplash):
 		default:
 			logger.Debug("could not update enrollment splash", "err", err)

@@ -38,7 +38,7 @@
     <div class="net-meta" id="net-meta"></div>
   </div>
 
-  <footer>MusallahBoard v2.0 &nbsp;·&nbsp; Powered by IbraSoft</footer>
+  <footer id="footer">MusallahBoard</footer>
 
   <!-- The kiosk unit restarts every few seconds; once the agent writes
        /etc/musallahboard/kiosk-url, the next restart loads the board. -->
@@ -78,6 +78,12 @@
       if (text(info.hostname)) bits.push(text(info.hostname));
       if (text(info.ssid)) bits.push('Wi-Fi: ' + text(info.ssid));
       meta.textContent = bits.join('   ·   ');
+
+      // The version is the running agent's, pushed like the address, so it
+      // is right after a self-update without this file being rewritten.
+      if (text(info.agentVersion)) {
+        document.getElementById('footer').textContent = 'MusallahBoard  ·  agent ' + text(info.agentVersion);
+      }
 
       card.hidden = false;
     };

@@ -238,6 +238,11 @@ func (u *Updater) apply(ctx context.Context, out *Outcome) error {
 	if err := u.Healthy(ctx, m.Version); err != nil {
 		return u.rollback(ctx, m.Version, fmt.Sprintf("agent %s did not come up healthy: %v", m.Version, err))
 	}
+	// The enrollment splash ships inside the binary; bring it up to date with
+	// it. Best effort: the splash is only seen before enrollment.
+	if o, err := u.Run(ctx, u.Binary, "splash", "install"); err != nil {
+		u.Logf("could not refresh the enrollment splash: %v %s", err, firstLine(o))
+	}
 	return nil
 }
 

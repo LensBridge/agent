@@ -133,7 +133,8 @@ func TestApplyOK(t *testing.T) {
 			t.Errorf("%s left behind", p)
 		}
 	}
-	want := []string{".musallahboard-agent.new version", "systemctl restart musallahboard-agent.service"}
+	want := []string{".musallahboard-agent.new version", "systemctl restart musallahboard-agent.service",
+		"musallahboard-agent splash install"}
 	if fmt.Sprint(h.cmds) != fmt.Sprint(want) {
 		t.Errorf("commands = %q, want %q", h.cmds, want)
 	}

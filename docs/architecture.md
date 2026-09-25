@@ -708,7 +708,10 @@ connecting a board to a network permanently.
 
 - `kiosk-url` is `http://127.0.0.1:8080/` once enrolled (no query string; the
   page asks the agent who it is). Before enrollment it is absent and the
-  existing `waiting.html` splash shows.
+  `waiting.html` splash shows. The splash is embedded in the agent
+  (`packaging/waiting.html`) and written by `musallahboard-agent splash
+  install`, which setup.sh runs and the self-updater re-runs after each
+  update; the agent pushes the address and its own version into it over CDP.
 - `musallahboard-kiosk.service` is ordered `After=` and `Wants=`
   `musallahboard-agent.service`, and the agent reports `READY=1` only after the
   local server is listening, so Chromium never starts before the server.
