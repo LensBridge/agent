@@ -296,9 +296,20 @@ func TestRefreshTriggersDebouncedSync(t *testing.T) {
 	defer srv.Close()
 	e := newEnv(t, srv.URL)
 	e.syncer.triggerDelay = 50 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
-	defer cancel()
-	e.syncer.Run(ctx)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { e.syncer.Run(ctx); close(done) }()
+	// Wait for the second sync rather than giving the whole exchange a fixed
+	// budget: under -race on a busy CI runner, start-up sync, WebSocket dial
+	// and debounce together can take longer than any small constant.
+	deadline := time.Now().Add(10 * time.Second)
+	for hits.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Then long enough for any extra, unfolded sync to show up.
+	time.Sleep(10 * e.syncer.triggerDelay)
+	cancel()
+	<-done
 	mu.Lock()
 	for _, c := range sockets {
 		c.CloseNow()
