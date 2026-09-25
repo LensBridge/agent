@@ -3,12 +3,12 @@ Description=MusallahBoard device agent
 Documentation=https://github.com/LensBridge/agent
 After=network-online.target
 Wants=network-online.target
-# Crash-loop guard: if the agent fails 5 times in 60s, stop trying. These are
-# [Unit] settings; systemd ignores StartLimitIntervalSec= under [Service].
-# A bad self-update is caught earlier than this by the updater's health check
-# and rollback (musallahboard-agent-update.service).
-StartLimitBurst=5
-StartLimitIntervalSec=60
+# Never give up on the agent: without it the screen has nothing to show, and a
+# board nobody is standing at cannot be restarted by hand. A crash loop backs
+# off instead (RestartSteps below) so it costs little while it lasts. A bad
+# self-update is caught earlier by the updater's health check and rollback
+# (musallahboard-agent-update.service).
+StartLimitIntervalSec=0
 
 [Service]
 Type=notify
@@ -16,7 +16,12 @@ User=musallahdaemon
 Group=musallahdaemon
 ExecStart=/usr/bin/musallahboard-agent run
 Restart=always
+# 5 s after the first failure, growing to 2 minutes over six restarts.
+# RestartSteps/RestartMaxDelaySec need systemd 254 (trixie); older systemd
+# ignores them with a warning and restarts every 5 s.
 RestartSec=5
+RestartSteps=6
+RestartMaxDelaySec=120
 
 # sd_notify watchdog: agent must call WATCHDOG=1 every 30s or systemd
 # kills it. Catches goroutine deadlocks where the process is alive but

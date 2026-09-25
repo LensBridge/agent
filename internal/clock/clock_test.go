@@ -39,6 +39,9 @@ func newKeeper(t *testing.T, floor int64, now time.Time, withRTC bool) (*Keeper,
 		return nil
 	}
 	k.WriteRTC = func() error { f.rtc++; return nil }
+	k.NTPSynced = func() bool { return false }
+	k.Uptime = func() time.Duration { return time.Hour }
+	k.BootID = func() string { return "boot-1" }
 	k.RTCDevice = filepath.Join(t.TempDir(), "rtc0")
 	if withRTC {
 		os.WriteFile(k.RTCDevice, nil, 0o644)
@@ -143,5 +146,43 @@ func TestApplyClientTimeSetFails(t *testing.T) {
 	rep := k.ApplyClientTime(base.Unix()+10, importer.Batch{Verified: true})
 	if rep.Adjusted {
 		t.Fatal("reported adjusted after a failed set")
+	}
+}
+
+func TestInfo(t *testing.T) {
+	k, _ := newKeeper(t, base.Unix(), base, false)
+	if i := k.Info(); i.Source != SourceUnverified || i.Trusted {
+		t.Fatalf("no NTP, RTC or uploader: %+v", i)
+	}
+
+	k.Uptime = func() time.Duration { return time.Minute }
+	if i := k.Info(); i.Source != SourceStarting || !i.Trusted {
+		t.Fatalf("just booted: %+v", i)
+	}
+	k.Uptime = func() time.Duration { return time.Hour }
+
+	// A laptop's time counts, until the next boot.
+	k.ApplyClientTime(base.Unix()+2, importer.Batch{Verified: true})
+	if i := k.Info(); i.Source != SourceUploader || !i.Trusted {
+		t.Fatalf("after a verified upload: %+v", i)
+	}
+	k.BootID = func() string { return "boot-2" }
+	if i := k.Info(); i.Trusted {
+		t.Fatalf("an uploader's time survived a reboot: %+v", i)
+	}
+
+	// An unverified upload proves nothing.
+	k.ApplyClientTime(base.Unix()+2, importer.Batch{})
+	if i := k.Info(); i.Trusted {
+		t.Fatalf("after an unverified upload: %+v", i)
+	}
+
+	os.WriteFile(k.RTCDevice, nil, 0o644)
+	if i := k.Info(); i.Source != SourceRTC || !i.Trusted {
+		t.Fatalf("with an RTC: %+v", i)
+	}
+	k.NTPSynced = func() bool { return true }
+	if i := k.Info(); i.Source != SourceNTP {
+		t.Fatalf("with NTP: %+v", i)
 	}
 }

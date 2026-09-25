@@ -30,6 +30,12 @@ type State struct {
 	// SignedClockFloor is the newest createdAt of any verified package: the
 	// part of the floor that is proven rather than remembered.
 	SignedClockFloor int64 `json:"signedClockFloor,omitempty"`
+	// AgentUpdateSeen is the "at" of the last agent self-update outcome the
+	// board has shown, so each is shown once.
+	AgentUpdateSeen string `json:"agentUpdateSeen,omitempty"`
+	// ClockSetBoot is the kernel boot id during which an uploader's time
+	// confirmed the clock. It counts only until the next boot.
+	ClockSetBoot string `json:"clockSetBoot,omitempty"`
 }
 
 // MaxWallAheadOfSigned bounds how far a remembered wall clock may raise the

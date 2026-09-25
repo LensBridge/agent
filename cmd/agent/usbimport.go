@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/LensBridge/agent/internal/config"
+	"github.com/LensBridge/agent/internal/notice"
 	"github.com/LensBridge/agent/internal/usbimport"
 )
 
@@ -31,7 +32,10 @@ func runUSBImport(args []string) {
 		return
 	}
 	if !cfg.USBImport() {
-		return // usb_import = false: quietly ignore every stick
+		fmt.Printf("USB import: ignoring %s: usb_import is off in the agent config\n", args[0])
+		usbimport.New().Announce(args[0], notice.New(notice.Neutral, "USB updates are turned off",
+			"This board is set up not to read USB sticks"))
+		return
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)

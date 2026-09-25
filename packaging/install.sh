@@ -380,6 +380,7 @@ BASHRC
     install -o root -g root -m 0755 "$KIOSK_LAUNCHER_SRC" "$KIOSK_LAUNCHER_DEST"
     mkdir -p "$KIOSK_SHARE_DIR"
     install -o root -g root -m 0644 "$KIOSK_SPLASH_SRC" "$KIOSK_SHARE_DIR/waiting.html"
+    install -o root -g root -m 0644 "${AGENT_DIR}/packaging/starting.html" "$KIOSK_SHARE_DIR/starting.html"
 
     # Copied verbatim — no substitution. The unit names $KIOSK_USER directly,
     # which is the whole point of fixing the account name: a .deb ships static

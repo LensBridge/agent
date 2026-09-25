@@ -3,16 +3,19 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net"
 	"os"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coreos/go-systemd/v22/daemon"
 
+	"github.com/LensBridge/agent/internal/agentupdate"
 	"github.com/LensBridge/agent/internal/boardsync"
 	"github.com/LensBridge/agent/internal/cdp"
 	"github.com/LensBridge/agent/internal/clock"
@@ -23,8 +26,10 @@ import (
 	"github.com/LensBridge/agent/internal/keystore"
 	"github.com/LensBridge/agent/internal/kioskurl"
 	"github.com/LensBridge/agent/internal/localserver"
+	"github.com/LensBridge/agent/internal/notice"
 	"github.com/LensBridge/agent/internal/store"
 	"github.com/LensBridge/agent/internal/trust"
+	"github.com/LensBridge/agent/internal/updates"
 	"github.com/LensBridge/agent/internal/updatescreen"
 	"github.com/LensBridge/agent/internal/uploadserver"
 	"github.com/LensBridge/agent/internal/version"
@@ -50,14 +55,20 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 	hub := &events.Hub{}
 	cdpClient := cdp.New("")
 	screen := updatescreen.New(cdpClient, strings.TrimSuffix(localserver.BaseURL, "/"), logger)
+	var reporter *agentupdate.Reporter
 	imp := importer.New(importer.Deps{
 		Layout:       layout,
 		DeviceID:     cfg.DeviceID,
 		AgentVersion: version.Version,
 		Ring:         func() (*trust.Ring, error) { return trust.LoadRing(trust.DefaultPath) },
 		Screen:       screen,
+		AgentStaged:  func(n notice.Notice) { reporter.Staged(n) },
 		Events:       hub,
 		Logger:       logger,
+	})
+	reporter = agentupdate.New(agentupdate.Deps{
+		Layout: layout, Version: version.Version, Screen: screen,
+		Banner: hub.Notice, Resume: imp.AgentNotReplaced, Logger: logger,
 	})
 	keeper := clock.New(layout, logger)
 
@@ -66,14 +77,28 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 		logger.Error("device key unreadable: serving installed content only (no sync, no remote commands)",
 			"err", keyErr, "keyPath", cfg.KeyPath)
 	}
+	hour, minute := cfg.UpdateTime()
 	var syncer *boardsync.Syncer
+	sched := updates.New(updates.Deps{
+		Layout: layout, Importer: imp, Hour: hour, Minute: minute, AutoUpdate: cfg.AutoUpdate(), Logger: logger,
+		Changed: func(info updates.Info) { hub.UpdatesChanged(info) },
+		Check: func(ctx context.Context) error {
+			if syncer == nil {
+				return errors.New("this board cannot reach the release channels (device key unreadable)")
+			}
+			return syncer.CheckChannels(ctx)
+		},
+	})
 	if keyErr == nil {
 		syncer = boardsync.New(boardsync.Deps{
-			Cfg: cfg, Key: priv, Layout: layout, Importer: imp,
+			Cfg: cfg, Key: priv, Layout: layout, Importer: imp, Updates: sched,
 			AgentVersion: version.Version, Logger: logger,
 		})
 	}
 
+	// The backend connection starts after the local server; its state is
+	// read through this once it exists.
+	var backend atomic.Pointer[wsclient.Client]
 	local := localserver.New(localserver.Deps{
 		Layout: layout, DeviceID: cfg.DeviceID, AgentVersion: version.Version, Hub: hub,
 		Sync: func() any {
@@ -89,7 +114,18 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 			return syncer.Weather()
 		},
 		UpdateActive: screen.Active,
-		Logger:       logger,
+		Updates:      sched.Info,
+		Clock:        keeper.Info,
+		Backend: func() any {
+			if ws := backend.Load(); ws != nil {
+				s := ws.State()
+				return &s
+			}
+			return nil
+		},
+		ServicePort: cfg.ServicePort(),
+		USBImport:   cfg.USBImport(),
+		Logger:      logger,
 	})
 	ln, err := net.Listen("tcp", localserver.ListenAddr)
 	if err != nil {
@@ -112,10 +148,16 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 	_, _ = daemon.SdNotify(false, "STATUS=serving the board on "+localserver.ListenAddr)
 
 	logInstalled(logger, layout, cfg)
-	goRun(wg, func() { screen.Resume(ctx) })
 	goRun(wg, func() { watchKiosk(ctx, logger, cdpClient) })
-	goRun(wg, func() { imp.RunInbox(ctx) })
+	goRun(wg, func() {
+		// First say how an agent update that restarted us went: the rest of
+		// its batch may be waiting in the inbox, and belongs on the same
+		// screen.
+		reporter.Startup(ctx)
+		imp.RunInbox(ctx)
+	})
 	goRun(wg, func() { keeper.Run(ctx) })
+	goRun(wg, func() { sched.Run(ctx) })
 
 	if cfg.ServicePort() {
 		startUploadServer(ctx, logger, cfg, layout, imp, keeper, screen, wg)
@@ -123,7 +165,9 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 
 	if syncer != nil {
 		goRun(wg, func() { syncer.Run(ctx) })
-		startCommandChannel(ctx, logger, cfg, priv, safeMode, cdpClient, syncer, wg)
+		ws := startCommandChannel(ctx, logger, cfg, priv, safeMode, cdpClient, syncer, sched,
+			func() any { return local.Status().Board() }, wg)
+		backend.Store(ws)
 	}
 	return nil
 }
@@ -142,6 +186,7 @@ func startUploadServer(ctx context.Context, logger *slog.Logger, cfg *config.Con
 			return uploadserver.ClockReport{DriftSeconds: r.DriftSeconds, Adjusted: r.Adjusted, Note: r.Note}
 		},
 		RTCPresent:   keeper.RTCPresent,
+		ClockInfo:    keeper.Info,
 		UpdateActive: screen.Active,
 		Logger:       logger,
 	})
@@ -154,11 +199,14 @@ func startUploadServer(ctx context.Context, logger *slog.Logger, cfg *config.Con
 }
 
 // startCommandChannel holds the backend WebSocket (telemetry and remote
-// commands) open. config.refresh also asks the content syncer for a sync now.
+// commands) open. config.refresh also asks the content syncer for a sync now;
+// update.install_now checks the release channels and installs at once.
 func startCommandChannel(ctx context.Context, logger *slog.Logger, cfg *config.Config, priv []byte,
-	safeMode bool, cdpClient *cdp.Client, syncer *boardsync.Syncer, wg *sync.WaitGroup) {
+	safeMode bool, cdpClient *cdp.Client, syncer *boardsync.Syncer, sched *updates.Scheduler,
+	boardReport func() any, wg *sync.WaitGroup) *wsclient.Client {
 	wsClient := wsclient.New(cfg, priv, logger, version.Version, safeMode)
 	wsClient.SetPageProber(cdpClient)
+	wsClient.SetBoardReport(boardReport)
 	registry := commands.NewRegistry()
 	registry.Register(&commands.ChromeReload{CDP: cdpClient})
 	registry.Register(&commands.ChromeScreenshot{CDP: cdpClient})
@@ -166,9 +214,11 @@ func startCommandChannel(ctx context.Context, logger *slog.Logger, cfg *config.C
 	registry.Register(&commands.KioskRestart{})
 	registry.Register(&commands.SystemReboot{})
 	registry.Register(&commands.LogsTail{})
+	registry.Register(&commands.UpdateInstallNow{Run: sched.CheckAndInstall})
 	logger.Info("command handlers registered", "kinds", registry.Kinds())
 	wsClient.SetCommandHandler(commands.NewDispatcher(registry, logger).Handle)
 	goRun(wg, func() { wsClient.Run(ctx) })
+	return wsClient
 }
 
 // watchKiosk navigates Chromium back to the board if it lands on its own

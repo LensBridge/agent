@@ -79,15 +79,30 @@ func runImport(args []string) {
 		if !ok {
 			fail("no result for %s after %s. Is musallahboard-agent running? (systemctl status musallahboard-agent)", name, importWait)
 		}
-		mark := "OK "
 		if res.Action == importer.ActionRejected {
-			mark, rejected = "NO ", true
+			rejected = true
 		}
-		fmt.Printf("  %s %s: %s\n", mark, res.Action, res.Message)
+		printResult(res.Result)
 	}
 	if rejected {
 		fmt.Println("Anything refused was not installed; the board keeps what it had.")
 		os.Exit(1)
+	}
+}
+
+// printResult prints one package's outcome, with the technical detail of a
+// refusal under it.
+func printResult(r importer.Result) {
+	mark := "OK "
+	switch r.Action {
+	case importer.ActionRejected:
+		mark = "NO "
+	case importer.ActionUnchanged, importer.ActionOutdated, importer.ActionSkipped:
+		mark = " - "
+	}
+	fmt.Printf("  %s %s: %s\n", mark, r.File, r.Message)
+	if r.Detail != "" {
+		fmt.Printf("        (%s)\n", r.Detail)
 	}
 }
 

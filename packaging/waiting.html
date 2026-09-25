@@ -4,27 +4,34 @@
 <meta charset="utf-8">
 <title>MusallahBoard</title>
 <style>
+  /* The board's navy and gold, like the update screen (update-anim) and the
+     starting page: this is the first thing a new board ever shows. */
   html,body{height:100%;margin:0;cursor:none}
   body{display:flex;flex-direction:column;align-items:center;justify-content:center;
-        background:#0b1f17;color:#e8f5ee;font:600 28px/1.4 system-ui,sans-serif}
-  .dot{width:10px;height:10px;border-radius:50%;background:#3ddc84;
-       margin-top:24px;animation:p 1.2s ease-in-out infinite}
-  @keyframes p{0%,100%{opacity:.25}50%{opacity:1}}
-  small{margin-top:14px;font:400 15px system-ui,sans-serif;color:#8fb8a4}
-  footer{position:fixed;bottom:16px;left:0;right:0;text-align:center;
-         font:400 13px system-ui,sans-serif;color:#5c8270}
+        background:#082D5D;color:#fff;font:300 4.2vmin/1.3 "Montserrat",system-ui,sans-serif;
+        text-align:center}
+  .dot{width:1.2vmin;height:1.2vmin;min-width:8px;min-height:8px;transform:rotate(45deg);
+       background:#F8E15D;margin-top:3vmin;border-radius:1px;animation:p 1.6s ease-in-out infinite}
+  @keyframes p{0%,100%{opacity:.3}50%{opacity:1}}
+  small{margin-top:2vmin;font:400 2.2vmin/1.4 system-ui,sans-serif;color:rgba(255,255,255,.7)}
+  footer{position:fixed;bottom:2.4vmin;left:0;right:0;text-align:center;
+         font:400 1.6vmin system-ui,sans-serif;color:rgba(255,255,255,.45)}
 
-  /* Network card — hidden until the agent pushes something into it. */
-  .net{margin-top:40px;padding:20px 34px;max-width:80vw;text-align:center;
-       border:1px solid #1e4535;border-radius:12px;background:#0e2a1f}
+  /* Network card: hidden until the agent pushes something into it. */
+  .net{margin-top:5vmin;padding:3vmin 5vmin;max-width:80vw;
+       border:1px solid rgba(255,255,255,.16);border-radius:1.6vmin;background:rgba(0,0,0,.18)}
   .net[hidden]{display:none}
-  .net-label{font:500 13px/1 system-ui,sans-serif;letter-spacing:.09em;
-             text-transform:uppercase;color:#6f9d87}
-  .net-value{margin-top:12px;color:#3ddc84;word-break:break-all;
-             font:700 34px/1.25 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-  .net-value.offline{color:#c98b6b}
-  .net-meta{margin-top:10px;font:400 15px system-ui,sans-serif;color:#8fb8a4}
+  .net-label{font:500 1.6vmin/1 system-ui,sans-serif;letter-spacing:.14em;
+             text-transform:uppercase;color:rgba(255,255,255,.6)}
+  .net-value{margin-top:1.6vmin;color:#F8E15D;word-break:break-all;
+             font:600 4.6vmin/1.25 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .net-value.offline{color:#f0a88a}
+  .net-meta{margin-top:1.2vmin;font:400 2vmin system-ui,sans-serif;color:rgba(255,255,255,.7)}
   .net-meta:empty{display:none}
+  .net-next{margin-top:2.4vmin;padding-top:2vmin;border-top:1px solid rgba(255,255,255,.12);
+            font:400 2.1vmin/1.5 system-ui,sans-serif;color:#fff}
+  .net-next[hidden]{display:none}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#F8E15D}
 </style>
 </head>
 <body>
@@ -36,9 +43,13 @@
     <div class="net-label" id="net-label"></div>
     <div class="net-value" id="net-value"></div>
     <div class="net-meta" id="net-meta"></div>
+    <div class="net-next" id="net-next" hidden>
+      To enroll it, SSH in to this address as the admin user and run the<br>
+      <code>sudo musallahboard-agent enroll …</code> command the admin portal gives you.
+    </div>
   </div>
 
-  <footer>MusallahBoard v2.0 &nbsp;·&nbsp; Powered by IbraSoft</footer>
+  <footer id="footer">MusallahBoard</footer>
 
   <!-- The kiosk unit restarts every few seconds; once the agent writes
        /etc/musallahboard/kiosk-url, the next restart loads the board. -->
@@ -66,10 +77,12 @@
         label.textContent = ips.length > 1 ? 'Reachable at' : 'This device is at';
         value.textContent = ips.join('   ·   ');
         value.classList.remove('offline');
+        document.getElementById('net-next').hidden = false;
       } else {
         label.textContent = 'Network';
         value.textContent = 'Not connected';
         value.classList.add('offline');
+        document.getElementById('net-next').hidden = true;
       }
 
       // Hostname and SSID are secondary: useful for telling two boards on a
@@ -78,6 +91,12 @@
       if (text(info.hostname)) bits.push(text(info.hostname));
       if (text(info.ssid)) bits.push('Wi-Fi: ' + text(info.ssid));
       meta.textContent = bits.join('   ·   ');
+
+      // The version is the running agent's, pushed like the address, so it
+      // is right after a self-update without this file being rewritten.
+      if (text(info.agentVersion)) {
+        document.getElementById('footer').textContent = 'MusallahBoard  ·  agent ' + text(info.agentVersion);
+      }
 
       card.hidden = false;
     };

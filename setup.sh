@@ -70,6 +70,8 @@ SERVICE_USER=musallahdaemon
 
 # Paths
 BINARY_DEST=/usr/bin/musallahboard-agent
+# Where this script is published (for the instructions it prints).
+SETUP_URL=https://raw.githubusercontent.com/lensbridge/agent/main/setup.sh
 CONFIG_DIR=/etc/musallahboard
 UNIT_DIR=/lib/systemd/system
 SUDOERS_DEST=/etc/sudoers.d/musallahboard-agent
@@ -141,6 +143,12 @@ fi
 
 # ── Helper: read one answer ───────────────────────────────────────────────────
 # $1 variable to set   $2 prompt text   $3 default
+# _interactive: can we ask the person running this? Under `curl ... | bash`
+# stdin is the script itself, so questions go to the terminal, /dev/tty.
+_interactive() {
+    [[ "$MB_ASSUME_YES" != "1" ]] && { : < /dev/tty; } 2>/dev/null
+}
+
 _ask() {
     local _var="$1" _prompt="$2" _default="$3" _preset _reply
     _preset="${!_var-}"
@@ -150,22 +158,25 @@ _ask() {
         return 0
     fi
 
-    if [[ "$MB_ASSUME_YES" == "1" ]] || [[ ! -t 0 ]]; then
+    if ! _interactive; then
         printf -v "$_var" '%s' "$_default"
         printf '  %-34s %s (default)\n' "$_prompt" "$_default"
         return 0
     fi
 
-    read -rp "$(printf '  %-34s [%s]: ' "$_prompt" "$_default")" _reply
+    if [[ -n "$_default" ]]; then
+        read -rp "$(printf '  %-34s [%s]: ' "$_prompt" "$_default")" _reply < /dev/tty
+    else
+        read -rp "$(printf '  %-34s: ' "$_prompt")" _reply < /dev/tty
+    fi
     printf -v "$_var" '%s' "${_reply:-$_default}"
     return 0
 }
 
 _confirm() {
     local _prompt="$1" _reply
-    [[ "$MB_ASSUME_YES" == "1" ]] && return 0
-    [[ ! -t 0 ]] && return 0
-    read -rp "$_prompt" -n 1 _reply; echo
+    _interactive || return 0
+    read -rp "$_prompt" -n 1 _reply < /dev/tty; echo
     [[ $_reply =~ ^[Yy]$ ]]
 }
 
@@ -207,8 +218,13 @@ prompt_config() {
     TIMEZONE="${MB_TIMEZONE-}"
 
     _ask HOSTNAME   "Hostname for this board"          "musallahboard"
-    _ask ADMIN_USER "Admin username (SSH/sudo)"        "ibra"
+    _ask ADMIN_USER "Admin username (SSH/sudo)"        ""
     _ask TIMEZONE   "Timezone"                         "America/Toronto"
+
+    [[ -n "$ADMIN_USER" ]] || \
+        error "An admin username is required (the account you will SSH in as). Set MB_ADMIN_USER when not running interactively."
+    [[ "$ADMIN_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || \
+        error "'$ADMIN_USER' is not a valid Linux username (lowercase letters, digits, - and _)."
 
     # Validate admin user is not a reserved name.
     for _reserved in musallahdaemon "$KIOSK_USER"; do
@@ -220,13 +236,15 @@ prompt_config() {
     SSH_PUB_KEY="${MB_ADMIN_SSH_KEY-}"
     if [[ -n "$SSH_PUB_KEY" ]]; then
         info "SSH key supplied for $ADMIN_USER"
-    elif [[ -t 0 ]]; then
-        echo "Paste the SSH public key for $ADMIN_USER:"
-        read -rp "> " SSH_PUB_KEY
-        [[ -z "$SSH_PUB_KEY" ]] && error "SSH public key is required (headless Pi)."
+    elif _interactive; then
+        echo "Paste the SSH public key for $ADMIN_USER (one line, starting ssh-ed25519 or ssh-rsa):"
+        read -rp "> " SSH_PUB_KEY < /dev/tty
+        [[ -z "$SSH_PUB_KEY" ]] && error "An SSH public key is required: the board has no password login."
     else
-        error "SSH public key is required. Pass MB_ADMIN_SSH_KEY."
+        error "An SSH public key is required: the board has no password login. Set MB_ADMIN_SSH_KEY."
     fi
+    [[ "$SSH_PUB_KEY" =~ ^(ssh-|ecdsa-|sk-) ]] || \
+        error "That does not look like an SSH public key (it should start with ssh-ed25519, ssh-rsa or ecdsa-)."
 
     echo
     info "Summary"
@@ -574,8 +592,7 @@ Description=MusallahBoard device agent
 Documentation=https://github.com/LensBridge/agent
 After=network-online.target
 Wants=network-online.target
-StartLimitBurst=5
-StartLimitIntervalSec=60
+StartLimitIntervalSec=0
 
 [Service]
 Type=notify
@@ -584,6 +601,8 @@ Group=musallahdaemon
 ExecStart=/usr/bin/musallahboard-agent run
 Restart=always
 RestartSec=5
+RestartSteps=6
+RestartMaxDelaySec=120
 WatchdogSec=60s
 AmbientCapabilities=CAP_SYS_TIME CAP_NET_BIND_SERVICE
 ProtectSystem=strict
@@ -817,12 +836,19 @@ set -euo pipefail
 
 KIOSK_URL_FILE="/etc/musallahboard/kiosk-url"
 SPLASH="file:///usr/share/musallahboard/waiting.html"
+STARTING="file:///usr/share/musallahboard/starting.html"
 
 URL=""
 if [[ -r "$KIOSK_URL_FILE" ]]; then
     URL="$(tr -d '[:space:]' < "$KIOSK_URL_FILE")"
 fi
-[[ -z "$URL" ]] && URL="$SPLASH"
+if [[ -z "$URL" ]]; then
+    URL="$SPLASH"
+elif [[ -r "${STARTING#file://}" ]]; then
+    # Through the local "starting" page, which waits for the agent to answer
+    # instead of leaving Chromium on its "refused to connect" page.
+    URL="${STARTING}#${URL}"
+fi
 
 pick_browser() {
     local cand
@@ -880,103 +906,10 @@ LAUNCHER
 # ── Install splash page ───────────────────────────────────────────────────────
 install_splash_page() {
     section "Splash page"
-
-    sudo mkdir -p "$KIOSK_SHARE_DIR"
-
-    # KEEP IN SYNC with packaging/waiting.html. This script is curl|bash'd and
-    # never has a repo checkout to copy from, so the page is inlined here; the
-    # deb/install.sh path installs the packaged file instead. The setNetInfo
-    # hook below is a contract with internal/splash — changing its name breaks
-    # the IP readout on unenrolled boards.
-    sudo tee "$KIOSK_SHARE_DIR/waiting.html" > /dev/null << 'HTML'
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>MusallahBoard</title>
-<style>
-  html,body{height:100%;margin:0;cursor:none}
-  body{display:flex;flex-direction:column;align-items:center;justify-content:center;
-        background:#0b1f17;color:#e8f5ee;font:600 28px/1.4 system-ui,sans-serif}
-  .dot{width:10px;height:10px;border-radius:50%;background:#3ddc84;
-       margin-top:24px;animation:p 1.2s ease-in-out infinite}
-  @keyframes p{0%,100%{opacity:.25}50%{opacity:1}}
-  small{margin-top:14px;font:400 15px system-ui,sans-serif;color:#8fb8a4}
-  footer{position:fixed;bottom:16px;left:0;right:0;text-align:center;
-         font:400 13px system-ui,sans-serif;color:#5c8270}
-
-  /* Network card - hidden until the agent pushes something into it. */
-  .net{margin-top:40px;padding:20px 34px;max-width:80vw;text-align:center;
-       border:1px solid #1e4535;border-radius:12px;background:#0e2a1f}
-  .net[hidden]{display:none}
-  .net-label{font:500 13px/1 system-ui,sans-serif;letter-spacing:.09em;
-             text-transform:uppercase;color:#6f9d87}
-  .net-value{margin-top:12px;color:#3ddc84;word-break:break-all;
-             font:700 34px/1.25 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-  .net-value.offline{color:#c98b6b}
-  .net-meta{margin-top:10px;font:400 15px system-ui,sans-serif;color:#8fb8a4}
-  .net-meta:empty{display:none}
-</style>
-</head>
-<body>
-  <div>Waiting for device enrollment...</div>
-  <div class="dot"></div>
-  <small>This screen clears automatically once the agent is enrolled.</small>
-
-  <div class="net" id="net" hidden>
-    <div class="net-label" id="net-label"></div>
-    <div class="net-value" id="net-value"></div>
-    <div class="net-meta" id="net-meta"></div>
-  </div>
-
-  <footer>MusallahBoard v2.0</footer>
-
-  <script>
-  // window.MusallahBoard.setNetInfo() is the contract the agent's
-  // pre-enrollment loop calls over CDP (Runtime.evaluate) every few seconds -
-  // see internal/splash. This page is loaded over file://, so it has an opaque
-  // origin and cannot fetch its own address from anywhere; a push from the
-  // agent is the only way it can know. Nothing renders until that first push,
-  // which doubles as proof the agent is alive.
-  (function () {
-    var card  = document.getElementById('net');
-    var label = document.getElementById('net-label');
-    var value = document.getElementById('net-value');
-    var meta  = document.getElementById('net-meta');
-
-    function text(v) { return typeof v === 'string' ? v.trim() : ''; }
-
-    window.MusallahBoard = window.MusallahBoard || {};
-    window.MusallahBoard.setNetInfo = function (info) {
-      info = info || {};
-      var ips = Array.isArray(info.ipv4) ? info.ipv4.filter(text) : [];
-
-      if (ips.length) {
-        label.textContent = ips.length > 1 ? 'Reachable at' : 'This device is at';
-        value.textContent = ips.join('   -   ');
-        value.classList.remove('offline');
-      } else {
-        label.textContent = 'Network';
-        value.textContent = 'Not connected';
-        value.classList.add('offline');
-      }
-
-      // Hostname and SSID are secondary: useful for telling two boards on a
-      // cart apart, not worth competing with the address for attention.
-      var bits = [];
-      if (text(info.hostname)) bits.push(text(info.hostname));
-      if (text(info.ssid)) bits.push('Wi-Fi: ' + text(info.ssid));
-      meta.textContent = bits.join('   -   ');
-
-      card.hidden = false;
-    };
-  })();
-  </script>
-</body>
-</html>
-HTML
-
-    sudo chmod 0644 "$KIOSK_SHARE_DIR/waiting.html"
+    # The page is embedded in the agent binary (packaging/waiting.html), so a
+    # curl|bash setup gets the same bytes as a packaged install, and a
+    # self-update refreshes it. The binary is installed before this runs.
+    sudo "$BINARY_DEST" splash install "$KIOSK_SHARE_DIR/waiting.html"
     info "Installed $KIOSK_SHARE_DIR/waiting.html"
 }
 
@@ -1038,10 +971,13 @@ print_summary() {
   Until then the kiosk shows the local "waiting" splash, which prints this
   device's IP address on screen once it has one - that is the <ip> to SSH to.
   On enrollment the kiosk switches to the board served by the agent, which
-  starts syncing content and fetches the board app right away.
+  starts syncing content and downloads the board app within a few minutes.
 
-  A board that will not have internet: after enrolling, while it still has
-  internet, run  bash setup.sh --service-port
+  A board that will not have internet: after enrolling, turn on the ethernet
+  service port (laptop and phone updates at http://10.77.0.1/):
+      sudo musallahboard-agent service-port on
+  To fit a DS3231 clock module as well, re-run this setup with --rtc:
+      curl -fsSL $SETUP_URL | bash -s -- --service-port --rtc
 
   * Boots multi-user -> musallahboard-kiosk.service -> cage -> browser
   * SSH as $ADMIN_USER to manage the system
@@ -1158,7 +1094,7 @@ service_port_profiles() {
     elif existing="$(_saved_wired_profile)"; then
         info "Keeping your saved wired profile '$existing' as eth0's first choice"
         warn "It keeps NetworkManager's default of 4 attempts, so a laptop may wait a few minutes"
-        warn "for an address. Delete it to use $LAN_CONN instead, then re-run setup.sh --service-port."
+        warn "for an address. Delete it to use $LAN_CONN instead, then re-run this setup."
     else
         sudo nmcli connection add type ethernet con-name "$LAN_CONN" "${lan_props[@]}"
         info "Created NetworkManager connection $LAN_CONN (DHCP client, tried first)"
@@ -1246,6 +1182,22 @@ EOF
     warn "for example on the next upload from a laptop (mbpush or http://10.77.0.1/)."
 }
 
+# Part of the normal setup: everything the service port needs, left OFF, so
+# `sudo musallahboard-agent service-port on` works later without this script
+# (which a curl | bash install does not leave on the board). The service-port
+# profile does not autoconnect until it is switched on, so eth0 behaves as
+# before: a DHCP client on whatever network it is plugged into.
+prepare_service_port() {
+    if ! command -v nmcli >/dev/null; then
+        warn "nmcli not found: the ethernet service port needs NetworkManager; skipping it"
+        return
+    fi
+    service_port_install_packages
+    service_port_profiles
+    service_port_firewall
+    info "Service port prepared and OFF. Turn it on with: sudo musallahboard-agent service-port on"
+}
+
 service_port_switch_on() {
     section "Service port: switch on"
     # If eth0 is on a network right now, `service-port on` leaves the port
@@ -1314,6 +1266,7 @@ main() {
     setup_journal
     setup_unattended_upgrades
     setup_ufw
+    prepare_service_port
     setup_pi_extras
 
     install_agent_binary

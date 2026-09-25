@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -33,7 +34,7 @@ const (
 	dialTimeout              = 15 * time.Second
 	authTimeout              = 10 * time.Second
 	writeTimeout             = 10 * time.Second
-	maxFrameBytes = 20 << 20 // 20 MiB	
+	maxFrameBytes            = 20 << 20 // 20 MiB
 	minBackoff               = time.Second
 	maxBackoff               = 5 * time.Minute
 
@@ -69,8 +70,40 @@ type Client struct {
 	agentVersion string
 	safeMode     bool
 
-	onCommand CommandHandler
-	prober    telemetry.PageProber
+	onCommand   CommandHandler
+	prober      telemetry.PageProber
+	boardReport func() any
+
+	stateMu sync.Mutex
+	state   ConnState
+}
+
+// ConnState is the backend connection as `status` reports it.
+type ConnState struct {
+	Connected bool `json:"connected"`
+	// Since is when the connection last came up or went down (RFC 3339).
+	Since     string `json:"since,omitempty"`
+	LastError string `json:"lastError,omitempty"`
+}
+
+// State reports the backend connection.
+func (c *Client) State() ConnState {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	return c.state
+}
+
+func (c *Client) setState(connected bool, err error) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if c.state.Connected != connected || c.state.Since == "" {
+		c.state.Since = time.Now().UTC().Format(time.RFC3339)
+	}
+	c.state.Connected = connected
+	c.state.LastError = ""
+	if err != nil {
+		c.state.LastError = err.Error()
+	}
 }
 
 func New(cfg *config.Config, priv ed25519.PrivateKey, logger *slog.Logger, agentVersion string, safeMode bool) *Client {
@@ -92,6 +125,10 @@ func (c *Client) SetCommandHandler(h CommandHandler) { c.onCommand = h }
 // systemd unit state. Must be called before Run.
 func (c *Client) SetPageProber(p telemetry.PageProber) { c.prober = p }
 
+// SetBoardReport supplies the board's own report for every heartbeat
+// (localserver.BoardReport). Optional. Must be called before Run.
+func (c *Client) SetBoardReport(f func() any) { c.boardReport = f }
+
 // Run blocks until ctx is cancelled, repeatedly attempting to maintain a live
 // authenticated session. Errors are logged and trigger a backoff-and-retry.
 func (c *Client) Run(ctx context.Context) {
@@ -102,6 +139,7 @@ func (c *Client) Run(ctx context.Context) {
 		}
 
 		authed, err := c.runOnce(ctx)
+		c.setState(false, err)
 		switch {
 		case ctx.Err() != nil:
 			return
@@ -190,6 +228,7 @@ func (c *Client) runOnce(ctx context.Context) (authed bool, err error) {
 		"heartbeatInterval", hbInterval,
 	)
 
+	c.setState(true, nil)
 	return true, c.serve(ctx, sess, hbInterval)
 }
 
@@ -245,6 +284,9 @@ func (c *Client) heartbeatLoop(ctx context.Context, sess *session, interval time
 			Seq:       sess.nextSeq(),
 			SessionID: sess.sessionID,
 			Telemetry: TelemetryFromSnapshot(snap),
+		}
+		if c.boardReport != nil {
+			hb.Telemetry.Board = c.boardReport()
 		}
 		wctx, cancel := context.WithTimeout(ctx, writeTimeout)
 		defer cancel()

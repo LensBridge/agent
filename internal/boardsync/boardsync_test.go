@@ -30,6 +30,7 @@ import (
 	"github.com/LensBridge/agent/internal/state"
 	"github.com/LensBridge/agent/internal/store"
 	"github.com/LensBridge/agent/internal/trust"
+	"github.com/LensBridge/agent/internal/updates"
 )
 
 const testDevice = "3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b"
@@ -45,9 +46,10 @@ var (
 )
 
 type env struct {
-	layout store.Layout
-	cfg    *config.Config
-	syncer *Syncer
+	layout  store.Layout
+	cfg     *config.Config
+	syncer  *Syncer
+	updates *updates.Scheduler
 }
 
 func strp(s string) *string { return &s }
@@ -75,8 +77,9 @@ func newEnv(t *testing.T, backend string) *env {
 		AgentVersion: "0.3.0",
 		Ring:         func() (*trust.Ring, error) { return ring, nil },
 	})
-	s := New(Deps{Cfg: cfg, Key: deviceKey, Layout: l, Importer: im, AgentVersion: "0.3.0"})
-	return &env{layout: l, cfg: cfg, syncer: s}
+	u := updates.New(updates.Deps{Layout: l, Importer: im, Hour: 23})
+	s := New(Deps{Cfg: cfg, Key: deviceKey, Layout: l, Importer: im, Updates: u, AgentVersion: "0.3.0"})
+	return &env{layout: l, cfg: cfg, syncer: s, updates: u}
 }
 
 func build(t *testing.T, m mbu.Manifest, src []mbu.Source, key ed25519.PrivateKey) []byte {
@@ -293,9 +296,20 @@ func TestRefreshTriggersDebouncedSync(t *testing.T) {
 	defer srv.Close()
 	e := newEnv(t, srv.URL)
 	e.syncer.triggerDelay = 50 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
-	defer cancel()
-	e.syncer.Run(ctx)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { e.syncer.Run(ctx); close(done) }()
+	// Wait for the second sync rather than giving the whole exchange a fixed
+	// budget: under -race on a busy CI runner, start-up sync, WebSocket dial
+	// and debounce together can take longer than any small constant.
+	deadline := time.Now().Add(10 * time.Second)
+	for hits.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Then long enough for any extra, unfolded sync to show up.
+	time.Sleep(10 * e.syncer.triggerDelay)
+	cancel()
+	<-done
 	mu.Lock()
 	for _, c := range sockets {
 		c.CloseNow()
@@ -411,12 +425,12 @@ func TestAppChannel(t *testing.T) {
 		installed string
 		channel   string
 		downloads int32
-		wantApp   string
+		waiting   string
 	}{
-		{"newer installs", "2.0.0", "2.1.0", 1, "2.1.0"},
-		{"nothing installed installs", "", "2.1.0", 1, "2.1.0"},
-		{"equal skips", "2.1.0", "2.1.0", 0, "2.1.0"},
-		{"older skips", "2.2.0", "2.1.0", 0, "2.2.0"},
+		{"newer waits", "2.0.0", "2.1.0", 1, "2.1.0"},
+		{"nothing installed waits (and installs at once)", "", "2.1.0", 1, "2.1.0"},
+		{"equal skips", "2.1.0", "2.1.0", 0, ""},
+		{"older skips", "2.2.0", "2.1.0", 0, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -424,13 +438,25 @@ func TestAppChannel(t *testing.T) {
 			e := newEnv(t, "http://unused")
 			e.cfg.AppChannelSet = strp(cs.URL + "/channel.json")
 			setAppVersion(t, e.layout, tc.installed)
-			e.syncer.CheckChannels(context.Background())
+			if err := e.syncer.CheckChannels(context.Background()); err != nil {
+				t.Fatal(err)
+			}
 			if n := cs.downloads.Load(); n != tc.downloads {
 				t.Errorf("downloads = %d, want %d", n, tc.downloads)
 			}
+			if got := e.updates.Pending(mbu.TypeApp); got != tc.waiting {
+				t.Errorf("waiting = %q, want %q", got, tc.waiting)
+			}
 			st, _ := e.layout.State().Load()
-			if st.AppVersion != tc.wantApp {
-				t.Errorf("app version = %q, want %q", st.AppVersion, tc.wantApp)
+			if st.AppVersion != tc.installed {
+				t.Errorf("app version = %q: the channel check installed it", st.AppVersion)
+			}
+			// A second check does not download what is already waiting.
+			if err := e.syncer.CheckChannels(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if n := cs.downloads.Load(); n != tc.downloads {
+				t.Errorf("downloads after a second check = %d, want %d", n, tc.downloads)
 			}
 		})
 	}
@@ -476,13 +502,13 @@ func TestAgentChannel(t *testing.T) {
 		channel   string
 		rejected  []string
 		downloads int32
-		staged    bool
+		waiting   string
 	}{
-		{"newer stages", "0.3.0", "0.4.0", nil, 1, true},
-		{"equal skips", "0.3.0", "0.3.0", nil, 0, false},
-		{"older skips", "0.3.0", "0.2.9", nil, 0, false},
-		{"rejected skips", "0.3.0", "0.4.0", []string{"0.4.0"}, 0, false},
-		{"dev build skips", "dev", "0.4.0", nil, 0, false},
+		{"newer waits", "0.3.0", "0.4.0", nil, 1, "0.4.0"},
+		{"equal skips", "0.3.0", "0.3.0", nil, 0, ""},
+		{"older skips", "0.3.0", "0.2.9", nil, 0, ""},
+		{"rejected skips", "0.3.0", "0.4.0", []string{"0.4.0"}, 0, ""},
+		{"dev build skips", "dev", "0.4.0", nil, 0, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -497,9 +523,11 @@ func TestAgentChannel(t *testing.T) {
 			if n := cs.downloads.Load(); n != tc.downloads {
 				t.Errorf("downloads = %d, want %d", n, tc.downloads)
 			}
-			_, err := os.Stat(e.layout.StagedReady())
-			if staged := err == nil; staged != tc.staged {
-				t.Errorf("staged = %v, want %v", staged, tc.staged)
+			if got := e.updates.Pending(mbu.TypeAgent); got != tc.waiting {
+				t.Errorf("waiting = %q, want %q", got, tc.waiting)
+			}
+			if _, err := os.Stat(e.layout.StagedReady()); err == nil {
+				t.Error("the channel check staged the agent instead of leaving it waiting")
 			}
 		})
 	}

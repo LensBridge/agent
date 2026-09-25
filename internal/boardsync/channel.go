@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,7 +15,6 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/LensBridge/agent/internal/importer"
 	"github.com/LensBridge/agent/internal/mbu"
 )
 
@@ -36,33 +36,43 @@ func (s *Syncer) channelLoop(ctx context.Context) {
 		return
 	}
 	for {
-		s.CheckChannels(ctx)
+		err := s.CheckChannels(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		s.d.Updates.CheckDone(err)
+		if err != nil {
+			s.log.Warn("release channel check failed", "err", err)
+		}
 		if !sleep(ctx, s.channelInterval) {
 			return
 		}
 	}
 }
 
-// CheckChannels checks the app channel, then the agent channel. The app goes
-// first because an app release may need a newer local API than the running
-// agent serves; installing the agent first would restart the daemon and the
-// app would wait six hours, while installing the app first either works or
-// is refused with "update the agent first" and retried on the next round.
-func (s *Syncer) CheckChannels(ctx context.Context) {
-	if u := s.d.Cfg.AppChannelURL(); u != "" {
-		if err := s.checkChannel(ctx, mbu.TypeApp, u); err != nil && ctx.Err() == nil {
-			s.log.Warn("app release channel check failed", "url", u, "err", err)
-		}
-	}
+// CheckChannels checks the agent channel, then the app channel, and hands
+// anything newer to the update scheduler, which installs it in the board's
+// quiet window. The agent goes first because an app release may need a newer
+// local API than the running agent serves: the scheduler only holds such an
+// app when a new enough agent is waiting with it.
+func (s *Syncer) CheckChannels(ctx context.Context) error {
+	var errs []error
 	if u := s.d.Cfg.AgentChannelURL(runtime.GOARCH); u != "" {
-		if err := s.checkChannel(ctx, mbu.TypeAgent, u); err != nil && ctx.Err() == nil {
-			s.log.Warn("agent release channel check failed", "url", u, "err", err)
+		if err := s.checkChannel(ctx, mbu.TypeAgent, u); err != nil {
+			errs = append(errs, fmt.Errorf("agent channel: %w", err))
 		}
 	}
+	if u := s.d.Cfg.AppChannelURL(); u != "" {
+		if err := s.checkChannel(ctx, mbu.TypeApp, u); err != nil {
+			errs = append(errs, fmt.Errorf("app channel: %w", err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // checkChannel fetches one channel and, if it points at something newer than
-// what is installed, downloads and imports it.
+// what is installed or already waiting, downloads it and offers it to the
+// update scheduler.
 func (s *Syncer) checkChannel(ctx context.Context, kind mbu.Type, channelURL string) error {
 	ch, err := s.fetchChannel(ctx, channelURL)
 	if err != nil {
@@ -99,6 +109,10 @@ func (s *Syncer) checkChannel(ctx context.Context, kind mbu.Type, channelURL str
 		s.log.Debug("release channel: up to date", "type", kind, "installed", installed, "channel", ch.Version)
 		return nil
 	}
+	if waiting := s.d.Updates.Pending(kind); waiting != "" && mbu.CompareVersions(ch.Version, waiting) <= 0 {
+		s.log.Debug("release channel: already waiting to install", "type", kind, "version", waiting)
+		return nil
+	}
 	s.log.Info("release channel offers an update", "type", kind, "installed", installed, "version", ch.Version)
 
 	pkgURL, err := resolve(channelURL, ch.URL)
@@ -114,12 +128,7 @@ func (s *Syncer) checkChannel(ctx context.Context, kind mbu.Type, channelURL str
 	if err := s.download(ctx, pkgURL, file, ch); err != nil {
 		return err
 	}
-
-	b := s.d.Importer.Import(ctx, importer.SourceSync, []string{file})
-	for _, r := range b.Results {
-		s.log.Info("release channel import", "type", kind, "version", ch.Version, "action", r.Action, "message", r.Message)
-	}
-	return nil
+	return s.d.Updates.Offer(file)
 }
 
 func (s *Syncer) fetchChannel(ctx context.Context, channelURL string) (*Channel, error) {

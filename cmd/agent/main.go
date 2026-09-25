@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -55,6 +56,8 @@ func main() {
 		runStatus(os.Args[2:])
 	case "import":
 		runImport(os.Args[2:])
+	case "update":
+		runUpdate(os.Args[2:])
 	case "service-port":
 		runServicePort(os.Args[2:])
 	case "trust":
@@ -63,6 +66,8 @@ func main() {
 		runSelfUpdate(os.Args[2:])
 	case "usb-import":
 		runUSBImport(os.Args[2:])
+	case "splash":
+		runSplash(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Printf("musallahboard-agent %s\n", version.Version)
 	case "-h", "--help", "help":
@@ -85,17 +90,20 @@ Usage:
 
 Administration (need sudo):
   musallahboard-agent import <file.mbu>... | -     Install signed update packages
+  musallahboard-agent update now                   Check for a new app or agent and install it now
   musallahboard-agent service-port on|off          eth0 service port + upload server at http://10.77.0.1/
   musallahboard-agent trust show|add|remove|fetch  Keys this board accepts packages from
 
 Run by systemd (root):
   musallahboard-agent selfupdate apply             Install a staged agent update, with rollback
   musallahboard-agent usb-import <device>          Copy update packages from a USB stick
+  musallahboard-agent splash install [path]        Install the enrollment splash page
 
 Enroll flags:
   --token     One-time enrollment token from the admin portal
   --backend   Backend base URL (e.g. https://backend.utmmsa.ca)
   --config    Path to write agent config (default: ` + defaultConfigPath + `)
+  --force     Enroll a board that is already enrolled (it gets a new identity)
 `)
 }
 
@@ -104,24 +112,44 @@ func runEnroll(args []string) {
 	token := fs.String("token", "", "one-time enrollment token")
 	backend := fs.String("backend", "", "backend base URL")
 	configPath := fs.String("config", defaultConfigPath, "path to write config")
+	force := fs.Bool("force", false, "enroll again, replacing this board's identity")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
 	if *token == "" || *backend == "" {
-		fmt.Fprintln(os.Stderr, "error: --token and --backend are required")
+		fmt.Fprintln(os.Stderr, "usage: sudo musallahboard-agent enroll --token=<token> --backend=<url>")
+		fmt.Fprintln(os.Stderr, "Copy the whole command from the admin portal: Devices, Enroll a board.")
 		os.Exit(2)
 	}
+	requireRoot("enroll")
 
-	logger := newLogger()
-	if err := enroll.Run(context.Background(), logger, enroll.Params{
+	// Enrolling again gives the board a new identity; the old device stays
+	// in the portal, orphaned, until someone revokes it. Only on purpose.
+	if old, err := config.Load(*configPath); err == nil && !*force {
+		fmt.Fprintf(os.Stderr, "This board is already enrolled (device %s).\n", old.DeviceID)
+		fmt.Fprintln(os.Stderr, "Enrolling again gives it a new identity; revoke the old device in the portal afterwards.")
+		fmt.Fprintln(os.Stderr, "To go ahead, run the same command with --force.")
+		os.Exit(1)
+	}
+
+	fmt.Println("Enrolling this board with", strings.TrimRight(*backend, "/"), "...")
+	if err := enroll.Run(context.Background(), slog.New(plainHandler{os.Stdout}), enroll.Params{
 		Token:        *token,
 		BackendURL:   *backend,
 		ConfigPath:   *configPath,
 		AgentVersion: version.Version,
 	}); err != nil {
-		logger.Error("enrollment failed", "err", err)
+		fmt.Fprintf(os.Stderr, "Enrollment failed: %v\n", err)
+		fmt.Fprintln(os.Stderr, "Tokens can be used once and expire; if this one was used or has expired, issue a new one in the portal.")
 		os.Exit(1)
 	}
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		fail("enrolled, but the config it wrote cannot be read: %v", err)
+	}
+	fmt.Printf("Enrolled as device %s.\n", cfg.DeviceID)
+	fmt.Println("The board switches from the enrollment screen to MusallahBoard within a few seconds, then")
+	fmt.Println("downloads its board app and content. Check on it with: musallahboard-agent status")
 }
 
 func runDaemon() {
@@ -222,7 +250,7 @@ func awaitEnrollment(ctx context.Context, logger *slog.Logger) *config.Config {
 		// Chromium may not be up yet, or may be mid-restart, and once enrolled
 		// the board replaces the splash entirely — a push that finds no hook is
 		// the normal case, not an error worth a log line every tick.
-		switch err := splash.PushNetInfo(ctx, cdpClient, info); {
+		switch err := splash.PushNetInfo(ctx, cdpClient, info, version.Version); {
 		case err == nil, errors.Is(err, splash.ErrNoSplash):
 		default:
 			logger.Debug("could not update enrollment splash", "err", err)

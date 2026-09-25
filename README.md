@@ -41,18 +41,16 @@ Or clone the repo and run the script manually:
 ```bash
 git clone https://github.com/LensBridge/agent.git
 cd agent
-chmod +x ./setup.sh
-sudo ./setup.sh
+./setup.sh        # as a user with sudo, not as root
 ```
 
-Follow the prompts to set the device up, then reboot. Upon reboot, the device will be at a splash screen waiting for enrollment. Once the device has a network connection, that splash also prints its IP address on screen — use it to SSH in without hunting through DHCP leases.
+Follow the prompts to set the device up (you need an admin username and your SSH public key; the board has no password login), then reboot. For unattended installs, pass them as `MB_ADMIN_USER=... MB_ADMIN_SSH_KEY="ssh-ed25519 ..."` in front of `bash`. Upon reboot, the device will be at a splash screen waiting for enrollment. Once the device has a network connection, that splash also prints its IP address on screen — use it to SSH in without hunting through DHCP leases.
 
 To enroll the device, run:
 
 ```bash
-sudo musallahboard-agent enroll \
-  --backend <your backend instance>\
-  --token <one-time-token-from-admin-ui
+sudo musallahboard-agent enroll --token=<token> --backend=<backend URL>
+# Easiest: copy the whole command from the admin portal when you issue the token.
 ```
 
 The device will then be enrolled and the board will load automatically once its first content and board app packages have synced. The device is now ready to be used as a kiosk!
@@ -85,13 +83,19 @@ Nothing to do. An enrolled board syncs its content from LensBridge every 30 minu
 
 ### Boards without internet
 
-Set the board up and enroll it online as usual, then, while it still has internet:
+Set the board up and enroll it online as usual, then turn on the ethernet service port:
 
 ```bash
-bash setup.sh --service-port [--rtc]     # --rtc if a DS3231 clock module is fitted
+sudo musallahboard-agent service-port on
 ```
 
-That turns the ethernet port into a service port: a laptop or phone plugged straight into it gets an address from the board. Turn it off before plugging the board into a real network: `sudo musallahboard-agent service-port off`.
+If a DS3231 clock module is fitted, also re-run the setup once with `--rtc`, while the board has internet:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lensbridge/agent/main/setup.sh | bash -s -- --service-port --rtc
+```
+
+The service port turns the ethernet port into a service port: a laptop or phone plugged straight into it gets an address from the board. Turn it off before plugging the board into a real network: `sudo musallahboard-agent service-port off`.
 
 To update the board, get the packages first, while you have internet:
 
@@ -100,7 +104,7 @@ To update the board, get the packages first, while you have internet:
 
 Then use any of:
 
-1. **USB stick.** Copy the `.mbu` files to the stick (its root, or a `MusallahBoard/` folder) and plug it into the board. The screen shows progress; remove the stick when it says "Update complete". One stick can carry content for several boards: each board takes only its own.
+1. **USB stick.** Copy the `.mbu` files to the stick (its root, or a `MusallahBoard/` folder) and plug it into the board. The screen shows progress, and says "You can remove the USB stick" as soon as it has copied what it needs, usually within seconds. One stick can carry content for several boards: each board takes only its own.
 2. **Laptop.** Plug into the board's ethernet port and open `http://10.77.0.1/` in a browser, or run `mbpush <file.mbu>...`. `mbpush status` shows what is installed and how far the board's clock is off; an upload also sets the clock from the laptop's. For a board reachable only over SSH: `mbpush --ssh admin@host <file.mbu>...`.
 3. **Android app.** Downloads the packages while it has signal, then uploads them over a USB ethernet adapter.
 

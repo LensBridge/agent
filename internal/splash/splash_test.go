@@ -34,11 +34,14 @@ func TestPushNetInfoApplied(t *testing.T) {
 	ev := &fakeEval{applied: true}
 	info := netinfo.Info{IPv4: []string{"192.168.1.42"}, SSID: "MSA", Hostname: "lobby"}
 
-	if err := PushNetInfo(context.Background(), ev, info); err != nil {
+	if err := PushNetInfo(context.Background(), ev, info, "0.3.0"); err != nil {
 		t.Fatalf("PushNetInfo() = %v, want nil", err)
 	}
 	if !strings.Contains(ev.gotExpr, "192.168.1.42") {
 		t.Errorf("expression does not carry the address:\n%s", ev.gotExpr)
+	}
+	if !strings.Contains(ev.gotExpr, `"agentVersion":"0.3.0"`) {
+		t.Errorf("expression does not carry the agent version:\n%s", ev.gotExpr)
 	}
 	if !strings.Contains(ev.gotExpr, "setNetInfo") {
 		t.Errorf("expression does not call the page hook:\n%s", ev.gotExpr)
@@ -49,14 +52,14 @@ func TestPushNetInfoApplied(t *testing.T) {
 // The poll loop must be able to tell that apart from a real failure.
 func TestPushNetInfoNoHook(t *testing.T) {
 	ev := &fakeEval{applied: false}
-	if err := PushNetInfo(context.Background(), ev, netinfo.Info{}); !errors.Is(err, ErrNoSplash) {
+	if err := PushNetInfo(context.Background(), ev, netinfo.Info{}, ""); !errors.Is(err, ErrNoSplash) {
 		t.Fatalf("PushNetInfo() = %v, want ErrNoSplash", err)
 	}
 }
 
 func TestPushNetInfoUndefinedIsNoSplash(t *testing.T) {
 	ev := &fakeEval{err: cdp.ErrEvalUndefined}
-	if err := PushNetInfo(context.Background(), ev, netinfo.Info{}); !errors.Is(err, ErrNoSplash) {
+	if err := PushNetInfo(context.Background(), ev, netinfo.Info{}, ""); !errors.Is(err, ErrNoSplash) {
 		t.Fatalf("PushNetInfo() = %v, want ErrNoSplash", err)
 	}
 }
@@ -65,7 +68,7 @@ func TestPushNetInfoUndefinedIsNoSplash(t *testing.T) {
 func TestPushNetInfoTransportErrorPropagates(t *testing.T) {
 	want := fmt.Errorf("chrome not reachable")
 	ev := &fakeEval{err: want}
-	err := PushNetInfo(context.Background(), ev, netinfo.Info{})
+	err := PushNetInfo(context.Background(), ev, netinfo.Info{}, "")
 	if !errors.Is(err, want) {
 		t.Fatalf("PushNetInfo() = %v, want %v", err, want)
 	}
@@ -84,7 +87,7 @@ func TestNetInfoScriptEscapesHostileFields(t *testing.T) {
 		Hostname: "</script><img src=x onerror=alert(1)>",
 	}
 
-	script, err := netInfoScript(info)
+	script, err := netInfoScript(info, "")
 	if err != nil {
 		t.Fatalf("netInfoScript() error = %v", err)
 	}
@@ -114,7 +117,7 @@ func TestNetInfoScriptEscapesHostileFields(t *testing.T) {
 }
 
 func TestNetInfoScriptOfflineDeviceStillPushes(t *testing.T) {
-	script, err := netInfoScript(netinfo.Info{Hostname: "lobby"})
+	script, err := netInfoScript(netinfo.Info{Hostname: "lobby"}, "")
 	if err != nil {
 		t.Fatalf("netInfoScript() error = %v", err)
 	}

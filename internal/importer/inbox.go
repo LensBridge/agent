@@ -10,12 +10,17 @@ import (
 	"time"
 
 	"github.com/LensBridge/agent/internal/fsutil"
+	"github.com/LensBridge/agent/internal/notice"
 )
 
 // InboxPoll is how often the inbox is scanned. Polling rather than inotify:
 // it is one ReadDir of a nearly always empty directory, and it cannot miss a
 // file dropped while the daemon was restarting.
 const InboxPoll = 2 * time.Second
+
+// NoticeSuffix marks a banner dropped in the inbox by the root USB helper
+// (usb-<dev>.notice.json, a notice.Notice), for the daemon to show.
+const NoticeSuffix = ".notice.json"
 
 // InboxResult is what the daemon writes to inbox/results/<file>.json.
 type InboxResult struct {
@@ -33,6 +38,7 @@ func (im *Importer) RunInbox(ctx context.Context) {
 	t := time.NewTicker(InboxPoll)
 	defer t.Stop()
 	for {
+		im.showNotices(inbox)
 		files := pending(inbox)
 		if len(files) > 0 {
 			// Group by source so a USB stick and a CLI import that land in
@@ -65,9 +71,13 @@ func (im *Importer) RunInbox(ctx context.Context) {
 				}
 				if b.AgentStaged {
 					// The updater is about to restart us. Stop taking work
-					// so the rest waits for the new agent.
-					<-ctx.Done()
-					return
+					// so the rest waits for the new agent, unless the
+					// updater refuses it and this agent carries on.
+					select {
+					case <-ctx.Done():
+						return
+					case <-im.awaitReplacement():
+					}
 				}
 			}
 			pruneResults(results, im.d.Now())
@@ -76,6 +86,39 @@ func (im *Importer) RunInbox(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		}
+	}
+}
+
+// showNotices passes on the banners the USB helper left, then deletes them.
+func (im *Importer) showNotices(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		n := e.Name()
+		if !e.Type().IsRegular() || strings.HasPrefix(n, ".") || !strings.HasSuffix(n, NoticeSuffix) {
+			continue
+		}
+		path := filepath.Join(dir, n)
+		raw, err := os.ReadFile(path)
+		os.Remove(path)
+		var msg notice.Notice
+		if err != nil || len(raw) > 16<<10 || json.Unmarshal(raw, &msg) != nil || msg.Headline == "" {
+			continue
+		}
+		switch msg.Tone {
+		case notice.Progress, notice.OK, notice.Neutral, notice.Problem:
+		default:
+			msg.Tone = notice.Neutral
+		}
+		footer := msg.Footer
+		msg = notice.New(msg.Tone, msg.Headline, msg.Lines...)
+		msg.Footer = footer
+		im.d.Logger.Info("usb notice", "tone", msg.Tone, "headline", msg.Headline, "lines", msg.Lines)
+		if im.d.Events != nil {
+			im.d.Events.Notice(msg)
 		}
 	}
 }

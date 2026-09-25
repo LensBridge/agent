@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/LensBridge/agent/internal/importer"
+	"github.com/LensBridge/agent/internal/notice"
 	"github.com/LensBridge/agent/internal/store"
 )
 
@@ -232,9 +233,50 @@ func TestRunTimesOutWithoutDaemon(t *testing.T) {
 		t.Fatalf("log = %q", *log)
 	}
 	// The file was queued under a .mbu name, not left as .part.
-	entries, _ := os.ReadDir(h.Layout.Inbox())
-	if len(entries) != 1 || entries[0].Name() != "usb-sda-1-a.mbu" {
-		t.Fatalf("inbox = %v", entries)
+	queued, _ := filepath.Glob(filepath.Join(h.Layout.Inbox(), "*.mbu"))
+	if len(queued) != 1 || filepath.Base(queued[0]) != "usb-sda-1-a.mbu" {
+		t.Fatalf("inbox = %v", queued)
+	}
+	// The board was told a stick is being read; its outcome is the daemon's.
+	if n := announced(t, h, "sda"); n.Headline != "Reading USB stick" {
+		t.Fatalf("notice = %+v", n)
+	}
+}
+
+// announced is the notice the helper left for the daemon about dev.
+func announced(t *testing.T, h *Helper, dev string) notice.Notice {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(h.Layout.Inbox(), "usb-"+dev+importer.NoticeSuffix))
+	if err != nil {
+		t.Fatalf("no notice for %s: %v", dev, err)
+	}
+	var n notice.Notice
+	if err := json.Unmarshal(raw, &n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func TestRunTellsTheBoard(t *testing.T) {
+	cases := []struct {
+		name, fs string
+		stick    map[string]int
+		tone     notice.Tone
+		headline string
+	}{
+		{"empty stick", "vfat", map[string]int{}, notice.Neutral, "No updates on this USB stick"},
+		{"unknown filesystem", "apfs", map[string]int{}, notice.Problem, "Can't read this USB stick"},
+		{"no filesystem", "", map[string]int{}, notice.Problem, "Can't read this USB stick"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeSys{fs: tc.fs, stick: tc.stick}
+			h, _ := newHelper(t, f)
+			_ = h.Run(context.Background(), "sdb1")
+			if n := announced(t, h, "sdb1"); n.Tone != tc.tone || n.Headline != tc.headline || len(n.Lines) == 0 {
+				t.Fatalf("notice = %+v", n)
+			}
+		})
 	}
 }
 

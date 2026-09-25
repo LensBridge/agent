@@ -115,7 +115,9 @@ const (
 
 func servicePortOn(force bool) {
 	if !nmConnectionExists(serviceConn) {
-		fail("the NetworkManager connection %q does not exist, so a laptop could not reach this board.\n       Provision it first: bash setup.sh --service-port", serviceConn)
+		fail("the NetworkManager connection %q does not exist, so a laptop could not reach this board.\n"+
+			"       It is created by the MusallahBoard setup; re-run it with --service-port:\n"+
+			"       curl -fsSL https://raw.githubusercontent.com/lensbridge/agent/main/setup.sh | bash -s -- --service-port", serviceConn)
 	}
 	if out, err := runCmd("nmcli", "connection", "modify", serviceConn,
 		"connection.autoconnect", "yes", "connection.autoconnect-priority", servicePortPriority); err != nil {

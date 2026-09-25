@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LensBridge/agent/internal/cdp"
+	"github.com/LensBridge/agent/internal/clock"
 	"github.com/LensBridge/agent/internal/localserver"
 	"github.com/LensBridge/agent/internal/store"
 	"github.com/LensBridge/agent/internal/trust"
@@ -114,9 +116,50 @@ func systemZone() string {
 	return name
 }
 
+func onOff(on bool) string {
+	if on {
+		return "on"
+	}
+	return "off"
+}
+
+// localTime renders an RFC 3339 time as the board's local wall clock.
+func localTime(v any) string {
+	s, _ := v.(string)
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return s
+	}
+	return t.Local().Format("Mon 2 Jan 15:04")
+}
+
+// kioskShowing asks Chromium, over its debugging port, what it is showing.
+func kioskShowing() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	t, err := cdp.New("").FirstPageTarget(ctx)
+	if err != nil {
+		return "NOTHING: the kiosk browser is not running (systemctl status musallahboard-kiosk)"
+	}
+	switch u := t.URL; {
+	case strings.Contains(u, "/_mb/updating"):
+		return "the update screen"
+	case strings.HasPrefix(u, "http://127.0.0.1:8080"):
+		return "MusallahBoard"
+	case strings.Contains(u, "starting.html"):
+		return "the starting page, waiting for the agent"
+	case strings.Contains(u, "waiting.html"):
+		return "the enrollment screen"
+	case strings.HasPrefix(u, "chrome-error:"):
+		return "A BROWSER ERROR PAGE (the agent recovers it within a minute)"
+	default:
+		return u
+	}
+}
+
 func printStatus(st cliStatus) {
 	row := func(k, format string, args ...any) {
-		fmt.Printf("  %-13s %s\n", k+":", fmt.Sprintf(format, args...))
+		fmt.Printf("  %-18s %s\n", k+":", fmt.Sprintf(format, args...))
 	}
 	row("Device", "%s", st.DeviceID)
 	if st.Daemon {
@@ -124,6 +167,20 @@ func printStatus(st cliStatus) {
 	} else {
 		row("Agent", "%s (NOT running: systemctl status musallahboard-agent)", version.Version)
 	}
+	if st.Daemon {
+		row("Screen", "%s", kioskShowing())
+		switch b, _ := st.Backend.(map[string]any); {
+		case b == nil:
+			row("LensBridge", "not connected: no device key")
+		case b["connected"] == true:
+			row("LensBridge", "connected since %s", localTime(b["since"]))
+		case b["lastError"] != nil && b["lastError"] != "":
+			row("LensBridge", "NOT connected: %v", b["lastError"])
+		default:
+			row("LensBridge", "connecting")
+		}
+	}
+	row("Offline updates", "USB sticks %s; ethernet service port %s", onOff(st.USBImport), onOff(st.ServicePort))
 	if st.App != nil {
 		row("Board app", "%s", st.App.Version)
 	} else {
@@ -163,12 +220,56 @@ func printStatus(st cliStatus) {
 			row("Sync", "not yet attempted")
 		}
 	}
+	if u := st.Updates; u != nil {
+		switch {
+		case u.Installing:
+			row("Updates", "installing now")
+		case !u.AutoUpdate && len(u.Available) == 0:
+			row("Updates", "automatic updates are off (auto_update = false)")
+		case u.LastCheckError != "" && len(u.Available) == 0:
+			row("Updates", "CHECK FAILING: %s", u.LastCheckError)
+		case len(u.Available) == 0 && u.LastCheckAt == nil:
+			row("Updates", "not checked yet (first check 2 minutes after start)")
+		case len(u.Available) == 0:
+			row("Updates", "up to date (checked %s; installs at %s)", localTime(*u.LastCheckAt), u.InstallTime)
+		default:
+			var names []string
+			for _, a := range u.Available {
+				names = append(names, a.Description)
+			}
+			at := ""
+			if u.InstallAt != nil {
+				at = localTime(*u.InstallAt)
+			}
+			row("Updates", "%s waiting, installs %s", strings.Join(names, " and "), at)
+			row("", "Install now: sudo musallahboard-agent update now")
+		}
+	}
+	if o := st.LastAgentUpdate; o != nil {
+		row("Last agent update", "%s, %s", localTime(o.At), o.Status)
+		row("", "%s", o.Message)
+	}
 	row("Trust", "%d content key(s), %d release key(s)", st.Trust.ContentKeys, st.Trust.ReleaseKeys)
 	if st.Trust.ContentKeys == 0 {
 		row("", "No content key: run `sudo musallahboard-agent trust fetch` while online.")
 	}
 	t, _ := time.Parse(time.RFC3339, st.Clock.Now)
 	row("Clock", "%s (%s)", t.Format("Mon 2 Jan 2006 15:04:05 MST"), st.Clock.Timezone)
+	if c := st.Status.Clock; c != nil {
+		switch c.Source {
+		case clock.SourceNTP:
+			row("", "synchronised over the internet")
+		case clock.SourceRTC:
+			row("", "kept by the hardware clock")
+		case clock.SourceUploader:
+			row("", "set from a laptop or phone since boot")
+		case clock.SourceStarting:
+			row("", "not confirmed yet (just booted)")
+		default:
+			row("", "NOT CONFIRMED since boot: it may be wrong. Connect the board to the internet,")
+			row("", "fit an RTC (setup.sh --rtc), or send an update from http://10.77.0.1/")
+		}
+	}
 	if st.RTC {
 		row("RTC", "present (%s)", rtcDevice)
 	} else {
