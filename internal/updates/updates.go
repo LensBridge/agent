@@ -239,6 +239,8 @@ func (s *Scheduler) Run(ctx context.Context) {
 
 // CheckAndInstall asks the release channels for new software and installs
 // everything waiting, whatever the time. It is the "update now" command.
+// ctx bounds the check (a remote command's deadline); an install that has
+// started always finishes, because stopping one halfway helps nobody.
 func (s *Scheduler) CheckAndInstall(ctx context.Context) Outcome {
 	var out Outcome
 	if s.d.Check == nil {
@@ -246,7 +248,7 @@ func (s *Scheduler) CheckAndInstall(ctx context.Context) Outcome {
 	} else if err := s.d.Check(ctx); err != nil {
 		out.CheckError = err.Error()
 	}
-	b, _ := s.InstallNow(ctx)
+	b, _ := s.InstallNow(context.WithoutCancel(ctx))
 	out.Results = b.Results
 	if out.Results == nil {
 		out.Results = []importer.Result{}

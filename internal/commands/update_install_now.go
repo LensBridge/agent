@@ -11,8 +11,11 @@ import (
 // or agent at once, instead of in the board's quiet window. The board shows
 // the update screen while it installs, as it would at night.
 //
-// An agent update restarts the agent a few seconds after this returns; the
-// result is sent first, but may be lost if the restart wins the race.
+// The download counts against the command's deadline, so issue it with a
+// generous one (the admin portal uses 10 minutes); an install that has started
+// finishes regardless. An agent update restarts the agent a few seconds after
+// this returns; the result is sent first, but may be lost if the restart wins
+// the race.
 type UpdateInstallNow struct {
 	Run func(ctx context.Context) updates.Outcome
 }
