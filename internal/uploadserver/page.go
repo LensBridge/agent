@@ -17,7 +17,8 @@ header p{margin:6px 0 0;opacity:.8;font-size:14px}main{max-width:760px;margin:0 
 dt{color:var(--muted)}dd{margin:0}#drop{border:2px dashed var(--line);border-radius:10px;padding:28px;text-align:center;cursor:pointer}
 #drop.over{border-color:var(--navy);background:#eef3fa}button{background:var(--navy);color:#fff;border:0;border-radius:8px;padding:10px 18px;font-size:15px;cursor:pointer}
 button:disabled{opacity:.5;cursor:default}ul{padding-left:18px;margin:8px 0}progress{width:100%;height:10px}
-.ok{color:var(--ok)}.bad{color:var(--bad)}.muted{color:var(--muted);font-size:13px}
+.ok{color:var(--ok)}.bad{color:var(--bad)}.neutral{color:var(--muted)}.muted{color:var(--muted);font-size:13px}
+.detail{display:block;color:var(--muted);font-size:12px}h3{margin:12px 0 4px;font-size:16px}
 </style></head><body>
 <header><h1>MusallahBoard update</h1><p>Send signed update packages (.mbu) to this board.</p></header>
 <main>
@@ -43,7 +44,9 @@ function loadStatus(){fetch('/api/status',{cache:'no-store'}).then(function(r){r
 }).catch(function(){document.getElementById('st').textContent='Could not reach the board.'})}
 function show(){var ul=document.getElementById('files');ul.textContent='';chosen.forEach(function(f){ul.appendChild(el('li',null,f.name+' ('+Math.round(f.size/1024)+' KB)'))});
  document.getElementById('send').disabled=!chosen.length}
-function add(list){for(var i=0;i<list.length;i++){if(/\.mbu$/i.test(list[i].name))chosen.push(list[i])}show()}
+function add(list){var skipped=[];for(var i=0;i<list.length;i++){if(/\.mbu$/i.test(list[i].name))chosen.push(list[i]);else skipped.push(list[i].name)}
+ show();var out=document.getElementById('out');out.textContent='';
+ if(skipped.length)out.appendChild(el('p','bad','Left out '+skipped.join(', ')+': only .mbu update packages can be sent.'))}
 var drop=document.getElementById('drop'),pick=document.getElementById('pick');
 drop.onclick=function(){pick.click()};pick.onchange=function(){add(pick.files);pick.value=''};
 drop.ondragover=function(e){e.preventDefault();drop.classList.add('over')};drop.ondragleave=function(){drop.classList.remove('over')};
@@ -55,7 +58,10 @@ document.getElementById('send').onclick=function(){
  x.upload.onprogress=function(e){if(e.lengthComputable){prog.value=e.loaded/e.total;if(e.loaded===e.total)out.textContent='Installing… the board shows its progress on screen.'}};
  x.onload=function(){prog.hidden=true;var r;try{r=JSON.parse(x.responseText)}catch(e){r={message:x.responseText}}
   out.textContent='';if(r.message)out.appendChild(el('p','bad',r.message));
-  var ul=el('ul');(r.results||[]).forEach(function(it){var bad=it.action==='rejected';ul.appendChild(el('li',bad?'bad':'ok',it.file+': '+it.message))});out.appendChild(ul);
+  if(r.notice){out.appendChild(el('h3',r.notice.tone==='problem'?'bad':(r.notice.tone==='ok'?'ok':null),r.notice.headline))}
+  var cls={installed:'ok',staged:'ok',rejected:'bad'};
+  var ul=el('ul');(r.results||[]).forEach(function(it){if(it.action==='queued')return;var li=el('li',cls[it.action]||'neutral',it.file+': '+it.message);
+   if(it.detail)li.appendChild(el('span','detail',it.detail));ul.appendChild(li)});out.appendChild(ul);
   if(r.clock&&r.clock.note)out.appendChild(el('p','muted','Clock: '+r.clock.note));
   chosen=[];show();loadStatus()};
  x.onerror=function(){prog.hidden=true;out.textContent='';out.appendChild(el('p','bad','The upload failed. Check the cable and try again.'));btn.disabled=false};

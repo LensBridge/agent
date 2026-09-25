@@ -182,6 +182,9 @@ func printStatus(st cliStatus) {
 			row("", "Install now: sudo musallahboard-agent update now")
 		}
 	}
+	if o := st.LastAgentUpdate; o != nil {
+		row("Last agent update", "%s, %s: %s", o.At, o.Status, o.Message)
+	}
 	row("Trust", "%d content key(s), %d release key(s)", st.Trust.ContentKeys, st.Trust.ReleaseKeys)
 	if st.Trust.ContentKeys == 0 {
 		row("", "No content key: run `sudo musallahboard-agent trust fetch` while online.")

@@ -23,6 +23,7 @@ import (
 
 	"github.com/LensBridge/agent/internal/fsutil"
 	"github.com/LensBridge/agent/internal/mbu"
+	"github.com/LensBridge/agent/internal/notice"
 	"github.com/LensBridge/agent/internal/state"
 	"github.com/LensBridge/agent/internal/store"
 	"github.com/LensBridge/agent/internal/trust"
@@ -45,11 +46,16 @@ const (
 // Actions a package can end in.
 const (
 	ActionInstalled = "installed"
-	ActionUnchanged = "unchanged"
 	ActionStaged    = "staged"
-	ActionSkipped   = "skipped"
-	ActionRejected  = "rejected"
-	ActionQueued    = "queued"
+	// ActionUnchanged: exactly this is already installed.
+	ActionUnchanged = "unchanged"
+	// ActionOutdated: the board already has something newer. Not a failure:
+	// an old USB stick at an online board is the normal case.
+	ActionOutdated = "outdated"
+	// ActionSkipped: content for another board. One stick serves many.
+	ActionSkipped  = "skipped"
+	ActionRejected = "rejected"
+	ActionQueued   = "queued"
 )
 
 // Result is the outcome for one package.
@@ -59,12 +65,19 @@ type Result struct {
 	Version  string   `json:"version,omitempty"`
 	Sequence int64    `json:"sequence,omitempty"`
 	Action   string   `json:"action"`
-	Message  string   `json:"message"`
+	// Message is one plain sentence for whoever is at the board: it is what
+	// the update screen, the banner, the upload page and the CLI show.
+	Message string `json:"message"`
+	// Detail is the technical reason behind a rejection, for logs and for
+	// the people reading them.
+	Detail string `json:"detail,omitempty"`
 }
 
 // Batch is the outcome of one import.
 type Batch struct {
 	Results []Result `json:"results"`
+	// Notice is what the board showed about the batch.
+	Notice notice.Notice `json:"notice"`
 	// Verified reports whether at least one package authenticated. The
 	// upload server only trusts an uploader's clock when it did.
 	Verified bool `json:"-"`
@@ -86,17 +99,25 @@ func (b Batch) OK() bool {
 
 // Screen is the kiosk's update screen (package updatescreen).
 type Screen interface {
+	// Active reports whether the screen is up, possibly held over from
+	// before an agent restart for this batch to finish.
+	Active() bool
 	Begin(ctx context.Context)
 	Caption(ctx context.Context, text string)
 	// Finish shows the outcome and returns the kiosk to the board after a
-	// countdown. restarting means the agent is about to be replaced.
-	Finish(ctx context.Context, ok bool, detail string, restarting bool)
+	// countdown.
+	Finish(ctx context.Context, n notice.Notice)
+	// Restarting says the agent is about to be replaced. The new agent
+	// finishes the screen (package agentupdate).
+	Restarting(ctx context.Context)
 }
 
-// Events is told about installs the page should react to.
+// Events is told about installs the page should react to, and carries the
+// banners shown over the running board.
 type Events interface {
 	ContentChanged(sequence int64)
 	AppChanged(version string)
+	Notice(n notice.Notice)
 }
 
 // Deps is what an Importer needs.
@@ -109,14 +130,46 @@ type Deps struct {
 	Ring   func() (*trust.Ring, error)
 	Screen Screen // may be nil
 	Events Events // may be nil
-	Logger *slog.Logger
-	Now    func() time.Time
+	// AgentStaged is called after a batch staged a new agent, with the
+	// batch's notice, which the new agent shows once it runs. May be nil.
+	AgentStaged func(n notice.Notice)
+	Logger      *slog.Logger
+	Now         func() time.Time
 }
 
 // Importer serialises imports.
 type Importer struct {
 	d  Deps
 	mu sync.Mutex
+
+	// staged is closed when a staged agent turns out not to replace this
+	// one (the root updater refused it), so the inbox takes work again.
+	stagedMu sync.Mutex
+	staged   chan struct{}
+}
+
+// AgentNotReplaced says the staged agent update ended without replacing this
+// agent, so the inbox should carry on (package agentupdate).
+func (im *Importer) AgentNotReplaced() {
+	im.stagedMu.Lock()
+	defer im.stagedMu.Unlock()
+	if im.staged != nil {
+		close(im.staged)
+		im.staged = nil
+	}
+}
+
+// awaitReplacement returns a channel closed by AgentNotReplaced, or already
+// closed when no agent is staged.
+func (im *Importer) awaitReplacement() <-chan struct{} {
+	im.stagedMu.Lock()
+	defer im.stagedMu.Unlock()
+	if im.staged == nil {
+		c := make(chan struct{})
+		close(c)
+		return c
+	}
+	return im.staged
 }
 
 // New returns an Importer.
@@ -164,6 +217,17 @@ func rank(t mbu.Type) int {
 	return 2
 }
 
+// progressLine says where a batch someone brought came from.
+var progressLine = map[Source]string{
+	SourceUSB:    "From the USB stick",
+	SourceUpload: "From a laptop or phone",
+	SourceCLI:    "From the command line",
+}
+
+// run processes one batch. The update screen goes up only once something is
+// about to be installed; until then, and when nothing is, a person at the
+// board sees a banner over the running board instead. Background sync is
+// silent for content and uses the screen for software.
 func (im *Importer) run(ctx context.Context, src Source, files []string) Batch {
 	var b Batch
 	items := make([]item, 0, len(files))
@@ -173,21 +237,17 @@ func (im *Importer) run(ctx context.Context, src Source, files []string) Batch {
 	}
 	sort.SliceStable(items, func(i, j int) bool { return rank(peekType(items[i])) < rank(peekType(items[j])) })
 
-	// The screen goes up for anything a person brought to the board, unless
-	// everything in it is someone else's content. Background sync only puts
-	// it up for software.
-	screen := false
-	for _, it := range items {
-		if it.peek != nil && it.peek.Type == mbu.TypeContent && it.peek.DeviceID != "" && it.peek.DeviceID != im.d.DeviceID {
-			continue
-		}
-		if src != SourceSync || peekType(it) != mbu.TypeContent {
-			screen = true
+	interactive := src != SourceSync
+	banner := func(n notice.Notice) {
+		if im.d.Events != nil && interactive {
+			im.d.Events.Notice(n)
 		}
 	}
-	shown := false
-	show := func(caption string) {
-		if im.d.Screen == nil || !screen {
+	// A screen held over from before an agent restart belongs to this batch.
+	shown := im.d.Screen != nil && im.d.Screen.Active()
+	banner(notice.New(notice.Progress, "Checking updates", progressLine[src]))
+	show := func(kind mbu.Type, caption string) {
+		if im.d.Screen == nil || (!interactive && kind == mbu.TypeContent) {
 			return
 		}
 		if !shown {
@@ -198,38 +258,84 @@ func (im *Importer) run(ctx context.Context, src Source, files []string) Batch {
 	}
 
 	ring, ringErr := im.d.Ring()
-	for i, it := range items {
+	for _, it := range items {
 		name := filepath.Base(it.path)
 		if b.AgentStaged {
 			b.Results = append(b.Results, im.requeue(it.path, name))
 			continue
 		}
 		if it.peek != nil && it.peek.Type == mbu.TypeContent && it.peek.DeviceID != "" && it.peek.DeviceID != im.d.DeviceID {
-			b.Results = append(b.Results, Result{File: name, Type: mbu.TypeContent, Action: ActionSkipped,
-				Message: "content for another board (" + shortID(it.peek.DeviceID) + "); left alone"})
+			b.Results = append(b.Results, skippedForeign(name))
 			continue
 		}
-		label := "update"
-		if it.peek != nil {
-			label = it.peek.Describe()
-		}
-		show(fmt.Sprintf("Checking %s (%d of %d)", label, i+1, len(items)))
 		var r Result
 		if ringErr != nil {
-			r = reject(name, fmt.Errorf("cannot read the trust store: %w", ringErr))
+			r = Result{File: name, Action: ActionRejected,
+				Message: "The board cannot check updates: its list of trusted keys is unreadable",
+				Detail:  ringErr.Error()}
 		} else {
 			r = im.one(ctx, src, it.path, name, ring, &b, show)
 		}
-		im.d.Logger.Info("import", "source", src, "file", name, "type", r.Type, "action", r.Action, "message", r.Message)
+		im.d.Logger.Info("import", "source", src, "file", name, "type", r.Type, "action", r.Action,
+			"message", r.Message, "detail", r.Detail)
 		b.Results = append(b.Results, r)
 	}
 
-	if shown {
-		ok := b.OK()
-		detail := summary(b)
-		im.d.Screen.Finish(ctx, ok, detail, b.AgentStaged)
+	b.Notice = Summarize(b)
+	if b.AgentStaged {
+		im.stagedMu.Lock()
+		im.staged = make(chan struct{})
+		im.stagedMu.Unlock()
+	}
+	switch {
+	case shown && b.AgentStaged:
+		im.d.Screen.Restarting(ctx)
+		if im.d.AgentStaged != nil {
+			im.d.AgentStaged(b.Notice)
+		}
+	case shown:
+		im.d.Screen.Finish(ctx, b.Notice)
+	default:
+		banner(b.Notice)
 	}
 	return b
+}
+
+// Summarize is what the board shows about a batch: what was installed first,
+// then anything that went wrong; or, when nothing needed doing, why not.
+func Summarize(b Batch) notice.Notice {
+	var installed, problems, neutral []string
+	foreign := 0
+	for _, r := range b.Results {
+		switch r.Action {
+		case ActionInstalled, ActionStaged:
+			installed = append(installed, r.Message)
+		case ActionRejected:
+			problems = append(problems, r.Message)
+		case ActionSkipped:
+			foreign++
+		case ActionUnchanged, ActionOutdated:
+			neutral = append(neutral, r.Message)
+		}
+	}
+	switch {
+	case len(installed) > 0 && len(problems) > 0:
+		return notice.New(notice.Problem, "Some updates were not installed", append(problems, installed...)...)
+	case len(installed) > 0:
+		return notice.New(notice.OK, "Update complete", installed...)
+	case len(problems) > 0:
+		return notice.New(notice.Problem, "Update not installed", problems...)
+	case len(neutral) > 0:
+		return notice.New(notice.Neutral, "Already up to date", neutral...)
+	case foreign > 0:
+		return notice.New(notice.Neutral, "Nothing here is for this board",
+			"These updates are for other MusallahBoards")
+	}
+	return notice.New(notice.Neutral, "No updates found")
+}
+
+func skippedForeign(name string) Result {
+	return Result{File: name, Type: mbu.TypeContent, Action: ActionSkipped, Message: "Content for another board"}
 }
 
 func peekType(it item) mbu.Type {
@@ -239,11 +345,15 @@ func peekType(it item) mbu.Type {
 	return it.peek.Type
 }
 
-func (im *Importer) one(ctx context.Context, src Source, path, name string, ring *trust.Ring, b *Batch, show func(string)) Result {
+func (im *Importer) one(ctx context.Context, src Source, path, name string, ring *trust.Ring, b *Batch, show func(mbu.Type, string)) Result {
 	l := im.d.Layout
 	pkg, err := mbu.Open(path, ring, mbu.OpenOptions{HaveMedia: l.HaveMedia})
 	if err != nil {
-		return reject(name, err)
+		msg := "A file is damaged or is not a MusallahBoard update"
+		if errors.Is(err, mbu.ErrNotAuthentic) {
+			msg = "An update is not signed for this board"
+		}
+		return Result{File: name, Action: ActionRejected, Message: msg, Detail: err.Error()}
 	}
 	defer pkg.Close()
 	m := pkg.Manifest
@@ -257,7 +367,7 @@ func (im *Importer) one(ctx context.Context, src Source, path, name string, ring
 	}
 	st, err := l.State().Load()
 	if err != nil {
-		return reject(name, err)
+		return failed(Result{File: name, Type: m.Type}, "The board cannot read its own state", err)
 	}
 	res := Result{File: name, Type: m.Type, Version: m.Version, Sequence: m.Sequence}
 	now := im.d.Now()
@@ -265,20 +375,20 @@ func (im *Importer) one(ctx context.Context, src Source, path, name string, ring
 	switch m.Type {
 	case mbu.TypeContent:
 		if m.DeviceID != im.d.DeviceID {
-			res.Action, res.Message = ActionSkipped, "content for another board ("+shortID(m.DeviceID)+"); left alone"
-			return res
+			return skippedForeign(name)
 		}
 		switch {
 		case m.Sequence < st.ContentSequence:
-			return rejectAs(res, "this content is older than what is installed")
+			res.Action, res.Message = ActionOutdated, "The board already has newer content"
+			return res
 		case m.Sequence == st.ContentSequence:
-			res.Action, res.Message = ActionUnchanged, "this content is already installed"
+			res.Action, res.Message = ActionUnchanged, "This content is already on the board"
 			return res
 		}
-		show("Installing " + m.Describe())
+		show(m.Type, "Installing "+describe(m))
 		changed, err := l.InstallContent(pkg, string(src), now)
 		if err != nil && !strings.Contains(err.Error(), "content installed, but") {
-			return rejectAs(res, err.Error())
+			return failed(res, "Installing the new content failed", err)
 		}
 		if err != nil {
 			im.d.Logger.Warn("content cleanup", "err", err)
@@ -294,22 +404,20 @@ func (im *Importer) one(ctx context.Context, src Source, path, name string, ring
 		if changed && im.d.Events != nil {
 			im.d.Events.ContentChanged(m.Sequence)
 		}
-		res.Action, res.Message = ActionInstalled, "Installed "+m.Describe()
+		res.Action, res.Message = ActionInstalled, installedLine(m)
 
 	case mbu.TypeApp:
 		if m.App.LocalAPI > LocalAPIVersion {
-			return rejectAs(res, fmt.Sprintf("board app %s needs a newer agent (local API %d; this agent serves %d): install the agent update first",
-				m.Version, m.App.LocalAPI, LocalAPIVersion))
+			return failed(res, fmt.Sprintf("Board app %s needs a newer agent: install the agent update first", m.Version),
+				fmt.Errorf("app needs local API %d; this agent serves %d", m.App.LocalAPI, LocalAPIVersion))
 		}
-		if unchanged, err := im.checkSoftware(m, st); err != nil {
-			return rejectAs(res, err.Error())
-		} else if unchanged != "" {
-			res.Action, res.Message = ActionUnchanged, unchanged
+		if action, msg := im.checkSoftware(m, st); action != "" {
+			res.Action, res.Message = action, msg
 			return res
 		}
-		show("Installing " + m.Describe())
+		show(m.Type, "Installing "+describe(m))
 		if err := l.InstallApp(pkg, string(src), now); err != nil && !strings.Contains(err.Error(), "app installed, but") {
-			return rejectAs(res, err.Error())
+			return failed(res, "Installing board app "+m.Version+" failed", err)
 		}
 		if _, err := l.State().Update(func(s *state.State) error {
 			if mbu.CompareVersions(m.Version, s.AppVersion) > 0 {
@@ -322,55 +430,82 @@ func (im *Importer) one(ctx context.Context, src Source, path, name string, ring
 		if im.d.Events != nil {
 			im.d.Events.AppChanged(m.Version)
 		}
-		res.Action, res.Message = ActionInstalled, "Installed "+m.Describe()
+		res.Action, res.Message = ActionInstalled, installedLine(m)
 
 	case mbu.TypeAgent:
-		if unchanged, err := im.checkSoftware(m, st); err != nil {
-			return rejectAs(res, err.Error())
-		} else if unchanged != "" {
-			res.Action, res.Message = ActionUnchanged, unchanged
+		if action, msg := im.checkSoftware(m, st); action != "" {
+			res.Action, res.Message = action, msg
 			return res
 		}
-		show("Preparing " + m.Describe())
+		show(m.Type, "Installing "+describe(m))
 		if err := im.stageAgent(path); err != nil {
-			return rejectAs(res, err.Error())
+			return failed(res, "Preparing agent "+m.Version+" failed", err)
 		}
 		b.AgentStaged = true
-		res.Action, res.Message = ActionStaged, "Installing "+m.Describe()+"; the agent restarts in a moment"
+		res.Action, res.Message = ActionStaged, installedLine(m)
 	}
 	return res
 }
 
+// describe names a package for the working screen's caption.
+func describe(m *mbu.Manifest) string {
+	switch m.Type {
+	case mbu.TypeContent:
+		return "new content"
+	case mbu.TypeApp:
+		return "board app " + m.Version
+	case mbu.TypeAgent:
+		return "agent " + m.Version
+	}
+	return "update"
+}
+
+// installedLine is the line an installed package gets on the outcome.
+func installedLine(m *mbu.Manifest) string {
+	switch m.Type {
+	case mbu.TypeContent:
+		if t, err := time.Parse("2006-01-02", m.Content.LastDay); err == nil {
+			return "New content, through " + t.Format("Monday, January 2")
+		}
+		return "New content"
+	case mbu.TypeApp:
+		return "Board app " + m.Version
+	case mbu.TypeAgent:
+		return "Agent " + m.Version
+	}
+	return "Update"
+}
+
 // checkSoftware decides whether an app or agent package may replace what the
-// board runs. It returns a message when the package is already installed, and
-// an error when it must be refused. The app's local API is checked at install
-// time only: an app waiting for its agent is scheduled together with it.
-func (im *Importer) checkSoftware(m *mbu.Manifest, st state.State) (unchanged string, err error) {
+// board runs. It returns "" when it may, else the action (unchanged, outdated
+// or rejected) and the line to show. The app's local API is checked at
+// install time only: an app waiting for its agent is scheduled with it.
+func (im *Importer) checkSoftware(m *mbu.Manifest, st state.State) (action, msg string) {
 	switch m.Type {
 	case mbu.TypeApp:
 		switch c := mbu.CompareVersions(m.Version, st.AppVersion); {
 		case c < 0:
-			return "", fmt.Errorf("board app %s is older than the installed %s", m.Version, st.AppVersion)
+			return ActionOutdated, "The board already has a newer board app (" + st.AppVersion + ")"
 		case c == 0:
-			return "board app " + m.Version + " is already installed", nil
+			return ActionUnchanged, "Board app " + m.Version + " is already installed"
 		}
 	case mbu.TypeAgent:
 		if m.Agent.Arch != runtime.GOARCH {
-			return "", fmt.Errorf("agent %s is built for %s; this board is %s", m.Version, m.Agent.Arch, runtime.GOARCH)
+			return ActionRejected, fmt.Sprintf("Agent %s is for a different kind of board (%s, not %s)", m.Version, m.Agent.Arch, runtime.GOARCH)
 		}
 		if st.AgentRejected(m.Version) {
-			return "", fmt.Errorf("agent %s failed to start on this board before; it will not be retried", m.Version)
+			return ActionRejected, "Agent " + m.Version + " did not start on this board before, so it is not tried again"
 		}
 		switch c := mbu.CompareVersions(m.Version, im.d.AgentVersion); {
 		case c < 0:
-			return "", fmt.Errorf("agent %s is older than the running %s", m.Version, im.d.AgentVersion)
+			return ActionOutdated, "The board already has a newer agent (" + im.d.AgentVersion + ")"
 		case c == 0:
-			return "agent " + m.Version + " is already running", nil
+			return ActionUnchanged, "Agent " + m.Version + " is already running"
 		}
 	default:
-		return "", fmt.Errorf("%s is not a software package", m.Describe())
+		return ActionRejected, "This is not a software update"
 	}
-	return "", nil
+	return "", ""
 }
 
 // Preflight verifies a downloaded app or agent package and checks that it
@@ -391,12 +526,8 @@ func (im *Importer) Preflight(path string) (*mbu.Manifest, error) {
 	if err != nil {
 		return nil, err
 	}
-	unchanged, err := im.checkSoftware(pkg.Manifest, st)
-	if err != nil {
-		return nil, err
-	}
-	if unchanged != "" {
-		return nil, errors.New(unchanged)
+	if action, msg := im.checkSoftware(pkg.Manifest, st); action != "" {
+		return nil, errors.New(msg)
 	}
 	return pkg.Manifest, nil
 }
@@ -433,47 +564,20 @@ func (im *Importer) requeue(path, name string) Result {
 		dst := filepath.Join(inbox, fsutil.UniqueName(inbox, name))
 		if err := os.MkdirAll(inbox, 0o770); err == nil {
 			if err := os.Rename(path, dst); err != nil {
-				return Result{File: name, Action: ActionRejected, Message: "could not queue it behind the agent update: " + err.Error()}
+				return Result{File: name, Action: ActionRejected, Message: "Could not keep an update for after the agent restarts", Detail: err.Error()}
 			}
 		}
 	}
-	return Result{File: name, Action: ActionQueued, Message: "installs after the agent update restarts the agent"}
+	return Result{File: name, Action: ActionQueued, Message: "Installs once the new agent is running"}
 }
 
-func reject(name string, err error) Result {
-	return Result{File: name, Action: ActionRejected, Message: err.Error()}
-}
-
-func rejectAs(r Result, msg string) Result {
+// failed rejects r with a plain message, keeping err for the logs.
+func failed(r Result, msg string, err error) Result {
 	r.Action, r.Message = ActionRejected, msg
+	if err != nil {
+		r.Detail = err.Error()
+	}
 	return r
-}
-
-func shortID(id string) string {
-	if len(id) > 8 {
-		return id[:8]
-	}
-	return id
-}
-
-// summary is the one line the update screen shows under its outcome.
-func summary(b Batch) string {
-	var installed, rejected []string
-	for _, r := range b.Results {
-		switch r.Action {
-		case ActionInstalled, ActionStaged:
-			installed = append(installed, r.Message)
-		case ActionRejected:
-			rejected = append(rejected, r.File+": "+r.Message)
-		}
-	}
-	if len(rejected) > 0 {
-		return rejected[0]
-	}
-	if len(installed) > 0 {
-		return strings.Join(installed, " · ")
-	}
-	return "Nothing new to install"
 }
 
 // Busy reports whether an import is running right now.

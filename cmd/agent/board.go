@@ -14,6 +14,7 @@ import (
 
 	"github.com/coreos/go-systemd/v22/daemon"
 
+	"github.com/LensBridge/agent/internal/agentupdate"
 	"github.com/LensBridge/agent/internal/boardsync"
 	"github.com/LensBridge/agent/internal/cdp"
 	"github.com/LensBridge/agent/internal/clock"
@@ -24,6 +25,7 @@ import (
 	"github.com/LensBridge/agent/internal/keystore"
 	"github.com/LensBridge/agent/internal/kioskurl"
 	"github.com/LensBridge/agent/internal/localserver"
+	"github.com/LensBridge/agent/internal/notice"
 	"github.com/LensBridge/agent/internal/store"
 	"github.com/LensBridge/agent/internal/trust"
 	"github.com/LensBridge/agent/internal/updates"
@@ -52,14 +54,20 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 	hub := &events.Hub{}
 	cdpClient := cdp.New("")
 	screen := updatescreen.New(cdpClient, strings.TrimSuffix(localserver.BaseURL, "/"), logger)
+	var reporter *agentupdate.Reporter
 	imp := importer.New(importer.Deps{
 		Layout:       layout,
 		DeviceID:     cfg.DeviceID,
 		AgentVersion: version.Version,
 		Ring:         func() (*trust.Ring, error) { return trust.LoadRing(trust.DefaultPath) },
 		Screen:       screen,
+		AgentStaged:  func(n notice.Notice) { reporter.Staged(n) },
 		Events:       hub,
 		Logger:       logger,
+	})
+	reporter = agentupdate.New(agentupdate.Deps{
+		Layout: layout, Version: version.Version, Screen: screen,
+		Banner: hub.Notice, Resume: imp.AgentNotReplaced, Logger: logger,
 	})
 	keeper := clock.New(layout, logger)
 
@@ -126,9 +134,14 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 	_, _ = daemon.SdNotify(false, "STATUS=serving the board on "+localserver.ListenAddr)
 
 	logInstalled(logger, layout, cfg)
-	goRun(wg, func() { screen.Resume(ctx) })
 	goRun(wg, func() { watchKiosk(ctx, logger, cdpClient) })
-	goRun(wg, func() { imp.RunInbox(ctx) })
+	goRun(wg, func() {
+		// First say how an agent update that restarted us went: the rest of
+		// its batch may be waiting in the inbox, and belongs on the same
+		// screen.
+		reporter.Startup(ctx)
+		imp.RunInbox(ctx)
+	})
 	goRun(wg, func() { keeper.Run(ctx) })
 	goRun(wg, func() { sched.Run(ctx) })
 

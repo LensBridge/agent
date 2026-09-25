@@ -321,6 +321,28 @@ body {
    few hundred ms reads as one line updating rather than as flicker. */
 .caption.is-fading { opacity: 0; }
 
+/* ---- Outcome lines ------------------------------------------------------
+   What the update did, under the done headline: up to three short sentences
+   from the agent (internal/notice), "Board app 2.1.0", "The board already
+   has newer content". Unlike the working caption these are the last thing
+   the screen says, read once and from across a room, so they wrap instead of
+   truncating: the whole sentence matters more than a layout that never
+   moves, and the done state only arrives once. */
+.lines {
+  margin: 2.2vmin 0 0;
+  padding: 0;
+  list-style: none;
+  max-width: 62ch;
+  font-size: clamp(13px, 1.75vmin, 26px);
+  font-weight: 400;
+  line-height: 1.45;
+  letter-spacing: 0.01em;
+  color: rgba(255, 255, 255, 0.8);
+  text-wrap: balance;
+}
+.lines li + li { margin-top: 0.7vmin; }
+.lines:empty { display: none; }
+
 .warn {
   margin: 2.2vmin 0 0;
   font-size: clamp(10px, 1.3vmin, 19px);
@@ -364,6 +386,24 @@ body {
     0 0 24px rgba(248, 225, 93, 0.35),
     0 2px 4px rgba(0, 0, 0, 0.35);
 }
+
+/* A problem gets the smiley's box, glow and gold, but a ring with a mark
+   instead of a face: clear from across the room, and not alarming in a
+   prayer space. Drawn, like the throbber, so no font can fail it. */
+.alert {
+  display: none;
+  width: clamp(110px, 16vmin, 230px);
+  height: clamp(110px, 16vmin, 230px);
+  overflow: visible;
+  filter:
+    drop-shadow(0 0 10px rgba(248, 225, 93, 0.45))
+    drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));
+}
+.alert .ring { fill: none; stroke: var(--gold); stroke-width: 4; }
+.alert .bar  { stroke: var(--gold); stroke-width: 9; stroke-linecap: round; }
+.alert .dot  { fill: var(--gold); }
+.screen[data-tone="problem"] .smiley { display: none; }
+.screen[data-tone="problem"] .alert  { display: block; }
 
 /* ---- Reduced motion -----------------------------------------------------
    The ground stops, but the arc does not: a throbber that has stopped turning
@@ -419,9 +459,14 @@ body {
 
     <div class="state state--done" role="status" aria-live="polite">
       <p class="smiley" aria-hidden="true">:)</p>
+      <svg class="alert" viewBox="0 0 200 200" aria-hidden="true">
+        <circle class="ring" cx="100" cy="100" r="76" />
+        <path class="bar" d="M100 60 V112" />
+        <circle class="dot" cx="100" cy="140" r="6" />
+      </svg>
       <h1 class="headline">Update complete</h1>
-      <p class="caption"></p>
-      <p class="warn">Restarting MusallahBoard in 5 seconds</p>
+      <ul class="lines"></ul>
+      <p class="warn">Returning to MusallahBoard in 6 seconds</p>
     </div>
 
   </main>
@@ -439,8 +484,13 @@ body {
 
      mbUpdate.complete()     → ":)  Update complete", counting 5 → 0
      mbUpdate.complete(10)   → the same, from ten
-     mbUpdate.complete(0)    → no countdown, straight to "restarting now"
-     mbUpdate.complete({ seconds: 5, headline: "…", message: "…", caption: "…" })
+     mbUpdate.complete(0)    → no countdown, straight to "… now"
+     mbUpdate.complete({ tone: "ok" | "neutral" | "problem", headline: "…",
+                         lines: ["Board app 2.1.0", "…"], seconds: 6,
+                         message: "Returning to MusallahBoard" })
+                             → tone "problem" swaps the smiley for a ring
+                               and mark; lines (at most three, the agent
+                               folds the rest) wrap under the headline
      mbUpdate.working()      → back to the throbber
      mbUpdate.state          → "working" | "complete"
 
@@ -448,10 +498,9 @@ body {
    stacking a second interval on the first, which matters when the daemon
    retries an evaluate it never got the reply to.
 
-   caption() writes to both states at once, so the line cannot disagree with
-   itself across the handover and the daemon never has to care which state is
-   up. complete() clears it unless given one, on the grounds that "Installing
-   chromium-browser" under "Update complete" is a lie.
+   caption() belongs to the working state. complete() clears it, on the
+   grounds that "Installing board app 2.1.0" is stale once the update is done,
+   and the done state says what happened in its own lines instead.
 
    caption() returns the new text immediately, but the DOM catches up at the
    bottom of a 140ms fade — read the return value, not the element, if the
@@ -463,6 +512,7 @@ body {
 window.mbUpdate = (function () {
   var screenEl = document.querySelector('.screen');
   var title    = document.querySelector('.state--done .headline');
+  var linesEl  = document.querySelector('.state--done .lines');
   var line     = document.querySelector('.state--done .warn');
   var captions = [].slice.call(document.querySelectorAll('.caption'));
   var ticker   = null;
@@ -503,11 +553,18 @@ window.mbUpdate = (function () {
     if (typeof opts === 'number') { opts = { seconds: opts }; }
     opts = opts || {};
 
-    var message = opts.message || 'Restarting MusallahBoard';
+    var message = opts.message || 'Returning to MusallahBoard';
     var left = opts.seconds == null ? 5 : Math.max(0, Math.floor(opts.seconds));
 
-    if (opts.headline) { title.textContent = opts.headline; }
-    caption(opts.caption == null ? '' : opts.caption);
+    title.textContent = opts.headline || 'Update complete';
+    screenEl.dataset.tone = opts.tone || 'ok';
+    linesEl.textContent = '';
+    (opts.lines || []).slice(0, 3).forEach(function (text) {
+      var li = document.createElement('li');
+      li.textContent = String(text);
+      linesEl.appendChild(li);
+    });
+    caption('');
 
     clearInterval(ticker);
     ticker = null;

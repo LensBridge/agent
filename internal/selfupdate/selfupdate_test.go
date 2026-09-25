@@ -150,6 +150,17 @@ func TestApplyRollsBack(t *testing.T) {
 	h := newHarness(t, true)
 	h.stage(t, "0.4.0", "arm64", releaseKey)
 	h.healthy = errors.New("it reports version 0.3.0")
+	// The previous agent reads the outcome when it starts, so it must be
+	// written before the second restart.
+	run := h.u.Run
+	outcomeAtRestart := []bool{}
+	h.u.Run = func(ctx context.Context, name string, args ...string) (string, error) {
+		if name == "systemctl" {
+			_, err := os.Stat(h.u.Layout.AgentLastUpdate())
+			outcomeAtRestart = append(outcomeAtRestart, err == nil)
+		}
+		return run(ctx, name, args...)
+	}
 	out, err := h.u.Apply(context.Background())
 	if err == nil || out.Status != StatusRolledBack {
 		t.Fatalf("outcome = %+v, err = %v", out, err)
@@ -169,6 +180,9 @@ func TestApplyRollsBack(t *testing.T) {
 	}
 	if restarts != 2 {
 		t.Errorf("restarts = %d, want 2 (%q)", restarts, h.cmds)
+	}
+	if len(outcomeAtRestart) != 2 || !outcomeAtRestart[1] {
+		t.Errorf("outcome written before the previous agent restarted: %v", outcomeAtRestart)
 	}
 	if o := lastUpdate(t, h); o.Status != StatusRolledBack || !strings.Contains(o.Message, "rolled back") {
 		t.Errorf("last-update = %+v", o)

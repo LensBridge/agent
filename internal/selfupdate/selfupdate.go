@@ -149,6 +149,13 @@ func (u *Updater) Apply(ctx context.Context) (Outcome, error) {
 	if werr := u.writeOutcome(out); werr != nil {
 		u.Logf("could not write %s: %v", u.Layout.AgentLastUpdate(), werr)
 	}
+	// Only now start the previous agent again: it reads the outcome when it
+	// starts, to tell the people at the board what happened.
+	if out.Status == StatusRolledBack {
+		if o, rerr := u.Run(ctx, "systemctl", "restart", AgentUnit); rerr != nil {
+			u.Logf("restarting the previous agent failed: %v %s", rerr, firstLine(o))
+		}
+	}
 	return out, err
 }
 
@@ -234,8 +241,9 @@ func (u *Updater) apply(ctx context.Context, out *Outcome) error {
 	return nil
 }
 
-// rollback restores the previous agent, restarts it and records the version
-// as rejected so the release channel or a USB stick cannot loop on it.
+// rollback restores the previous agent and records the version as rejected
+// so the release channel or a USB stick cannot loop on it. Apply restarts
+// the previous agent once the outcome is written.
 func (u *Updater) rollback(ctx context.Context, version, reason string) error {
 	u.Logf("%s; rolling back to %s", reason, u.CurrentVersion)
 	msg := reason + "; rolled back to " + u.CurrentVersion
@@ -249,9 +257,6 @@ func (u *Updater) rollback(ctx context.Context, version, reason string) error {
 		return nil
 	}); err != nil {
 		msg += fmt.Sprintf(" (could not record %s as rejected: %v)", version, err)
-	}
-	if o, err := u.Run(ctx, "systemctl", "restart", AgentUnit); err != nil {
-		msg += fmt.Sprintf(" (restarting the previous agent failed: %v %s)", err, firstLine(o))
 	}
 	return errors.New(msg)
 }
@@ -275,6 +280,19 @@ func (u *Updater) extract(pkg *mbu.Package, binary string) error {
 	}
 	// Executable by everyone only once it is complete and verified.
 	return os.Chmod(u.NewBinary, 0o755)
+}
+
+// ReadOutcome is the last outcome recorded in l, or nil if there is none.
+func ReadOutcome(l store.Layout) *Outcome {
+	raw, err := os.ReadFile(l.AgentLastUpdate())
+	if err != nil {
+		return nil
+	}
+	var o Outcome
+	if json.Unmarshal(raw, &o) != nil || o.At == "" {
+		return nil
+	}
+	return &o
 }
 
 func (u *Updater) writeOutcome(o Outcome) error {

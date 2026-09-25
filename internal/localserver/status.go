@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/LensBridge/agent/internal/importer"
+	"github.com/LensBridge/agent/internal/selfupdate"
 	"github.com/LensBridge/agent/internal/store"
 	"github.com/LensBridge/agent/internal/updates"
 )
@@ -23,6 +24,8 @@ type Status struct {
 	StaleDays     *int         `json:"staleDays"`
 	Sync          any          `json:"sync"`
 	Update        UpdateInfo   `json:"update"`
+	// LastAgentUpdate is the root updater's last outcome, if any.
+	LastAgentUpdate *selfupdate.Outcome `json:"lastAgentUpdate"`
 	// Updates is the software waiting for its install window; only the
 	// daemon knows it.
 	Updates *updates.Info `json:"updates,omitempty"`
@@ -55,7 +58,8 @@ type UpdateInfo struct {
 // BuildStatus reads the installed state. It never fails: a board must always
 // be able to say what it has, including that something is broken.
 func BuildStatus(l store.Layout, deviceID, agentVersion string, now time.Time) Status {
-	s := Status{LocalAPI: importer.LocalAPIVersion, AgentVersion: agentVersion, DeviceID: deviceID}
+	s := Status{LocalAPI: importer.LocalAPIVersion, AgentVersion: agentVersion, DeviceID: deviceID,
+		LastAgentUpdate: selfupdate.ReadOutcome(l)}
 	if a, err := l.CurrentApp(); err == nil {
 		s.App = &AppInfo{Version: a.Manifest.Version}
 	}

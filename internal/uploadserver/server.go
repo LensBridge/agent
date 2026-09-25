@@ -32,6 +32,7 @@ import (
 	"github.com/LensBridge/agent/internal/importer"
 	"github.com/LensBridge/agent/internal/localserver"
 	"github.com/LensBridge/agent/internal/mbu"
+	"github.com/LensBridge/agent/internal/notice"
 	"github.com/LensBridge/agent/internal/store"
 )
 
@@ -167,8 +168,10 @@ func (s *Server) status() Status {
 // ImportResponse is POST /api/import's body.
 type ImportResponse struct {
 	Results []importer.Result `json:"results"`
-	Clock   *ClockReport      `json:"clock,omitempty"`
-	Message string            `json:"message,omitempty"`
+	// Notice is what the board showed about the upload.
+	Notice  *notice.Notice `json:"notice,omitempty"`
+	Clock   *ClockReport   `json:"clock,omitempty"`
+	Message string         `json:"message,omitempty"`
 }
 
 var safeNameRE = regexp.MustCompile(`[^A-Za-z0-9._-]`)
@@ -251,7 +254,7 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, ImportResponse{Message: "the board is already installing an update; try again in a minute"})
 		return
 	}
-	resp := ImportResponse{Results: b.Results}
+	resp := ImportResponse{Results: b.Results, Notice: &b.Notice}
 	if v := r.Header.Get("X-MB-Client-Time"); v != "" && s.d.ApplyClientTime != nil {
 		if unix, err := strconv.ParseInt(v, 10, 64); err == nil {
 			unix += int64(s.d.Now().Sub(received) / time.Second)

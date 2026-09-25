@@ -71,11 +71,10 @@ func printUpdateOutcome(out updates.Outcome) {
 	}
 	rejected := false
 	for _, r := range out.Results {
-		mark := "OK "
 		if r.Action == importer.ActionRejected {
-			mark, rejected = "NO ", true
+			rejected = true
 		}
-		fmt.Printf("  %s %s: %s\n", mark, r.Action, r.Message)
+		printResult(r)
 	}
 	if rejected {
 		os.Exit(1)

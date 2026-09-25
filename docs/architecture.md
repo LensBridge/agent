@@ -350,6 +350,9 @@ ticker while `available` is not empty.
   installed. The page reloads itself.
 - `event: updates` with the `updates` status object whenever an update starts
   or stops waiting, or starts installing. The page re-reads the status.
+- `event: notice` with `{"tone", "headline", "lines", "seconds"}`: an update
+  outcome to show as a banner over the board for `seconds` (0: until the next
+  notice replaces it). See section 8.
 - A comment line (`: ping`) every 25 s keeps the connection alive.
 
 `EventSource` gives up for good on a non-200 answer (for example while the
@@ -370,8 +373,9 @@ Per package:
    ("for another board"), not as a failure: one USB stick can serve many
    boards.
 2. **Decide** against `state.json`: newer -> install; equal -> `unchanged`;
-   older -> `rejected` ("older than what is installed"). An agent version in
-   `agentVersionsRejected` is `rejected` ("failed to start last time").
+   older -> `outdated` ("The board already has newer content"). Neither is a
+   failure: an old USB stick at a board that synced since is the normal case.
+   An agent version in `agentVersionsRejected` is `rejected`.
 3. **Install**:
    - content: move media into the store (verified hash, fsync), write the
      bundle directory, fsync, rename into `bundles/`, swap `current`, record the
@@ -387,27 +391,45 @@ A batch processes `agent` packages first, then `app`, then `content`. When an
 agent package is staged, the rest of the batch stays in the inbox and is
 processed by the new agent after the restart.
 
-**Update screen.** For `usb`, `upload` and `cli` batches containing at least one
-package that is not skipped, and for any app or agent install from any source,
-the daemon navigates the kiosk (CDP) to `/_mb/updating` and drives it through
-`window.mbUpdate` (`caption(text)`, `complete({seconds, headline, message, caption})`),
-then navigates back to `/` after the countdown. Each switch is a dip to black:
-before navigating, the daemon fades the page on screen to black (a veil
-injected over CDP, 600 ms), and both the update screen and the board app fade
-in from black when they load. Background content sync from
-the backend is silent: an admin editing a poster must not put "Working on
-updates" on every screen. On failure the screen shows
-`complete({headline: "Update not installed", message: "Returning to MusallahBoard", caption: <reason>})`.
+**What the people at the board see.** Every batch ends in one *notice*
+(`internal/notice`): a tone (`ok`, `neutral`, `problem`), a headline and at
+most three plain-language lines, more folded into "and N more". Lines never
+name files; technical reasons go to the logs and the result's `detail`.
+
+| Outcome | Headline | Lines |
+|---|---|---|
+| something installed | "Update complete" | "Board app 2.1.0", "New content, through Wednesday, October 7" |
+| installed, something refused | "Some updates were not installed" | the refusals, then what installed |
+| nothing installed, something refused | "Update not installed" | "An update is not signed for this board" |
+| nothing needed doing | "Already up to date" | "The board already has newer content" |
+| only other boards' content | "Nothing here is for this board" | |
+
+*Update screen or banner.* The update screen (`/_mb/updating`) goes up only
+when something is about to be installed: content, app or agent from `usb`,
+`upload` or `cli`, and app or agent from `sync`. The daemon navigates the
+kiosk there over CDP, drives it through `window.mbUpdate`
+(`caption(text)` while working, `complete({tone, headline, lines, seconds,
+message})` at the end) and navigates back to `/` after the countdown. Each
+switch is a dip to black: the daemon fades the page on screen to black (a
+veil injected over CDP, 600 ms) and both pages fade in from black on load.
+
+Everything else a person caused is a *banner* over the running board, sent
+as the `notice` event on `/api/local/events` and drawn by the board app: a
+progress banner as soon as a batch starts ("Checking updates · From the USB
+stick"), then its outcome when nothing was installed. Background content sync
+is silent either way: an admin editing a poster must not interrupt every
+screen.
 
 Results are JSON objects per package:
 
 ```json
 { "file": "musallahboard-app-2.1.0.mbu", "type": "app", "version": "2.1.0",
-  "action": "installed", "message": "Installed board app 2.1.0" }
+  "action": "installed", "message": "Board app 2.1.0" }
 ```
 
-`action` is one of `installed`, `unchanged`, `staged` (agent, pending restart),
-`skipped`, `rejected`.
+`action` is one of `installed`, `staged` (agent, pending restart),
+`unchanged`, `outdated`, `skipped` (another board's content), `rejected`
+(with `detail`), `queued` (behind a staged agent).
 
 ## 9. Transports
 
@@ -514,7 +536,7 @@ When `service_port` is on, the daemon listens on `10.77.0.1:80` (bound with
 |---|---|
 | `GET /` | A small self-contained upload page: pick or drop `.mbu` files, see progress and per-package results, see board status and clock drift. |
 | `GET /api/status` | `{"deviceId", "agentVersion", "app", "content", "today", "daysRemaining", "staleDays", "clock": {"unix", "timezone"}, "rtc": bool, "update": {"active": bool}}` |
-| `POST /api/import` | `multipart/form-data`, one or more `package` parts (each at most 512 MiB, total at most 1 GiB). Optional header `X-MB-Client-Time: <unix seconds>`. Each part is streamed to the inbox, then processed as one batch (source `upload`). Response `200 {"results": [...], "clock": {"driftSeconds": n, "adjusted": bool, "note": "…"}}`. Only one import runs at a time; a second gets `409`. |
+| `POST /api/import` | `multipart/form-data`, one or more `package` parts (each at most 512 MiB, total at most 1 GiB). Optional header `X-MB-Client-Time: <unix seconds>`. Each part is streamed to the inbox, then processed as one batch (source `upload`). Response `200 {"results": [...], "notice": {...}, "clock": {"driftSeconds": n, "adjusted": bool, "note": "…"}}`. Only one import runs at a time; a second gets `409`. |
 
 Errors are `{"message": "..."}` with a 4xx status. `driftSeconds` is the
 board's clock minus the uploader's, before any correction (positive: the board
@@ -552,9 +574,15 @@ folder on it, and plug it into the board.
   with `ro,nosuid,nodev,noexec,noatime`; copies at most 16 regular files (no
   symlinks) named `*.mbu`, each at most 512 MiB, into the inbox; unmounts; then
   waits up to 15 minutes for the daemon's results and logs them.
-- The daemon shows the update screen while it works; the stick can be removed
-  once the screen says "Update complete".
-- `usb_import = false` in `agent.toml` disables it (the helper exits at once).
+- The helper tells the board what it is doing through banners: it drops a
+  notice in the inbox (`inbox/usb-<dev>.notice.json`) that the daemon shows.
+  "Reading USB stick" as soon as the stick is seen; then either the batch's
+  own outcome (section 8), or why there is none: "Can't read this USB stick"
+  (no or unsupported filesystem, mount failure, copy failure), "No updates on
+  this USB stick", or "USB updates are turned off". The stick can be removed
+  as soon as it is unmounted, before the board has finished installing.
+- `usb_import = false` in `agent.toml` disables it (the helper says so on the
+  board and exits).
 - The helper's sandbox (`ProtectKernelModules=yes`) cannot load filesystem
   drivers, so `exfat` and `ntfs3` are loaded at boot from
   `/etc/modules-load.d/musallahboard.conf`. NTFS always mounts with `ntfs3`.
@@ -626,9 +654,27 @@ route and cost nothing, and the moment it gets a network it starts syncing.
    must report the new `agentVersion`. Otherwise the updater restores
    `agent.prev`, restarts the service, and adds the version to
    `agentVersionsRejected`, so a broken release cannot loop.
-5. The outcome is written to `agent/last-update.json`. The new daemon, finding
-   the kiosk on the update screen at startup, completes it and returns to the
-   board.
+5. The outcome is written to `agent/last-update.json`, and only then, after a
+   rollback, is the previous agent restarted, so it can read it.
+
+Telling the people at the board (`internal/agentupdate`): the agent that
+staged the package leaves the screen on "Restarting MusallahBoard" and its
+batch's notice in `agent/pending-notice.json`. Then:
+
+- **success**: the new agent shows that notice ("Update complete · Agent
+  0.3.0 · Board app 2.1.0") at startup;
+- **rollback**: the previous agent, restarted, finds an unseen `rolled-back`
+  outcome and shows "Update not installed · Agent 0.3.0 did not start
+  correctly, so the board went back to 0.2.1", with the batch's other lines;
+- **refusal**: the updater never restarts anything, so the staging agent
+  watches `last-update.json` for up to 3 minutes and shows "Agent 0.3.0 could
+  not be installed on this board" itself, then resumes its inbox.
+
+Each outcome is shown once (`agentUpdateSeen` in `state.json`), on the update
+screen if the kiosk is still on it, else as a banner. If the batch had more
+behind the agent (queued in the inbox), the screen is held with the agent's
+outcome until that finishes, so the whole batch is one screen. The last
+outcome is also `lastAgentUpdate` in `/api/local/status`.
 
 ## 13. Service port (eth0)
 

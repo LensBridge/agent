@@ -9,6 +9,11 @@
 // It verifies nothing itself. The daemon verifies every package exactly as it
 // would from any other source, and the helper just waits for its results so
 // they end up in the journal next to the insertion.
+//
+// The person at the board hears about the stick through banners: the helper
+// drops a notice (Announce) in the inbox, which the daemon shows over the
+// running board. "Reading USB stick" as soon as the stick is seen, then
+// either the daemon's own outcome for the packages, or why there are none.
 package usbimport
 
 import (
@@ -25,8 +30,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LensBridge/agent/internal/fsutil"
 	"github.com/LensBridge/agent/internal/importer"
 	"github.com/LensBridge/agent/internal/mbu"
+	"github.com/LensBridge/agent/internal/notice"
 	"github.com/LensBridge/agent/internal/store"
 )
 
@@ -92,25 +99,34 @@ func (h *Helper) Run(ctx context.Context, name string) error {
 	if !NameRE.MatchString(name) {
 		return fmt.Errorf("%q is not a USB disk name (want sdX or sdXN)", name)
 	}
+	h.Announce(name, notice.New(notice.Progress, "Reading USB stick"))
 	dev := filepath.Join(h.DevDir, name)
 	fsType, err := h.Exec(ctx, "blkid", "-o", "value", "-s", "TYPE", dev)
 	fsType = strings.TrimSpace(fsType)
 	if err != nil || fsType == "" {
 		h.Logf("%s: no filesystem found (%v); ignoring it", name, err)
+		h.Announce(name, notice.New(notice.Problem, "Can't read this USB stick",
+			"Format it as FAT32 or exFAT, then copy the updates onto it again"))
 		return ErrUnsupported
 	}
 	mountType, ok := h.mountType(fsType)
 	if !ok {
 		h.Logf("%s: filesystem %q is not accepted (use FAT32, exFAT, NTFS or ext4); ignoring it", name, fsType)
+		h.Announce(name, notice.New(notice.Problem, "Can't read this USB stick",
+			"It is formatted as "+strings.ToUpper(fsType)+", which the board does not read",
+			"Format it as FAT32 or exFAT, then copy the updates onto it again"))
 		return ErrUnsupported
 	}
 
 	mp := filepath.Join(h.MountRoot, name)
 	if err := os.MkdirAll(mp, 0o700); err != nil {
+		h.Announce(name, notice.New(notice.Problem, "Can't read this USB stick", "The board could not open it"))
 		return fmt.Errorf("cannot create mount point %s: %w", mp, err)
 	}
 	if out, err := h.Exec(ctx, "mount", "-t", mountType, "-o", MountOptions, dev, mp); err != nil {
 		os.Remove(mp)
+		h.Announce(name, notice.New(notice.Problem, "Can't read this USB stick",
+			"The board could not open it. Try formatting it as FAT32 or exFAT"))
 		return fmt.Errorf("could not mount %s (%s): %v %s", name, fsType, err, strings.TrimSpace(out))
 	}
 	h.Logf("%s: mounted read-only (%s)", name, fsType)
@@ -129,7 +145,14 @@ func (h *Helper) Run(ctx context.Context, name string) error {
 	// is done, whatever the daemon then makes of it.
 	h.unmount(ctx, name, mp)
 
-	if len(queued) == 0 {
+	switch {
+	case len(files) == 0:
+		h.Announce(name, notice.New(notice.Neutral, "No updates on this USB stick",
+			"Put the .mbu files at the top of the stick, or in a "+FolderName+" folder"))
+		return nil
+	case len(queued) == 0:
+		h.Announce(name, notice.New(notice.Problem, "Can't read this USB stick",
+			"Copying the updates off it failed. Try copying them again, or another stick"))
 		return nil
 	}
 	h.Logf("%s: copied %d package(s); waiting for the board to check and install them", name, len(queued))
@@ -163,7 +186,30 @@ func (h *Helper) unmount(ctx context.Context, name, mp string) {
 		}
 	}
 	os.Remove(mp)
-	h.Logf("%s: unmounted; the stick can be removed once the screen says the update is complete", name)
+	h.Logf("%s: unmounted; the stick can be removed", name)
+}
+
+// Announce puts n on the board as a banner, through the daemon's inbox
+// (inbox/usb-<dev>.notice.json). A later notice for the same device replaces
+// an earlier one the daemon has not shown yet. Best effort: a stick is read
+// whether or not anyone is told.
+func (h *Helper) Announce(dev string, n notice.Notice) {
+	inbox := h.Layout.Inbox()
+	raw, err := json.Marshal(n)
+	if err == nil {
+		err = os.MkdirAll(inbox, 0o770)
+	}
+	path := filepath.Join(inbox, "usb-"+dev+importer.NoticeSuffix)
+	if err == nil {
+		err = fsutil.WriteAtomic(path, raw, 0o644)
+	}
+	if err != nil {
+		h.Logf("%s: could not tell the board: %v", dev, err)
+		return
+	}
+	if h.Chown != nil {
+		h.Chown(path, inbox)
+	}
 }
 
 // Candidate is a package file found on the stick.

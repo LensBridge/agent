@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/LensBridge/agent/internal/mbu"
+	"github.com/LensBridge/agent/internal/notice"
 	"github.com/LensBridge/agent/internal/store"
 	"github.com/LensBridge/agent/internal/trust"
 )
@@ -35,16 +37,28 @@ func imgPath() string {
 type fakeEvents struct {
 	content []int64
 	app     []string
+	notices []notice.Notice
 }
 
-func (f *fakeEvents) ContentChanged(s int64) { f.content = append(f.content, s) }
-func (f *fakeEvents) AppChanged(v string)    { f.app = append(f.app, v) }
+func (f *fakeEvents) ContentChanged(s int64)  { f.content = append(f.content, s) }
+func (f *fakeEvents) AppChanged(v string)     { f.app = append(f.app, v) }
+func (f *fakeEvents) Notice(n notice.Notice)  { f.notices = append(f.notices, n) }
+func (f *fakeEvents) last() (n notice.Notice) { return f.notices[len(f.notices)-1] }
 
-type fakeScreen struct{ begun, finished int }
+type fakeScreen struct {
+	begun, restarting int
+	active            bool
+	finished          []notice.Notice
+}
 
-func (f *fakeScreen) Begin(context.Context)                      { f.begun++ }
-func (f *fakeScreen) Caption(context.Context, string)            {}
-func (f *fakeScreen) Finish(context.Context, bool, string, bool) { f.finished++ }
+func (f *fakeScreen) Active() bool                    { return f.active }
+func (f *fakeScreen) Begin(context.Context)           { f.begun++; f.active = true }
+func (f *fakeScreen) Caption(context.Context, string) {}
+func (f *fakeScreen) Restarting(context.Context)      { f.restarting++ }
+func (f *fakeScreen) Finish(_ context.Context, n notice.Notice) {
+	f.finished = append(f.finished, n)
+	f.active = false
+}
 
 func setup(t *testing.T) (*Importer, store.Layout, *fakeEvents, *fakeScreen) {
 	t.Helper()
@@ -121,7 +135,7 @@ func TestContentLifecycle(t *testing.T) {
 	if r := one(t, im.Import(ctx, SourceUSB, []string{content(t, 100, dev, poster, false)})); r.Action != ActionUnchanged {
 		t.Fatalf("same sequence: %+v", r)
 	}
-	if r := one(t, im.Import(ctx, SourceUSB, []string{content(t, 50, dev, poster, false)})); r.Action != ActionRejected {
+	if r := one(t, im.Import(ctx, SourceUSB, []string{content(t, 50, dev, poster, false)})); r.Action != ActionOutdated {
 		t.Fatalf("older sequence: %+v", r)
 	}
 	// Delta: media omitted, satisfied from the store.
@@ -134,7 +148,7 @@ func TestContentLifecycle(t *testing.T) {
 	}
 	// Rollback stays closed even if the bundles are deleted.
 	os.RemoveAll(l.BundlesDir())
-	if r := one(t, im.Import(ctx, SourceUSB, []string{content(t, 150, dev, poster, false)})); r.Action != ActionRejected {
+	if r := one(t, im.Import(ctx, SourceUSB, []string{content(t, 150, dev, poster, false)})); r.Action != ActionOutdated {
 		t.Fatalf("rollback after deleting bundles: %+v", r)
 	}
 }
@@ -152,7 +166,7 @@ func TestPosterMustBeLocalMedia(t *testing.T) {
 	im, _, _, _ := setup(t)
 	r := one(t, im.Import(context.Background(), SourceUSB,
 		[]string{content(t, 100, dev, "https://evil.example/x.png", false)}))
-	if r.Action != ActionRejected || !strings.Contains(r.Message, "posterUrl") {
+	if r.Action != ActionRejected || !strings.Contains(r.Detail, "posterUrl") || strings.Contains(r.Message, "posterUrl") {
 		t.Fatalf("remote posterUrl: %+v", r)
 	}
 }
@@ -169,7 +183,7 @@ func TestAppRules(t *testing.T) {
 	if len(ev.app) != 1 {
 		t.Fatalf("app events %v", ev.app)
 	}
-	if r := one(t, im.Import(ctx, SourceUpload, []string{app(t, "2.0.9", 2)})); r.Action != ActionRejected {
+	if r := one(t, im.Import(ctx, SourceUpload, []string{app(t, "2.0.9", 2)})); r.Action != ActionOutdated {
 		t.Fatalf("older app: %+v", r)
 	}
 	if r := one(t, im.Import(ctx, SourceUpload, []string{app(t, "3.0.0", LocalAPIVersion+1)})); r.Action != ActionRejected ||
@@ -186,11 +200,13 @@ func TestAppRules(t *testing.T) {
 
 func TestAgentStagingRequeuesTheRest(t *testing.T) {
 	im, l, _, sc := setup(t)
+	var staged *notice.Notice
+	im.d.AgentStaged = func(n notice.Notice) { staged = &n }
 	ctx := context.Background()
 	if r := one(t, im.Import(ctx, SourceUpload, []string{agent(t, "0.3.0", otherArch())})); r.Action != ActionRejected {
 		t.Fatalf("wrong arch: %+v", r)
 	}
-	if r := one(t, im.Import(ctx, SourceUpload, []string{agent(t, "0.1.0", runtime.GOARCH)})); r.Action != ActionRejected {
+	if r := one(t, im.Import(ctx, SourceUpload, []string{agent(t, "0.1.0", runtime.GOARCH)})); r.Action != ActionOutdated {
 		t.Fatalf("older agent: %+v", r)
 	}
 	// Content listed first must still wait for the agent: agents go first.
@@ -204,8 +220,100 @@ func TestAgentStagingRequeuesTheRest(t *testing.T) {
 	if files, _ := filepath.Glob(filepath.Join(l.Inbox(), "*.mbu")); len(files) != 1 {
 		t.Fatalf("requeued files = %v", files)
 	}
-	if sc.finished == 0 {
-		t.Fatal("screen not finished")
+	// The new agent finishes the screen; this one only says it restarts.
+	if sc.restarting != 1 || len(sc.finished) != 0 {
+		t.Fatalf("restarting %d, finished %+v", sc.restarting, sc.finished)
+	}
+	if staged == nil || staged.Tone != notice.OK || staged.Lines[0] != "Agent 0.3.0" {
+		t.Fatalf("notice handed to the next agent: %+v", staged)
+	}
+}
+
+// Nothing to install: no update screen, a banner instead.
+func TestNothingNewIsABanner(t *testing.T) {
+	im, _, ev, sc := setup(t)
+	ctx := context.Background()
+	poster := "/" + imgPath()
+	one(t, im.Import(ctx, SourceSync, []string{content(t, 200, dev, poster, false)}))
+	ev.notices = nil
+
+	one(t, im.Import(ctx, SourceUSB, []string{content(t, 100, dev, poster, false)}))
+	if sc.begun != 0 {
+		t.Fatal("the update screen went up for nothing")
+	}
+	if len(ev.notices) != 2 || ev.notices[0].Tone != notice.Progress {
+		t.Fatalf("banners = %+v", ev.notices)
+	}
+	if n := ev.last(); n.Tone != notice.Neutral || n.Headline != "Already up to date" ||
+		n.Lines[0] != "The board already has newer content" {
+		t.Fatalf("banner = %+v", n)
+	}
+
+	// A package that does not verify: a problem banner, still no screen.
+	p := build(t, mbu.Manifest{Type: mbu.TypeApp, Version: "9.0.0", App: &mbu.AppInfo{LocalAPI: 2}},
+		[]mbu.Source{{Path: "index.html", Data: []byte("x")}}, contentKey)
+	one(t, im.Import(ctx, SourceUpload, []string{p}))
+	if n := ev.last(); sc.begun != 0 || n.Tone != notice.Problem || n.Headline != "Update not installed" ||
+		n.Lines[0] != "An update is not signed for this board" {
+		t.Fatalf("banner = %+v, screen begun %d", n, sc.begun)
+	}
+}
+
+func TestInstallFinishesTheScreenInPlainWords(t *testing.T) {
+	im, _, ev, sc := setup(t)
+	one(t, im.Import(context.Background(), SourceUSB, []string{content(t, 100, dev, "/"+imgPath(), false)}))
+	if sc.begun != 1 || len(sc.finished) != 1 {
+		t.Fatalf("screen begun %d, finished %+v", sc.begun, sc.finished)
+	}
+	n := sc.finished[0]
+	if n.Tone != notice.OK || n.Headline != "Update complete" || len(n.Lines) != 1 ||
+		!strings.HasPrefix(n.Lines[0], "New content, through ") || strings.Contains(n.Lines[0], ".mbu") {
+		t.Fatalf("outcome = %+v", n)
+	}
+	if ev.last().Tone != notice.Progress {
+		t.Fatalf("an outcome banner was shown as well as the screen: %+v", ev.notices)
+	}
+}
+
+func TestSummarize(t *testing.T) {
+	r := func(action, msg string) Result { return Result{Action: action, Message: msg} }
+	cases := []struct {
+		name     string
+		results  []Result
+		tone     notice.Tone
+		headline string
+		lines    []string
+	}{
+		{"installed", []Result{r(ActionInstalled, "Board app 2.1.0"), r(ActionOutdated, "old")},
+			notice.OK, "Update complete", []string{"Board app 2.1.0"}},
+		{"partial", []Result{r(ActionInstalled, "Board app 2.1.0"), r(ActionRejected, "bad")},
+			notice.Problem, "Some updates were not installed", []string{"bad", "Board app 2.1.0"}},
+		{"failed", []Result{r(ActionRejected, "a"), r(ActionRejected, "b"), r(ActionRejected, "c"), r(ActionRejected, "d")},
+			notice.Problem, "Update not installed", []string{"a", "b", "and 2 more"}},
+		{"up to date", []Result{r(ActionUnchanged, "same"), r(ActionOutdated, "older"), r(ActionSkipped, "x")},
+			notice.Neutral, "Already up to date", []string{"same", "older"}},
+		{"foreign", []Result{r(ActionSkipped, "x"), r(ActionSkipped, "y")},
+			notice.Neutral, "Nothing here is for this board", []string{"These updates are for other MusallahBoards"}},
+	}
+	for _, tc := range cases {
+		n := Summarize(Batch{Results: tc.results})
+		if n.Tone != tc.tone || n.Headline != tc.headline || strings.Join(n.Lines, "|") != strings.Join(tc.lines, "|") {
+			t.Errorf("%s: %+v", tc.name, n)
+		}
+	}
+}
+
+func TestUSBNoticeIsShown(t *testing.T) {
+	im, l, ev, _ := setup(t)
+	os.MkdirAll(l.Inbox(), 0o770)
+	raw, _ := json.Marshal(notice.New(notice.Neutral, "No updates on this USB stick", "Put the .mbu files at the top"))
+	os.WriteFile(filepath.Join(l.Inbox(), "usb-sda1"+NoticeSuffix), raw, 0o644)
+	im.showNotices(l.Inbox())
+	if len(ev.notices) != 1 || ev.notices[0].Headline != "No updates on this USB stick" {
+		t.Fatalf("notices = %+v", ev.notices)
+	}
+	if _, err := os.Stat(filepath.Join(l.Inbox(), "usb-sda1"+NoticeSuffix)); err == nil {
+		t.Fatal("notice file left behind")
 	}
 }
 

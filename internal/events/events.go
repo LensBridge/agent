@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/LensBridge/agent/internal/notice"
 )
 
 // Event is one SSE message.
@@ -35,6 +37,11 @@ func (h *Hub) ContentChanged(sequence int64) {
 // AppChanged implements importer.Events.
 func (h *Hub) AppChanged(version string) {
 	h.Publish(Event{Name: "app", Data: map[string]string{"version": version}})
+}
+
+// Notice implements importer.Events: a banner for the running board.
+func (h *Hub) Notice(n notice.Notice) {
+	h.Publish(Event{Name: "notice", Data: n})
 }
 
 // UpdatesChanged announces a change in the software waiting to install
