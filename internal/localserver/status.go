@@ -31,6 +31,10 @@ type Status struct {
 	Clock *clock.Info `json:"clock,omitempty"`
 	// LastAgentUpdate is the root updater's last outcome, if any.
 	LastAgentUpdate *selfupdate.Outcome `json:"lastAgentUpdate"`
+	// ServicePort and USBImport say which offline routes this board
+	// accepts, so screens only suggest the ones that work.
+	ServicePort bool `json:"servicePort"`
+	USBImport   bool `json:"usbImport"`
 	// Updates is the software waiting for its install window; only the
 	// daemon knows it.
 	Updates *updates.Info `json:"updates,omitempty"`
@@ -98,6 +102,8 @@ type BoardReport struct {
 	Updates         *updates.Info       `json:"updates,omitempty"`
 	LastAgentUpdate *selfupdate.Outcome `json:"lastAgentUpdate,omitempty"`
 	Clock           *clock.Info         `json:"clock,omitempty"`
+	ServicePort     bool                `json:"servicePort"`
+	USBImport       bool                `json:"usbImport"`
 	// SyncError is why the last content sync failed, if it did.
 	SyncError string `json:"syncError,omitempty"`
 	// Error is set when the installed content cannot be read.
@@ -106,9 +112,12 @@ type BoardReport struct {
 
 // BoardContent is the installed content, as the portal shows it.
 type BoardContent struct {
-	FirstDay      string `json:"firstDay"`
-	LastDay       string `json:"lastDay"`
-	CreatedAt     string `json:"createdAt"`
+	FirstDay  string `json:"firstDay"`
+	LastDay   string `json:"lastDay"`
+	CreatedAt string `json:"createdAt"`
+	// Timezone is the board's, so "days left" can be worked out again
+	// from lastDay when the report is old.
+	Timezone      string `json:"timezone"`
 	Source        string `json:"source,omitempty"`
 	InstalledAt   string `json:"installedAt,omitempty"`
 	DaysRemaining int    `json:"daysRemaining"`
@@ -117,13 +126,14 @@ type BoardContent struct {
 
 // Board is the heartbeat's report, taken from the status.
 func (s Status) Board() BoardReport {
-	r := BoardReport{Updates: s.Updates, LastAgentUpdate: s.LastAgentUpdate, Clock: s.Clock, Error: s.Error}
+	r := BoardReport{Updates: s.Updates, LastAgentUpdate: s.LastAgentUpdate, Clock: s.Clock, Error: s.Error,
+		ServicePort: s.ServicePort, USBImport: s.USBImport}
 	if s.App != nil {
 		r.AppVersion = s.App.Version
 	}
 	if c := s.Content; c != nil {
 		r.Content = &BoardContent{FirstDay: c.FirstDay, LastDay: c.LastDay, CreatedAt: c.CreatedAt,
-			Source: c.Source, InstalledAt: c.InstalledAt}
+			Timezone: c.Timezone, Source: c.Source, InstalledAt: c.InstalledAt}
 		if s.DaysRemaining != nil {
 			r.Content.DaysRemaining = *s.DaysRemaining
 		}

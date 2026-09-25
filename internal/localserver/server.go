@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"html"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -62,9 +63,11 @@ type Deps struct {
 	// Updates reports the software waiting to install. May be nil.
 	Updates func() updates.Info
 	// Clock says whether the board's clock can be believed. May be nil.
-	Clock  func() clock.Info
-	Logger *slog.Logger
-	Now    func() time.Time
+	Clock func() clock.Info
+	// ServicePort and USBImport are the board's offline routes (agent.toml).
+	ServicePort, USBImport bool
+	Logger                 *slog.Logger
+	Now                    func() time.Time
 }
 
 // Server serves the kiosk.
@@ -131,6 +134,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Status is the current /api/local/status object.
 func (s *Server) Status() Status {
 	st := BuildStatus(s.d.Layout, s.d.DeviceID, s.d.AgentVersion, s.d.Now())
+	st.ServicePort, st.USBImport = s.d.ServicePort, s.d.USBImport
 	if s.d.Sync != nil {
 		st.Sync = s.d.Sync()
 	}
@@ -235,7 +239,7 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", cacheNoStore)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = io.WriteString(w, noAppPage)
+		_, _ = io.WriteString(w, s.noAppPage())
 		return
 	}
 	fsys := os.DirFS(a.Dir)
@@ -315,16 +319,31 @@ func writeJSONError(w http.ResponseWriter, code int, msg string) {
 }
 
 // noAppPage is shown until a board app is installed. It polls, so the board
-// appears on its own once an app package lands.
-const noAppPage = `<!doctype html><html lang="en"><head><meta charset="utf-8">
+// appears on its own once an app package lands. It suggests only the offline
+// routes this board accepts.
+func (s *Server) noAppPage() string {
+	var routes []string
+	if s.d.USBImport {
+		routes = append(routes, "plug in a USB stick holding a MusallahBoard update")
+	}
+	if s.d.ServicePort {
+		routes = append(routes, "connect a laptop or phone to the board's ethernet port and open http://10.77.0.1/")
+	}
+	offline := "Without internet, it needs to be set up for USB sticks or its ethernet service port first."
+	if len(routes) > 0 {
+		offline = "Without internet, " + strings.Join(routes, ", or ") + "."
+	}
+	return strings.Replace(noAppHTML, "{{offline}}", html.EscapeString(offline), 1)
+}
+
+const noAppHTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>MusallahBoard</title>
 <style>html,body{height:100%;margin:0;background:#082D5D;color:#fff;font-family:system-ui,sans-serif}
 main{height:100%;display:grid;place-items:center;text-align:center;padding:6vmin;box-sizing:border-box}
-h1{font-weight:300;font-size:5vmin;margin:0 0 2vmin}p{font-size:2.2vmin;opacity:.75;max-width:60ch;margin:0 auto}</style>
+h1{font-weight:300;font-size:5vmin;margin:0 0 2.5vmin}p{font-size:2.6vmin;line-height:1.45;opacity:.8;max-width:60ch;margin:0 auto}</style>
 </head><body><main><div><h1>Waiting for the board app</h1>
-<p>This board has no board app installed yet. Online boards download it automatically.
-Without internet, plug in a USB stick holding a MusallahBoard update, or connect a laptop or phone
-to the board's ethernet port and open http://10.77.0.1/.</p></div></main>
+<p>This board has no board app installed yet. Online boards download it automatically within a few minutes.
+{{offline}}</p></div></main>
 <script>setInterval(function(){fetch('/api/local/status',{cache:'no-store'}).then(function(r){return r.json()})
 .then(function(s){if(s&&s.app)location.reload()}).catch(function(){})},5000)</script>
 </body></html>`

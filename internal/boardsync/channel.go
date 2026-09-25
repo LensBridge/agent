@@ -36,7 +36,12 @@ func (s *Syncer) channelLoop(ctx context.Context) {
 		return
 	}
 	for {
-		if err := s.CheckChannels(ctx); err != nil && ctx.Err() == nil {
+		err := s.CheckChannels(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		s.d.Updates.CheckDone(err)
+		if err != nil {
 			s.log.Warn("release channel check failed", "err", err)
 		}
 		if !sleep(ctx, s.channelInterval) {

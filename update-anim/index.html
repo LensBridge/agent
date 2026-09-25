@@ -342,6 +342,16 @@ body {
 }
 .lines li + li { margin-top: 0.7vmin; }
 .lines:empty { display: none; }
+/* A standing instruction under the outcome ("You can remove the USB
+   stick"): the accent's colour, because it is the one line asking someone to
+   do something. */
+.footer-line {
+  margin: 2.2vmin 0 0;
+  font-size: clamp(13px, 1.9vmin, 28px);
+  font-weight: 500;
+  color: var(--gold);
+}
+.footer-line:empty { display: none; }
 
 .warn {
   margin: 2.2vmin 0 0;
@@ -466,6 +476,7 @@ body {
       </svg>
       <h1 class="headline">Update complete</h1>
       <ul class="lines"></ul>
+      <p class="footer-line"></p>
       <p class="warn">Returning to MusallahBoard in 6 seconds</p>
     </div>
 
@@ -486,11 +497,13 @@ body {
      mbUpdate.complete(10)   → the same, from ten
      mbUpdate.complete(0)    → no countdown, straight to "… now"
      mbUpdate.complete({ tone: "ok" | "neutral" | "problem", headline: "…",
-                         lines: ["Board app 2.1.0", "…"], seconds: 6,
+                         lines: ["Board app 2.1.0", "…"], footer: "…", seconds: 6,
                          message: "Returning to MusallahBoard" })
                              → tone "problem" swaps the smiley for a ring
                                and mark; lines (at most three, the agent
-                               folds the rest) wrap under the headline
+                               folds the rest) wrap under the headline;
+                               footer ("You can remove the USB stick")
+                               sits under them in gold
      mbUpdate.working()      → back to the throbber
      mbUpdate.state          → "working" | "complete"
 
@@ -513,6 +526,7 @@ window.mbUpdate = (function () {
   var screenEl = document.querySelector('.screen');
   var title    = document.querySelector('.state--done .headline');
   var linesEl  = document.querySelector('.state--done .lines');
+  var footerEl = document.querySelector('.state--done .footer-line');
   var line     = document.querySelector('.state--done .warn');
   var captions = [].slice.call(document.querySelectorAll('.caption'));
   var ticker   = null;
@@ -564,6 +578,7 @@ window.mbUpdate = (function () {
       li.textContent = String(text);
       linesEl.appendChild(li);
     });
+    footerEl.textContent = opts.footer || '';
     caption('');
 
     clearInterval(ticker);

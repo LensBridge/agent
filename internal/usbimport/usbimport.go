@@ -135,15 +135,17 @@ func (h *Helper) Run(ctx context.Context, name string) error {
 	for _, n := range notes {
 		h.Logf("%s: %s", name, n)
 	}
-	var queued []queuedFile
+	var parts []part
 	if len(files) == 0 {
 		h.Logf("%s: no .mbu packages found (put them at the top of the stick or in a %s folder)", name, FolderName)
 	} else {
-		queued = h.copyAll(name, files)
+		parts = h.copyAll(name, files)
 	}
-	// Unmount before waiting, so the stick can be pulled as soon as the copy
-	// is done, whatever the daemon then makes of it.
+	// Unmount before the daemon sees anything, so that by the time the board
+	// says what it makes of the stick ("You can remove the USB stick" with
+	// every outcome), the stick really can be pulled.
 	h.unmount(ctx, name, mp)
+	queued := h.queue(name, parts)
 
 	switch {
 	case len(files) == 0:
@@ -194,6 +196,11 @@ func (h *Helper) unmount(ctx context.Context, name, mp string) {
 // an earlier one the daemon has not shown yet. Best effort: a stick is read
 // whether or not anyone is told.
 func (h *Helper) Announce(dev string, n notice.Notice) {
+	// Every outcome is announced once the stick is no longer in use; only
+	// "Reading USB stick" is not an outcome.
+	if n.Tone != notice.Progress {
+		n.Footer = notice.RemoveStick
+	}
 	inbox := h.Layout.Inbox()
 	raw, err := json.Marshal(n)
 	if err == nil {
@@ -285,18 +292,22 @@ type queuedFile struct {
 	inbox string // base name in the inbox
 }
 
-// copyAll copies every candidate to a .part name first, and only renames
-// them to .mbu once all are copied, so the daemon's next inbox scan sees the
-// whole stick as one batch (one update screen, agent first).
-func (h *Helper) copyAll(dev string, files []Candidate) []queuedFile {
+// part is a package copied into the inbox under a .part name, which the
+// daemon ignores until queue renames it.
+type part struct {
+	q    queuedFile
+	path string
+}
+
+// copyAll copies every candidate to a .part name first; queue renames them
+// to .mbu once all are copied and the stick is unmounted, so the daemon's
+// next inbox scan sees the whole stick as one batch (one update screen,
+// agent first).
+func (h *Helper) copyAll(dev string, files []Candidate) []part {
 	inbox := h.Layout.Inbox()
 	if err := os.MkdirAll(inbox, 0o770); err != nil {
 		h.Logf("%s: cannot use the inbox %s: %v", dev, inbox, err)
 		return nil
-	}
-	type part struct {
-		q    queuedFile
-		path string
 	}
 	var parts []part
 	for i, c := range files {
@@ -315,6 +326,12 @@ func (h *Helper) copyAll(dev string, files []Candidate) []queuedFile {
 		}
 		parts = append(parts, part{queuedFile{orig: filepath.Base(c.Path), inbox: base}, tmp})
 	}
+	return parts
+}
+
+// queue hands copied packages to the daemon.
+func (h *Helper) queue(dev string, parts []part) []queuedFile {
+	inbox := h.Layout.Inbox()
 	var out []queuedFile
 	for _, p := range parts {
 		if err := os.Rename(p.path, filepath.Join(inbox, p.q.inbox)); err != nil {

@@ -544,7 +544,7 @@ When `service_port` is on, the daemon listens on `10.77.0.1:80` (bound with
 |---|---|
 | `GET /` | A small self-contained upload page: pick or drop `.mbu` files, see progress and per-package results, see board status and clock drift. |
 | `GET /api/status` | `{"deviceId", "agentVersion", "app", "content", "today", "daysRemaining", "staleDays", "clock": {"unix", "timezone"}, "rtc": bool, "update": {"active": bool}}` |
-| `POST /api/import` | `multipart/form-data`, one or more `package` parts (each at most 512 MiB, total at most 1 GiB). Optional header `X-MB-Client-Time: <unix seconds>`. Each part is streamed to the inbox, then processed as one batch (source `upload`). Response `200 {"results": [...], "notice": {...}, "clock": {"driftSeconds": n, "adjusted": bool, "note": "…"}}`. Only one import runs at a time; a second gets `409`. |
+| `POST /api/import` | `multipart/form-data`, one to 16 `package` parts (each at most 512 MiB, total at most 1 GiB). Optional header `X-MB-Client-Time: <unix seconds>`. Each part is streamed to the inbox, then processed as one batch (source `upload`). Response `200 {"results": [...], "notice": {...}, "restarting": bool, "agentVersion": "…", "clock": {"driftSeconds": n, "adjusted": bool, "note": "…"}}`. Only one import runs at a time; a second gets `409`. |
 
 Errors are `{"message": "..."}` with a 4xx status. `driftSeconds` is the
 board's clock minus the uploader's, before any correction (positive: the board
@@ -587,8 +587,10 @@ folder on it, and plug it into the board.
   "Reading USB stick" as soon as the stick is seen; then either the batch's
   own outcome (section 8), or why there is none: "Can't read this USB stick"
   (no or unsupported filesystem, mount failure, copy failure), "No updates on
-  this USB stick", or "USB updates are turned off". The stick can be removed
-  as soon as it is unmounted, before the board has finished installing.
+  this USB stick", or "USB updates are turned off". The helper unmounts the
+  stick before the daemon sees what it copied, so every outcome, on the
+  screen or as a banner, ends with "You can remove the USB stick" (the
+  notice's `footer`), even while the board is still installing.
 - `usb_import = false` in `agent.toml` disables it (the helper says so on the
   board and exits).
 - The helper's sandbox (`ProtectKernelModules=yes`) cannot load filesystem

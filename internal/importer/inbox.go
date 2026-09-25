@@ -113,7 +113,9 @@ func (im *Importer) showNotices(dir string) {
 		default:
 			msg.Tone = notice.Neutral
 		}
+		footer := msg.Footer
 		msg = notice.New(msg.Tone, msg.Headline, msg.Lines...)
+		msg.Footer = footer
 		im.d.Logger.Info("usb notice", "tone", msg.Tone, "headline", msg.Headline, "lines", msg.Lines)
 		if im.d.Events != nil {
 			im.d.Events.Notice(msg)

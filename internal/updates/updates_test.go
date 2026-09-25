@@ -3,6 +3,7 @@ package updates
 import (
 	"bytes"
 	"context"
+	"errors"
 	"crypto/ed25519"
 	"os"
 	"path/filepath"
@@ -244,5 +245,22 @@ func TestCheckAndInstall(t *testing.T) {
 	}
 	if st, _ := e.l.State().Load(); st.AppVersion != "2.1.0" {
 		t.Fatalf("app = %s", st.AppVersion)
+	}
+}
+
+func TestInfoReportsTheLastCheck(t *testing.T) {
+	e := newEnv(t)
+	if i := e.s.Info(); i.LastCheckAt != nil || i.LastCheckError != "" {
+		t.Fatalf("before any check: %+v", i)
+	}
+	e.s.d.Check = func(context.Context) error { return errors.New("github.com: no route to host") }
+	e.s.CheckAndInstall(context.Background())
+	i := e.s.Info()
+	if i.LastCheckAt == nil || i.LastCheckError != "github.com: no route to host" {
+		t.Fatalf("after a failed check: %+v", i)
+	}
+	e.s.CheckDone(nil)
+	if i := e.s.Info(); i.LastCheckError != "" {
+		t.Fatalf("a good check did not clear the error: %+v", i)
 	}
 }

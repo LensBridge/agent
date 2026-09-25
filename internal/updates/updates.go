@@ -60,6 +60,15 @@ type Info struct {
 	// when the window is already open.
 	InstallAt  *string `json:"installAt"`
 	Installing bool    `json:"installing"`
+	// AutoUpdate is whether the board follows the release channels at all
+	// (auto_update in agent.toml).
+	AutoUpdate bool `json:"autoUpdate"`
+	// LastCheckAt is when the release channels were last asked (RFC 3339),
+	// null before the first check; LastCheckError is why that check failed,
+	// if it did. Without them "nothing waiting" could mean "up to date" or
+	// "cannot tell".
+	LastCheckAt    *string `json:"lastCheckAt"`
+	LastCheckError string  `json:"lastCheckError,omitempty"`
 }
 
 // Outcome is the result of an install-now request (CLI or remote command).
@@ -81,8 +90,11 @@ type Deps struct {
 	// Changed is told whenever Info changes. May be nil.
 	Changed      func(Info)
 	Hour, Minute int
-	Logger       *slog.Logger
-	Now          func() time.Time
+	// AutoUpdate is reported in Info; the scheduler itself holds and
+	// installs whatever it is offered either way.
+	AutoUpdate bool
+	Logger     *slog.Logger
+	Now        func() time.Time
 }
 
 // Scheduler holds waiting updates and installs them.
@@ -95,9 +107,11 @@ type Scheduler struct {
 	// directory, so an Offer never replaces a file the importer is reading.
 	installMu sync.Mutex
 
-	mu         sync.Mutex
-	pending    map[mbu.Type]*mbu.Manifest
-	installing bool
+	mu           sync.Mutex
+	pending      map[mbu.Type]*mbu.Manifest
+	installing   bool
+	lastCheckAt  time.Time
+	lastCheckErr string
 }
 
 // New returns a Scheduler holding whatever an earlier run left waiting.
@@ -202,9 +216,15 @@ func (s *Scheduler) Info() Info {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	info := Info{
-		Available:   []Update{},
-		InstallTime: fmt.Sprintf("%02d:%02d", s.d.Hour, s.d.Minute),
-		Installing:  s.installing,
+		Available:      []Update{},
+		InstallTime:    fmt.Sprintf("%02d:%02d", s.d.Hour, s.d.Minute),
+		Installing:     s.installing,
+		AutoUpdate:     s.d.AutoUpdate,
+		LastCheckError: s.lastCheckErr,
+	}
+	if !s.lastCheckAt.IsZero() {
+		at := s.lastCheckAt.UTC().Format(time.RFC3339)
+		info.LastCheckAt = &at
 	}
 	for _, t := range order {
 		if m := s.pending[t]; m != nil {
@@ -237,6 +257,17 @@ func (s *Scheduler) Run(ctx context.Context) {
 	}
 }
 
+// CheckDone records the outcome of a release channel check, for Info.
+func (s *Scheduler) CheckDone(err error) {
+	s.mu.Lock()
+	s.lastCheckAt = s.d.Now()
+	s.lastCheckErr = ""
+	if err != nil {
+		s.lastCheckErr = err.Error()
+	}
+	s.mu.Unlock()
+}
+
 // CheckAndInstall asks the release channels for new software and installs
 // everything waiting, whatever the time. It is the "update now" command.
 // ctx bounds the check (a remote command's deadline); an install that has
@@ -245,8 +276,12 @@ func (s *Scheduler) CheckAndInstall(ctx context.Context) Outcome {
 	var out Outcome
 	if s.d.Check == nil {
 		out.CheckError = "this board cannot reach the release channels (no device key)"
-	} else if err := s.d.Check(ctx); err != nil {
-		out.CheckError = err.Error()
+	} else {
+		err := s.d.Check(ctx)
+		s.CheckDone(err)
+		if err != nil {
+			out.CheckError = err.Error()
+		}
 	}
 	b, _ := s.InstallNow(context.WithoutCancel(ctx))
 	out.Results = b.Results

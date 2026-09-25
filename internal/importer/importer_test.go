@@ -267,7 +267,8 @@ func TestInstallFinishesTheScreenInPlainWords(t *testing.T) {
 	}
 	n := sc.finished[0]
 	if n.Tone != notice.OK || n.Headline != "Update complete" || len(n.Lines) != 1 ||
-		!strings.HasPrefix(n.Lines[0], "New content, through ") || strings.Contains(n.Lines[0], ".mbu") {
+		!strings.HasPrefix(n.Lines[0], "New content, through ") || strings.Contains(n.Lines[0], ".mbu") ||
+		n.Footer != notice.RemoveStick {
 		t.Fatalf("outcome = %+v", n)
 	}
 	if ev.last().Tone != notice.Progress {

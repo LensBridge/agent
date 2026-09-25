@@ -45,7 +45,7 @@ const ServiceIP = "10.77.0.1"
 const ListenAddr = ServiceIP + ":80"
 
 const (
-	maxParts      = 8
+	maxParts      = 16 // as many as a USB stick (usbimport.MaxFiles)
 	maxTotalBytes = 1 << 30
 )
 
@@ -175,10 +175,16 @@ func (s *Server) status() Status {
 // ImportResponse is POST /api/import's body.
 type ImportResponse struct {
 	Results []importer.Result `json:"results"`
-	// Notice is what the board showed about the upload.
-	Notice  *notice.Notice `json:"notice,omitempty"`
-	Clock   *ClockReport   `json:"clock,omitempty"`
-	Message string         `json:"message,omitempty"`
+	// Notice is what the uploader should be told about the upload.
+	Notice *notice.Notice `json:"notice,omitempty"`
+	// Restarting means a new agent was staged and is about to replace the
+	// one that answered; the rest of the upload installs once it runs.
+	// AgentVersion is the answering agent's, so the page can tell the new
+	// one (or a rollback) when the board is back.
+	Restarting   bool         `json:"restarting,omitempty"`
+	AgentVersion string       `json:"agentVersion,omitempty"`
+	Clock        *ClockReport `json:"clock,omitempty"`
+	Message      string       `json:"message,omitempty"`
 }
 
 var safeNameRE = regexp.MustCompile(`[^A-Za-z0-9._-]`)
@@ -261,7 +267,13 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, ImportResponse{Message: "the board is already installing an update; try again in a minute"})
 		return
 	}
-	resp := ImportResponse{Results: b.Results, Notice: &b.Notice}
+	resp := ImportResponse{Results: b.Results, Notice: &b.Notice, AgentVersion: s.d.AgentVersion}
+	if b.AgentStaged {
+		// The board's own screen says "Update complete" once the new agent
+		// runs; the uploader, who is told now, gets the truth for now.
+		n := restartingNotice(b)
+		resp.Notice, resp.Restarting = &n, true
+	}
 	if v := r.Header.Get("X-MB-Client-Time"); v != "" && s.d.ApplyClientTime != nil {
 		if unix, err := strconv.ParseInt(v, 10, 64); err == nil {
 			unix += int64(s.d.Now().Sub(received) / time.Second)
@@ -270,6 +282,28 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// restartingNotice is what an uploader is told when the upload staged a new
+// agent: nothing is finished yet, the board is about to restart, and the
+// rest of the upload waits for it.
+func restartingNotice(b importer.Batch) notice.Notice {
+	var lines []string
+	queued := 0
+	for _, r := range b.Results {
+		switch r.Action {
+		case importer.ActionStaged:
+			lines = append(lines, r.Message+" is being installed")
+		case importer.ActionQueued:
+			queued++
+		case importer.ActionRejected:
+			lines = append(lines, r.Message)
+		}
+	}
+	if queued > 0 {
+		lines = append(lines, fmt.Sprintf("%d more update(s) install once the board is back", queued))
+	}
+	return notice.New(notice.Progress, "Restarting to finish the update", lines...)
 }
 
 // idle is a cheap pre-check; TryImport is the authoritative one.

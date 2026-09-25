@@ -62,12 +62,20 @@ func runUpdate(args []string) {
 }
 
 func printUpdateOutcome(out updates.Outcome) {
-	if out.CheckError != "" {
-		fmt.Printf("  Could not check for updates: %s\n", out.CheckError)
-	}
 	if len(out.Results) == 0 {
+		if out.CheckError != "" {
+			// Nothing was installed, and there is no telling whether that is
+			// because nothing is newer: do not say "up to date".
+			fmt.Printf("  Could not check for updates: %s\n", out.CheckError)
+			fmt.Println("  Nothing was installed. Check the board's internet connection and try again.")
+			os.Exit(1)
+		}
 		fmt.Println("  Nothing to install: the board app and agent are up to date.")
 		return
+	}
+	if out.CheckError != "" {
+		fmt.Printf("  Could not check for updates: %s\n", out.CheckError)
+		fmt.Println("  Installed what was already downloaded:")
 	}
 	rejected := false
 	for _, r := range out.Results {

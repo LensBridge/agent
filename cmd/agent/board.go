@@ -79,7 +79,7 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 	hour, minute := cfg.UpdateTime()
 	var syncer *boardsync.Syncer
 	sched := updates.New(updates.Deps{
-		Layout: layout, Importer: imp, Hour: hour, Minute: minute, Logger: logger,
+		Layout: layout, Importer: imp, Hour: hour, Minute: minute, AutoUpdate: cfg.AutoUpdate(), Logger: logger,
 		Changed: func(info updates.Info) { hub.UpdatesChanged(info) },
 		Check: func(ctx context.Context) error {
 			if syncer == nil {
@@ -112,6 +112,8 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 		UpdateActive: screen.Active,
 		Updates:      sched.Info,
 		Clock:        keeper.Info,
+		ServicePort:  cfg.ServicePort(),
+		USBImport:    cfg.USBImport(),
 		Logger:       logger,
 	})
 	ln, err := net.Listen("tcp", localserver.ListenAddr)

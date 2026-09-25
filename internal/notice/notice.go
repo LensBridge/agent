@@ -31,6 +31,9 @@ type Notice struct {
 	Tone     Tone     `json:"tone"`
 	Headline string   `json:"headline"`
 	Lines    []string `json:"lines"`
+	// Footer is a standing instruction under the lines, shown whatever they
+	// say: "You can remove the USB stick".
+	Footer string `json:"footer,omitempty"`
 	// Seconds is how long a banner stays up; 0 means until replaced.
 	Seconds int `json:"seconds"`
 }
@@ -52,6 +55,10 @@ func DefaultSeconds(t Tone) int {
 func New(t Tone, headline string, lines ...string) Notice {
 	return Notice{Tone: t, Headline: headline, Lines: Fold(lines), Seconds: DefaultSeconds(t)}
 }
+
+// RemoveStick is the footer of every outcome for a USB stick: the helper
+// unmounts it before the board looks at what it copied.
+const RemoveStick = "You can remove the USB stick"
 
 // Fold drops empty and repeated lines and keeps at most MaxLines, replacing
 // the rest with "and N more".

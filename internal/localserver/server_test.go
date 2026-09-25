@@ -170,3 +170,28 @@ func TestBoardReport(t *testing.T) {
 		t.Fatalf("empty status: %+v", r)
 	}
 }
+
+func TestNoAppPageOffersOnlyWorkingRoutes(t *testing.T) {
+	cases := []struct {
+		usb, port bool
+		want      []string
+		not       []string
+	}{
+		{true, false, []string{"USB stick"}, []string{"10.77.0.1"}},
+		{false, true, []string{"10.77.0.1"}, []string{"USB stick"}},
+		{false, false, []string{"set up for USB sticks or its ethernet service port first"}, []string{"10.77.0.1"}},
+	}
+	for _, tc := range cases {
+		page := (&Server{d: Deps{USBImport: tc.usb, ServicePort: tc.port}}).noAppPage()
+		for _, w := range tc.want {
+			if !strings.Contains(page, w) {
+				t.Errorf("usb=%v port=%v: missing %q", tc.usb, tc.port, w)
+			}
+		}
+		for _, n := range tc.not {
+			if strings.Contains(page, n) {
+				t.Errorf("usb=%v port=%v: offers %q", tc.usb, tc.port, n)
+			}
+		}
+	}
+}

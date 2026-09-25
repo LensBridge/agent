@@ -282,6 +282,9 @@ func (im *Importer) run(ctx context.Context, src Source, files []string) Batch {
 	}
 
 	b.Notice = Summarize(b)
+	if src == SourceUSB {
+		b.Notice.Footer = notice.RemoveStick
+	}
 	if b.AgentStaged {
 		im.stagedMu.Lock()
 		im.staged = make(chan struct{})

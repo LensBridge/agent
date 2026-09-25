@@ -153,7 +153,7 @@ func (s *Screen) Finish(ctx context.Context, n notice.Notice) {
 		lines = []string{}
 	}
 	arg, _ := json.Marshal(map[string]any{
-		"tone": n.Tone, "headline": n.Headline, "lines": lines,
+		"tone": n.Tone, "headline": n.Headline, "lines": lines, "footer": n.Footer,
 		"seconds": seconds, "message": "Returning to MusallahBoard",
 	})
 	s.eval(ctx, "window.mbUpdate && window.mbUpdate.complete("+string(arg)+")")
@@ -202,6 +202,12 @@ func merge(a, b notice.Notice) notice.Notice {
 		out = b
 	}
 	out.Lines = notice.Fold(append(append([]string{}, a.Lines...), b.Lines...))
+	if out.Footer == "" {
+		out.Footer = a.Footer
+		if out.Footer == "" {
+			out.Footer = b.Footer
+		}
+	}
 	return out
 }
 

@@ -79,6 +79,8 @@ type Updates interface {
 	// Offer verifies a downloaded package and keeps it until its install
 	// window. The file must be on the same filesystem as the store.
 	Offer(file string) error
+	// CheckDone records how a channel check went, for the status.
+	CheckDone(err error)
 }
 
 // Status is the "sync" object of /api/local/status.

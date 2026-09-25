@@ -25,6 +25,7 @@ button:disabled{opacity:.5;cursor:default}ul{padding-left:18px;margin:8px 0}prog
 <section class="card"><h2>This board</h2><dl id="st"><dt>Status</dt><dd>loading…</dd></dl></section>
 <section class="card"><h2>Send updates</h2>
 <div id="drop">Drop .mbu files here, or click to choose<input id="pick" type="file" accept=".mbu" multiple hidden></div>
+<p class="muted">Up to 16 files at a time, 1 GiB in total.</p>
 <ul id="files"></ul><button id="send" disabled>Send to board</button>
 <p><progress id="prog" value="0" max="1" hidden></progress></p><div id="out"></div>
 <p class="muted">Content packages come from LensBridge (Devices, the board, Download offline bundle). Board software packages come from the MusallahBoard releases. The board checks every signature itself and refuses anything not meant for it.</p>
@@ -62,11 +63,28 @@ document.getElementById('send').onclick=function(){
   out.textContent='';if(r.message)out.appendChild(el('p','bad',r.message));
   if(r.notice){out.appendChild(el('h3',r.notice.tone==='problem'?'bad':(r.notice.tone==='ok'?'ok':null),r.notice.headline))}
   var cls={installed:'ok',staged:'ok',rejected:'bad'};
-  var ul=el('ul');(r.results||[]).forEach(function(it){if(it.action==='queued')return;var li=el('li',cls[it.action]||'neutral',it.file+': '+it.message);
+  var ul=el('ul');(r.results||[]).forEach(function(it){var li=el('li',cls[it.action]||'neutral',it.file+': '+it.message);
    if(it.detail)li.appendChild(el('span','detail',it.detail));ul.appendChild(li)});out.appendChild(ul);
+  if(r.restarting){watchRestart(r.agentVersion,out);}
   if(r.clock&&r.clock.note)out.appendChild(el('p','muted','Clock: '+r.clock.note));
-  chosen=[];show();loadStatus()};
+  chosen=[];show();if(!r.restarting)loadStatus()};
  x.onerror=function(){prog.hidden=true;out.textContent='';out.appendChild(el('p','bad','The upload failed. Check the cable and try again.'));btn.disabled=false};
  x.open('POST','/api/import');x.setRequestHeader('X-MB-Client-Time',String(Math.floor(Date.now()/1000)));x.send(fd)};
+// After an agent update the board restarts: follow it until the new agent
+// answers (or the old one, after a rollback), instead of reporting the board
+// unreachable.
+function watchRestart(before,out){
+ var p=el('p','muted','Waiting for the board to restart. Keep the cable plugged in.');out.appendChild(p);
+ var sawDown=false,start=Date.now();
+ (function poll(){
+  fetch('/api/status',{cache:'no-store'}).then(function(res){return res.json()}).then(function(s){
+   if(s.agentVersion&&s.agentVersion!==before){p.className='ok';p.textContent='The board is back, running agent '+s.agentVersion+'. The rest of the update is installing; the board shows its progress on screen.';loadStatus();return}
+   if(!sawDown&&Date.now()-start>240000){p.className='bad';p.textContent='The agent update did not start; the board is still running agent '+s.agentVersion+'. The board shows the details on screen.';loadStatus();return}
+   if(sawDown&&Date.now()-start>150000){p.className='bad';p.textContent='The new agent did not start, so the board went back to agent '+s.agentVersion+'. The board shows the details on screen.';loadStatus();return}
+   setTimeout(poll,3000)
+  }).catch(function(){sawDown=true;
+   if(Date.now()-start>240000){p.className='bad';p.textContent='The board has not come back after 4 minutes. Check its screen, and make sure it has power.';return}
+   setTimeout(poll,3000)})
+ })()}
 loadStatus();
 </script></body></html>`
