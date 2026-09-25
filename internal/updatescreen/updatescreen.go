@@ -3,6 +3,11 @@
 // the importer installs something a person brought to the board, and returns
 // it to the board afterwards (docs/architecture.md, section 8).
 //
+// Switching between the board and the screen is a dip to black: the page on
+// screen fades to black (injected over CDP, so it works whatever page it is),
+// and the next page fades in from black on its own. A true cross-fade would
+// need both pages alive at once, which a navigation cannot give.
+//
 // The screen is driven over CDP through its window.mbUpdate hook. It lives in
 // the agent, not the board app, because an app update replaces the app while
 // the screen is up, and an agent update restarts the server that served it:
@@ -29,6 +34,23 @@ const Path = "/_mb/updating"
 
 // callTimeout bounds one CDP round trip.
 const callTimeout = 5 * time.Second
+
+// fadeOutScript lays a black veil over whatever page is showing and resolves
+// once it is opaque. Keep the duration in step with the fade-in of
+// update-anim/index.html and of the board app's index.html.
+const fadeOutScript = `new Promise(function (done) {
+  var v = document.getElementById('mb-fade-out');
+  if (!v) {
+    v = document.createElement('div');
+    v.id = 'mb-fade-out';
+    v.style.cssText = 'position:fixed;inset:0;background:#000;opacity:0;z-index:2147483647;' +
+      'pointer-events:none;transition:opacity 600ms ease-in-out';
+    (document.body || document.documentElement).appendChild(v);
+    v.getBoundingClientRect();
+  }
+  v.style.opacity = '1';
+  setTimeout(function () { done(true); }, 650);
+})`
 
 // Screen implements importer.Screen.
 type Screen struct {
@@ -63,6 +85,7 @@ func (s *Screen) Begin(ctx context.Context) {
 	s.active = true
 	s.mu.Unlock()
 
+	s.fadeOut(ctx)
 	if err := s.navigate(ctx, s.baseURL+Path); err != nil {
 		s.logger.Debug("update screen: navigate failed", "err", err)
 		return
@@ -137,8 +160,19 @@ func (s *Screen) returnToBoard(ctx context.Context) {
 	s.active = false
 	s.returnAt = nil
 	s.mu.Unlock()
+	s.fadeOut(ctx)
 	if err := s.navigate(ctx, s.baseURL+"/"); err != nil {
 		s.logger.Debug("update screen: return to board failed", "err", err)
+	}
+}
+
+// fadeOut fades the current page to black. If it cannot (no kiosk, a page
+// that will not run script), the switch is simply a cut.
+func (s *Screen) fadeOut(ctx context.Context) {
+	cctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	if err := s.cdp.EvaluateValue(cctx, fadeOutScript, nil); err != nil {
+		s.logger.Debug("update screen: fade out failed", "err", err)
 	}
 }
 

@@ -260,6 +260,8 @@ packer (`scripts/package-mbu.mjs`) producing the same format.
 | `/var/lib/musallahboard/agent/last-update.json` | root | outcome of the last self-update |
 | `/var/lib/musallahboard/inbox/` | daemon 0770 | `*.mbu` dropped by the CLI and USB helper |
 | `/var/lib/musallahboard/inbox/results/<name>.json` | daemon | outcome per inbox file |
+| `/var/lib/musallahboard/updates/{agent,app}.mbu` | daemon 0750 | software from the release channels, waiting for its install window (section 9.4) |
+| `/var/lib/musallahboard/updates/install-now[.result.json]` | daemon | `update now` request from the CLI, and the daemon's answer |
 
 The daemon keeps the current and previous content bundle and app release and
 prunes the rest; media not referenced by a kept bundle is deleted.
@@ -319,7 +321,13 @@ the bundle's `timezone`; serve `firstDay` if `today < firstDay`, `lastDay` if
   },
   "today": "2026-09-30", "servingDay": "2026-09-30", "daysRemaining": 7, "staleDays": 0,
   "sync": { "enabled": true, "lastSuccessAt": "…", "lastAttemptAt": "…", "lastError": null },
-  "update": { "active": false }
+  "update": { "active": false },
+  "updates": {
+    "available": [ { "type": "app", "version": "2.2.0", "description": "board app 2.2.0" } ],
+    "installTime": "23:00",
+    "installAt": "2026-09-30T23:00:00-04:00",
+    "installing": false
+  }
 }
 ```
 
@@ -327,7 +335,11 @@ the bundle's `timezone`; serve `firstDay` if `today < firstDay`, `lastDay` if
 `daysRemaining` and `staleDays` are then `null` and `today` is in the system
 zone. `source` is one of `sync`, `usb`, `upload`, `cli`. `sync.lastError` is a
 short human string or `null`. If installed content cannot be read, `content` is
-`null` and an `error` string is added.
+`null` and an `error` string is added. `updates` (section 9.4) lists software
+waiting for its install window; `installAt` is `null` when nothing waits, and
+the current time when the window is open or the board has no app yet. The page
+puts "Update available: ... will be installed at 11:00 PM tonight" on its
+ticker while `available` is not empty.
 
 **`/api/local/events`** (SSE, `text/event-stream`, `no-store`):
 
@@ -336,6 +348,8 @@ short human string or `null`. If installed content cannot be read, `content` is
   payload in place.
 - `event: app` with `data: {"version": "…"}` after a new app release is
   installed. The page reloads itself.
+- `event: updates` with the `updates` status object whenever an update starts
+  or stops waiting, or starts installing. The page re-reads the status.
 - A comment line (`: ping`) every 25 s keeps the connection alive.
 
 `EventSource` gives up for good on a non-200 answer (for example while the
@@ -377,7 +391,10 @@ processed by the new agent after the restart.
 package that is not skipped, and for any app or agent install from any source,
 the daemon navigates the kiosk (CDP) to `/_mb/updating` and drives it through
 `window.mbUpdate` (`caption(text)`, `complete({seconds, headline, message, caption})`),
-then navigates back to `/` after the countdown. Background content sync from
+then navigates back to `/` after the countdown. Each switch is a dip to black:
+before navigating, the daemon fades the page on screen to black (a veil
+injected over CDP, 600 ms), and both the update screen and the board app fade
+in from black when they load. Background content sync from
 the backend is silent: an admin editing a poster must not put "Working on
 updates" on every screen. On failure the screen shows
 `complete({headline: "Update not installed", message: "Returning to MusallahBoard", caption: <reason>})`.
@@ -460,10 +477,28 @@ start) two channel URLs, each returning:
 { "version": "2.1.0", "url": "https://…/musallahboard-app-2.1.0.mbu", "sha256": "…", "bytes": 1234567 }
 ```
 
-If `version` is newer than what is installed (and not rejected), it downloads
-`url` (size-capped, sha256-checked) and imports it with source `sync`. The
-channel file is only a pointer; the package's own signature and the monotonic
-rules are what make it safe. Defaults:
+If `version` is newer than what is installed and what is already waiting (and
+not rejected), it downloads `url` (size-capped, sha256-checked), verifies it
+and checks it would install, and keeps it in `updates/` instead of installing
+it. The channel file is only a pointer; the package's own signature and the
+monotonic rules are what make it safe. The agent channel is checked first: an
+app needing a newer local API than this agent serves only waits when a new
+enough agent waits with it.
+
+Waiting updates install together, as one batch with source `sync` (so the
+update screen shows), in the board's install window: from `update_time`
+(default `23:00`, in the installed content's time zone, else the system's) for
+4 hours. A board that was off at 23:00 but on by 03:00 still updates that
+night. Two exceptions install at once: a board with no app installed (it has
+nothing else to show), and `update now`:
+
+- `sudo musallahboard-agent update now` on the board, or
+- the `update.install_now` remote command from the admin portal,
+
+checks both channels and installs whatever is new or waiting, whatever the
+time. Waiting updates survive a restart; one that no longer applies (installed
+from a USB stick meanwhile) is dropped. Updates carried to the board (USB,
+upload, CLI `import`) never wait. Defaults:
 
 - `app_channel_url = "https://github.com/LensBridge/MusallahBoard/releases/latest/download/app-channel.json"`
 - `agent_channel_url = "https://github.com/LensBridge/agent/releases/latest/download/agent-channel-<arch>.json"`
@@ -529,6 +564,11 @@ folder on it, and plug it into the board.
 `sudo musallahboard-agent import <file.mbu>... | -` copies into the inbox (`-`
 reads one package from stdin) and waits for and prints the results.
 
+`sudo musallahboard-agent update now` asks the daemon to check the release
+channels and install a new app or agent at once (section 9.4), and prints the
+results. `musallahboard-agent status` shows what is waiting and when it
+installs.
+
 ## 10. Clock
 
 Correct time decides which day's content is shown and the prayer times.
@@ -562,6 +602,7 @@ unchanged. New keys, all optional:
 | `content_days` | `7` | Days per synced content package (1-31). |
 | `auto_update` | `true` | Follow the release channels. |
 | `app_channel_url`, `agent_channel_url` | section 9.4 | Channel pointers. Empty disables that channel. |
+| `update_time` | `"23:00"` | When software from the channels installs, `HH:MM` in the board's time zone (section 9.4). |
 
 An offline board needs no configuration change: sync attempts fail fast with no
 route and cost nothing, and the moment it gets a network it starts syncing.
@@ -625,6 +666,10 @@ per-day payloads from installed content, and weather comes through the agent.
 - Stale content: the "Content last updated ..." note when `staleDays > 0`.
 - Diagnostics (Alt+Shift+F) show agent and app versions, content range and
   source, days remaining, sync status.
+- Waiting software updates (`updates` in the status) add "Update available:
+  ... will be installed at 11:00 PM tonight" to the ticker.
+- The page fades in from black when it loads, finishing the dip to black the
+  agent starts when it leaves the update screen (section 8).
 - Development: `npm run dev` proxies `/api` and `/media` to an agent, for
   example a real board through `ssh -L 8080:127.0.0.1:8080 <board>`.
 - Releases: `npm run package` builds and writes

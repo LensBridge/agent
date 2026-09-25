@@ -382,10 +382,27 @@ body {
   .state--done { transform: none; }
   .screen.is-complete .state--working { transform: none; }
 }
+/* ---- Fade in -----------------------------------------------------------
+   The agent fades the board to black before it navigates here, and fades
+   this page to black before it goes back (internal/updatescreen). This veil
+   finishes the dip: the screen arrives from black instead of cutting in. */
+.veil {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: #000;
+  pointer-events: none;
+  animation: veil-out 700ms ease-out 50ms both;
+}
+@keyframes veil-out {
+  from { opacity: 1; }
+  to   { opacity: 0; visibility: hidden; }
+}
 </style>
 </head>
 
 <body>
+  <div class="veil" aria-hidden="true"></div>
   <div class="wash" aria-hidden="true"></div>
 
   <main class="screen">

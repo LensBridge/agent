@@ -301,11 +301,10 @@ func (im *Importer) one(ctx context.Context, src Source, path, name string, ring
 			return rejectAs(res, fmt.Sprintf("board app %s needs a newer agent (local API %d; this agent serves %d): install the agent update first",
 				m.Version, m.App.LocalAPI, LocalAPIVersion))
 		}
-		switch c := mbu.CompareVersions(m.Version, st.AppVersion); {
-		case c < 0:
-			return rejectAs(res, "board app "+m.Version+" is older than the installed "+st.AppVersion)
-		case c == 0:
-			res.Action, res.Message = ActionUnchanged, "board app "+m.Version+" is already installed"
+		if unchanged, err := im.checkSoftware(m, st); err != nil {
+			return rejectAs(res, err.Error())
+		} else if unchanged != "" {
+			res.Action, res.Message = ActionUnchanged, unchanged
 			return res
 		}
 		show("Installing " + m.Describe())
@@ -326,17 +325,10 @@ func (im *Importer) one(ctx context.Context, src Source, path, name string, ring
 		res.Action, res.Message = ActionInstalled, "Installed "+m.Describe()
 
 	case mbu.TypeAgent:
-		if m.Agent.Arch != runtime.GOARCH {
-			return rejectAs(res, fmt.Sprintf("agent %s is built for %s; this board is %s", m.Version, m.Agent.Arch, runtime.GOARCH))
-		}
-		if st.AgentRejected(m.Version) {
-			return rejectAs(res, "agent "+m.Version+" failed to start on this board before; it will not be retried")
-		}
-		switch c := mbu.CompareVersions(m.Version, im.d.AgentVersion); {
-		case c < 0:
-			return rejectAs(res, "agent "+m.Version+" is older than the running "+im.d.AgentVersion)
-		case c == 0:
-			res.Action, res.Message = ActionUnchanged, "agent "+m.Version+" is already running"
+		if unchanged, err := im.checkSoftware(m, st); err != nil {
+			return rejectAs(res, err.Error())
+		} else if unchanged != "" {
+			res.Action, res.Message = ActionUnchanged, unchanged
 			return res
 		}
 		show("Preparing " + m.Describe())
@@ -347,6 +339,66 @@ func (im *Importer) one(ctx context.Context, src Source, path, name string, ring
 		res.Action, res.Message = ActionStaged, "Installing "+m.Describe()+"; the agent restarts in a moment"
 	}
 	return res
+}
+
+// checkSoftware decides whether an app or agent package may replace what the
+// board runs. It returns a message when the package is already installed, and
+// an error when it must be refused. The app's local API is checked at install
+// time only: an app waiting for its agent is scheduled together with it.
+func (im *Importer) checkSoftware(m *mbu.Manifest, st state.State) (unchanged string, err error) {
+	switch m.Type {
+	case mbu.TypeApp:
+		switch c := mbu.CompareVersions(m.Version, st.AppVersion); {
+		case c < 0:
+			return "", fmt.Errorf("board app %s is older than the installed %s", m.Version, st.AppVersion)
+		case c == 0:
+			return "board app " + m.Version + " is already installed", nil
+		}
+	case mbu.TypeAgent:
+		if m.Agent.Arch != runtime.GOARCH {
+			return "", fmt.Errorf("agent %s is built for %s; this board is %s", m.Version, m.Agent.Arch, runtime.GOARCH)
+		}
+		if st.AgentRejected(m.Version) {
+			return "", fmt.Errorf("agent %s failed to start on this board before; it will not be retried", m.Version)
+		}
+		switch c := mbu.CompareVersions(m.Version, im.d.AgentVersion); {
+		case c < 0:
+			return "", fmt.Errorf("agent %s is older than the running %s", m.Version, im.d.AgentVersion)
+		case c == 0:
+			return "agent " + m.Version + " is already running", nil
+		}
+	default:
+		return "", fmt.Errorf("%s is not a software package", m.Describe())
+	}
+	return "", nil
+}
+
+// Preflight verifies a downloaded app or agent package and checks that it
+// would install, without installing anything or recording anything about it.
+// The update scheduler only holds packages that pass, so what a board
+// announces is what it will install.
+func (im *Importer) Preflight(path string) (*mbu.Manifest, error) {
+	ring, err := im.d.Ring()
+	if err != nil {
+		return nil, fmt.Errorf("cannot read the trust store: %w", err)
+	}
+	pkg, err := mbu.Open(path, ring, mbu.OpenOptions{HaveMedia: im.d.Layout.HaveMedia})
+	if err != nil {
+		return nil, err
+	}
+	defer pkg.Close()
+	st, err := im.d.Layout.State().Load()
+	if err != nil {
+		return nil, err
+	}
+	unchanged, err := im.checkSoftware(pkg.Manifest, st)
+	if err != nil {
+		return nil, err
+	}
+	if unchanged != "" {
+		return nil, errors.New(unchanged)
+	}
+	return pkg.Manifest, nil
 }
 
 // stageAgent hands a verified agent package to the root updater. The updater

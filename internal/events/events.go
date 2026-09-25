@@ -37,6 +37,12 @@ func (h *Hub) AppChanged(version string) {
 	h.Publish(Event{Name: "app", Data: map[string]string{"version": version}})
 }
 
+// UpdatesChanged announces a change in the software waiting to install
+// (updates.Info), so the ticker can say so without waiting for a poll.
+func (h *Hub) UpdatesChanged(info any) {
+	h.Publish(Event{Name: "updates", Data: info})
+}
+
 // Publish sends e to every subscriber that has room for it.
 func (h *Hub) Publish(e Event) {
 	h.mu.Lock()

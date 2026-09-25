@@ -27,6 +27,7 @@ import (
 
 	"github.com/LensBridge/agent/internal/config"
 	"github.com/LensBridge/agent/internal/importer"
+	"github.com/LensBridge/agent/internal/mbu"
 	"github.com/LensBridge/agent/internal/store"
 )
 
@@ -58,14 +59,26 @@ const (
 
 // Deps is what a Syncer needs.
 type Deps struct {
-	Cfg          *config.Config
-	Key          ed25519.PrivateKey
-	Layout       store.Layout
-	Importer     *importer.Importer
+	Cfg      *config.Config
+	Key      ed25519.PrivateKey
+	Layout   store.Layout
+	Importer *importer.Importer
+	// Updates holds software from the release channels until it installs.
+	Updates      Updates
 	AgentVersion string
 	Logger       *slog.Logger
 	// HTTP is optional; New builds one with sane timeouts.
 	HTTP *http.Client
+}
+
+// Updates is the update scheduler (package updates) as the release channels
+// see it.
+type Updates interface {
+	// Pending is the version of kind already waiting to install, or "".
+	Pending(kind mbu.Type) string
+	// Offer verifies a downloaded package and keeps it until its install
+	// window. The file must be on the same filesystem as the store.
+	Offer(file string) error
 }
 
 // Status is the "sync" object of /api/local/status.

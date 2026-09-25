@@ -8,7 +8,8 @@
 //	key_path       = "/etc/musallahboard/agent.key"
 //
 // Optional keys (docs/architecture.md, section 11): service_port, usb_import,
-// content_sync, content_days, auto_update, app_channel_url, agent_channel_url.
+// content_sync, content_days, auto_update, app_channel_url, agent_channel_url,
+// update_time.
 //
 // Identity is proved by signing a server-issued challenge with the Ed25519 key
 // at KeyPath.
@@ -18,6 +19,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -30,6 +33,7 @@ const (
 	DefaultAppChannelURL   = "https://github.com/LensBridge/MusallahBoard/releases/latest/download/app-channel.json"
 	DefaultAgentChannelURL = "https://github.com/LensBridge/agent/releases/latest/download/agent-channel-%s.json"
 	DefaultContentDays     = 7
+	DefaultUpdateHour      = 23
 )
 
 // Config is the persisted agent configuration written at enrollment.
@@ -51,6 +55,7 @@ type Config struct {
 	AutoUpdateSet   *bool   `toml:"auto_update,omitempty"`
 	AppChannelSet   *string `toml:"app_channel_url,omitempty"`
 	AgentChannelSet *string `toml:"agent_channel_url,omitempty"`
+	UpdateTimeSet   *string `toml:"update_time,omitempty"`
 }
 
 func boolOr(p *bool, def bool) bool {
@@ -96,6 +101,18 @@ func (c *Config) AgentChannelURL(arch string) string {
 		return *c.AgentChannelSet
 	}
 	return fmt.Sprintf(DefaultAgentChannelURL, arch)
+}
+
+// UpdateTime is when downloaded software installs, as hour and minute in the
+// board's time zone (update_time, "HH:MM", default 23:00). A malformed value
+// falls back to the default rather than stopping updates.
+func (c *Config) UpdateTime() (hour, minute int) {
+	if c.UpdateTimeSet != nil {
+		if t, err := time.Parse("15:04", strings.TrimSpace(*c.UpdateTimeSet)); err == nil {
+			return t.Hour(), t.Minute()
+		}
+	}
+	return DefaultUpdateHour, 0
 }
 
 func Load(path string) (*Config, error) {

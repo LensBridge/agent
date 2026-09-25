@@ -163,6 +163,25 @@ func printStatus(st cliStatus) {
 			row("Sync", "not yet attempted")
 		}
 	}
+	if u := st.Updates; u != nil {
+		switch {
+		case u.Installing:
+			row("Updates", "installing now")
+		case len(u.Available) == 0:
+			row("Updates", "none waiting (installs at %s)", u.InstallTime)
+		default:
+			var names []string
+			for _, a := range u.Available {
+				names = append(names, a.Description)
+			}
+			at := ""
+			if u.InstallAt != nil {
+				at = *u.InstallAt
+			}
+			row("Updates", "%s waiting, installs %s", strings.Join(names, " and "), at)
+			row("", "Install now: sudo musallahboard-agent update now")
+		}
+	}
 	row("Trust", "%d content key(s), %d release key(s)", st.Trust.ContentKeys, st.Trust.ReleaseKeys)
 	if st.Trust.ContentKeys == 0 {
 		row("", "No content key: run `sudo musallahboard-agent trust fetch` while online.")

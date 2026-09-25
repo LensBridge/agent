@@ -6,6 +6,7 @@ import (
 
 	"github.com/LensBridge/agent/internal/importer"
 	"github.com/LensBridge/agent/internal/store"
+	"github.com/LensBridge/agent/internal/updates"
 )
 
 // Status is /api/local/status (docs/architecture.md, section 7). The CLI and
@@ -22,7 +23,10 @@ type Status struct {
 	StaleDays     *int         `json:"staleDays"`
 	Sync          any          `json:"sync"`
 	Update        UpdateInfo   `json:"update"`
-	Error         string       `json:"error,omitempty"`
+	// Updates is the software waiting for its install window; only the
+	// daemon knows it.
+	Updates *updates.Info `json:"updates,omitempty"`
+	Error   string        `json:"error,omitempty"`
 }
 
 // AppInfo describes the installed app.

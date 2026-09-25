@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"github.com/LensBridge/agent/internal/localserver"
 	"github.com/LensBridge/agent/internal/store"
 	"github.com/LensBridge/agent/internal/trust"
+	"github.com/LensBridge/agent/internal/updates"
 	"github.com/LensBridge/agent/internal/updatescreen"
 	"github.com/LensBridge/agent/internal/uploadserver"
 	"github.com/LensBridge/agent/internal/version"
@@ -66,10 +68,21 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 		logger.Error("device key unreadable: serving installed content only (no sync, no remote commands)",
 			"err", keyErr, "keyPath", cfg.KeyPath)
 	}
+	hour, minute := cfg.UpdateTime()
 	var syncer *boardsync.Syncer
+	sched := updates.New(updates.Deps{
+		Layout: layout, Importer: imp, Hour: hour, Minute: minute, Logger: logger,
+		Changed: func(info updates.Info) { hub.UpdatesChanged(info) },
+		Check: func(ctx context.Context) error {
+			if syncer == nil {
+				return errors.New("this board cannot reach the release channels (device key unreadable)")
+			}
+			return syncer.CheckChannels(ctx)
+		},
+	})
 	if keyErr == nil {
 		syncer = boardsync.New(boardsync.Deps{
-			Cfg: cfg, Key: priv, Layout: layout, Importer: imp,
+			Cfg: cfg, Key: priv, Layout: layout, Importer: imp, Updates: sched,
 			AgentVersion: version.Version, Logger: logger,
 		})
 	}
@@ -89,6 +102,7 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 			return syncer.Weather()
 		},
 		UpdateActive: screen.Active,
+		Updates:      sched.Info,
 		Logger:       logger,
 	})
 	ln, err := net.Listen("tcp", localserver.ListenAddr)
@@ -116,6 +130,7 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 	goRun(wg, func() { watchKiosk(ctx, logger, cdpClient) })
 	goRun(wg, func() { imp.RunInbox(ctx) })
 	goRun(wg, func() { keeper.Run(ctx) })
+	goRun(wg, func() { sched.Run(ctx) })
 
 	if cfg.ServicePort() {
 		startUploadServer(ctx, logger, cfg, layout, imp, keeper, screen, wg)
@@ -123,7 +138,7 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 
 	if syncer != nil {
 		goRun(wg, func() { syncer.Run(ctx) })
-		startCommandChannel(ctx, logger, cfg, priv, safeMode, cdpClient, syncer, wg)
+		startCommandChannel(ctx, logger, cfg, priv, safeMode, cdpClient, syncer, sched, wg)
 	}
 	return nil
 }
@@ -154,9 +169,10 @@ func startUploadServer(ctx context.Context, logger *slog.Logger, cfg *config.Con
 }
 
 // startCommandChannel holds the backend WebSocket (telemetry and remote
-// commands) open. config.refresh also asks the content syncer for a sync now.
+// commands) open. config.refresh also asks the content syncer for a sync now;
+// update.install_now checks the release channels and installs at once.
 func startCommandChannel(ctx context.Context, logger *slog.Logger, cfg *config.Config, priv []byte,
-	safeMode bool, cdpClient *cdp.Client, syncer *boardsync.Syncer, wg *sync.WaitGroup) {
+	safeMode bool, cdpClient *cdp.Client, syncer *boardsync.Syncer, sched *updates.Scheduler, wg *sync.WaitGroup) {
 	wsClient := wsclient.New(cfg, priv, logger, version.Version, safeMode)
 	wsClient.SetPageProber(cdpClient)
 	registry := commands.NewRegistry()
@@ -166,6 +182,7 @@ func startCommandChannel(ctx context.Context, logger *slog.Logger, cfg *config.C
 	registry.Register(&commands.KioskRestart{})
 	registry.Register(&commands.SystemReboot{})
 	registry.Register(&commands.LogsTail{})
+	registry.Register(&commands.UpdateInstallNow{Run: sched.CheckAndInstall})
 	logger.Info("command handlers registered", "kinds", registry.Kinds())
 	wsClient.SetCommandHandler(commands.NewDispatcher(registry, logger).Handle)
 	goRun(wg, func() { wsClient.Run(ctx) })

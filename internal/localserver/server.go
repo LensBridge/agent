@@ -26,6 +26,7 @@ import (
 	"github.com/LensBridge/agent/internal/events"
 	"github.com/LensBridge/agent/internal/mbu"
 	"github.com/LensBridge/agent/internal/store"
+	"github.com/LensBridge/agent/internal/updates"
 	"github.com/LensBridge/agent/internal/updatescreen"
 	updateanim "github.com/LensBridge/agent/update-anim"
 )
@@ -57,8 +58,10 @@ type Deps struct {
 	Weather func() (json.RawMessage, bool)
 	// UpdateActive reports whether the update screen is up. May be nil.
 	UpdateActive func() bool
-	Logger       *slog.Logger
-	Now          func() time.Time
+	// Updates reports the software waiting to install. May be nil.
+	Updates func() updates.Info
+	Logger  *slog.Logger
+	Now     func() time.Time
 }
 
 // Server serves the kiosk.
@@ -130,6 +133,10 @@ func (s *Server) Status() Status {
 	}
 	if s.d.UpdateActive != nil {
 		st.Update.Active = s.d.UpdateActive()
+	}
+	if s.d.Updates != nil {
+		info := s.d.Updates()
+		st.Updates = &info
 	}
 	return st
 }
