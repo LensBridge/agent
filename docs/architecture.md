@@ -717,6 +717,14 @@ connecting a board to a network permanently.
 - `musallahboard-kiosk.service` is ordered `After=` and `Wants=`
   `musallahboard-agent.service`, and the agent reports `READY=1` only after the
   local server is listening, so Chromium never starts before the server.
+- On an enrolled board the kiosk opens `starting.html` (a local page, embedded
+  in the agent with `waiting.html`) with the board's URL in its fragment. It
+  loads `/_mb/alive.gif` from the agent every 2 s and moves to the board once
+  that answers, so Chromium never shows its own "refused to connect" page
+  while the agent starts or restarts.
+- The agent's unit never gives up restarting (`StartLimitIntervalSec=0`); a
+  crash loop backs off from 5 s to 2 minutes (`RestartSteps`,
+  `RestartMaxDelaySec`, systemd 254 and later).
 - The daemon still watches for Chromium's error page and navigates back to the
   board, as a backstop.
 

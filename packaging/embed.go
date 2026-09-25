@@ -10,3 +10,9 @@ import _ "embed"
 //
 //go:embed waiting.html
 var WaitingHTML []byte
+
+// StartingHTML is starting.html: the kiosk's first page on an enrolled board,
+// which waits for the agent to answer before moving to the board.
+//
+//go:embed starting.html
+var StartingHTML []byte

@@ -70,6 +70,8 @@ SERVICE_USER=musallahdaemon
 
 # Paths
 BINARY_DEST=/usr/bin/musallahboard-agent
+# Where this script is published (for the instructions it prints).
+SETUP_URL=https://raw.githubusercontent.com/lensbridge/agent/main/setup.sh
 CONFIG_DIR=/etc/musallahboard
 UNIT_DIR=/lib/systemd/system
 SUDOERS_DEST=/etc/sudoers.d/musallahboard-agent
@@ -574,8 +576,7 @@ Description=MusallahBoard device agent
 Documentation=https://github.com/LensBridge/agent
 After=network-online.target
 Wants=network-online.target
-StartLimitBurst=5
-StartLimitIntervalSec=60
+StartLimitIntervalSec=0
 
 [Service]
 Type=notify
@@ -584,6 +585,8 @@ Group=musallahdaemon
 ExecStart=/usr/bin/musallahboard-agent run
 Restart=always
 RestartSec=5
+RestartSteps=6
+RestartMaxDelaySec=120
 WatchdogSec=60s
 AmbientCapabilities=CAP_SYS_TIME CAP_NET_BIND_SERVICE
 ProtectSystem=strict
@@ -817,12 +820,19 @@ set -euo pipefail
 
 KIOSK_URL_FILE="/etc/musallahboard/kiosk-url"
 SPLASH="file:///usr/share/musallahboard/waiting.html"
+STARTING="file:///usr/share/musallahboard/starting.html"
 
 URL=""
 if [[ -r "$KIOSK_URL_FILE" ]]; then
     URL="$(tr -d '[:space:]' < "$KIOSK_URL_FILE")"
 fi
-[[ -z "$URL" ]] && URL="$SPLASH"
+if [[ -z "$URL" ]]; then
+    URL="$SPLASH"
+elif [[ -r "${STARTING#file://}" ]]; then
+    # Through the local "starting" page, which waits for the agent to answer
+    # instead of leaving Chromium on its "refused to connect" page.
+    URL="${STARTING}#${URL}"
+fi
 
 pick_browser() {
     local cand
@@ -945,10 +955,13 @@ print_summary() {
   Until then the kiosk shows the local "waiting" splash, which prints this
   device's IP address on screen once it has one - that is the <ip> to SSH to.
   On enrollment the kiosk switches to the board served by the agent, which
-  starts syncing content and fetches the board app right away.
+  starts syncing content and downloads the board app within a few minutes.
 
-  A board that will not have internet: after enrolling, while it still has
-  internet, run  bash setup.sh --service-port
+  A board that will not have internet: after enrolling, turn on the ethernet
+  service port (laptop and phone updates at http://10.77.0.1/):
+      sudo musallahboard-agent service-port on
+  To fit a DS3231 clock module as well, re-run this setup with --rtc:
+      curl -fsSL $SETUP_URL | bash -s -- --service-port --rtc
 
   * Boots multi-user -> musallahboard-kiosk.service -> cage -> browser
   * SSH as $ADMIN_USER to manage the system
@@ -1065,7 +1078,7 @@ service_port_profiles() {
     elif existing="$(_saved_wired_profile)"; then
         info "Keeping your saved wired profile '$existing' as eth0's first choice"
         warn "It keeps NetworkManager's default of 4 attempts, so a laptop may wait a few minutes"
-        warn "for an address. Delete it to use $LAN_CONN instead, then re-run setup.sh --service-port."
+        warn "for an address. Delete it to use $LAN_CONN instead, then re-run this setup."
     else
         sudo nmcli connection add type ethernet con-name "$LAN_CONN" "${lan_props[@]}"
         info "Created NetworkManager connection $LAN_CONN (DHCP client, tried first)"
@@ -1153,6 +1166,22 @@ EOF
     warn "for example on the next upload from a laptop (mbpush or http://10.77.0.1/)."
 }
 
+# Part of the normal setup: everything the service port needs, left OFF, so
+# `sudo musallahboard-agent service-port on` works later without this script
+# (which a curl | bash install does not leave on the board). The service-port
+# profile does not autoconnect until it is switched on, so eth0 behaves as
+# before: a DHCP client on whatever network it is plugged into.
+prepare_service_port() {
+    if ! command -v nmcli >/dev/null; then
+        warn "nmcli not found: the ethernet service port needs NetworkManager; skipping it"
+        return
+    fi
+    service_port_install_packages
+    service_port_profiles
+    service_port_firewall
+    info "Service port prepared and OFF. Turn it on with: sudo musallahboard-agent service-port on"
+}
+
 service_port_switch_on() {
     section "Service port: switch on"
     # If eth0 is on a network right now, `service-port on` leaves the port
@@ -1221,6 +1250,7 @@ main() {
     setup_journal
     setup_unattended_upgrades
     setup_ufw
+    prepare_service_port
     setup_pi_extras
 
     install_agent_binary

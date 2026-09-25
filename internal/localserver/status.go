@@ -35,6 +35,9 @@ type Status struct {
 	// accepts, so screens only suggest the ones that work.
 	ServicePort bool `json:"servicePort"`
 	USBImport   bool `json:"usbImport"`
+	// Backend is the connection to LensBridge ({connected, since,
+	// lastError}), for `status`; absent without a device key.
+	Backend any `json:"backend,omitempty"`
 	// Updates is the software waiting for its install window; only the
 	// daemon knows it.
 	Updates *updates.Info `json:"updates,omitempty"`

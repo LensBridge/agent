@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coreos/go-systemd/v22/daemon"
@@ -95,6 +96,9 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 		})
 	}
 
+	// The backend connection starts after the local server; its state is
+	// read through this once it exists.
+	var backend atomic.Pointer[wsclient.Client]
 	local := localserver.New(localserver.Deps{
 		Layout: layout, DeviceID: cfg.DeviceID, AgentVersion: version.Version, Hub: hub,
 		Sync: func() any {
@@ -112,9 +116,16 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 		UpdateActive: screen.Active,
 		Updates:      sched.Info,
 		Clock:        keeper.Info,
-		ServicePort:  cfg.ServicePort(),
-		USBImport:    cfg.USBImport(),
-		Logger:       logger,
+		Backend: func() any {
+			if ws := backend.Load(); ws != nil {
+				s := ws.State()
+				return &s
+			}
+			return nil
+		},
+		ServicePort: cfg.ServicePort(),
+		USBImport:   cfg.USBImport(),
+		Logger:      logger,
 	})
 	ln, err := net.Listen("tcp", localserver.ListenAddr)
 	if err != nil {
@@ -154,8 +165,9 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 
 	if syncer != nil {
 		goRun(wg, func() { syncer.Run(ctx) })
-		startCommandChannel(ctx, logger, cfg, priv, safeMode, cdpClient, syncer, sched,
+		ws := startCommandChannel(ctx, logger, cfg, priv, safeMode, cdpClient, syncer, sched,
 			func() any { return local.Status().Board() }, wg)
+		backend.Store(ws)
 	}
 	return nil
 }
@@ -191,7 +203,7 @@ func startUploadServer(ctx context.Context, logger *slog.Logger, cfg *config.Con
 // update.install_now checks the release channels and installs at once.
 func startCommandChannel(ctx context.Context, logger *slog.Logger, cfg *config.Config, priv []byte,
 	safeMode bool, cdpClient *cdp.Client, syncer *boardsync.Syncer, sched *updates.Scheduler,
-	boardReport func() any, wg *sync.WaitGroup) {
+	boardReport func() any, wg *sync.WaitGroup) *wsclient.Client {
 	wsClient := wsclient.New(cfg, priv, logger, version.Version, safeMode)
 	wsClient.SetPageProber(cdpClient)
 	wsClient.SetBoardReport(boardReport)
@@ -206,6 +218,7 @@ func startCommandChannel(ctx context.Context, logger *slog.Logger, cfg *config.C
 	logger.Info("command handlers registered", "kinds", registry.Kinds())
 	wsClient.SetCommandHandler(commands.NewDispatcher(registry, logger).Handle)
 	goRun(wg, func() { wsClient.Run(ctx) })
+	return wsClient
 }
 
 // watchKiosk navigates Chromium back to the board if it lands on its own

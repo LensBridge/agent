@@ -24,11 +24,20 @@ set -euo pipefail
 KIOSK_URL_FILE="/etc/musallahboard/kiosk-url"
 SPLASH="file:///usr/share/musallahboard/waiting.html"
 
+STARTING="file:///usr/share/musallahboard/starting.html"
+
 URL=""
 if [[ -r "$KIOSK_URL_FILE" ]]; then
     URL="$(tr -d '[:space:]' < "$KIOSK_URL_FILE")"
 fi
-[[ -z "$URL" ]] && URL="$SPLASH"
+if [[ -z "$URL" ]]; then
+    URL="$SPLASH"
+elif [[ -r "${STARTING#file://}" ]]; then
+    # Open the board through the local "starting" page, which waits for the
+    # agent to answer: loading the agent's URL while it is down would leave
+    # Chromium on its own "refused to connect" page.
+    URL="${STARTING}#${URL}"
+fi
 
 # Resolve a real (non-snap) browser. A snap shim is a tiny shell script that
 # execs /snap/bin or BAMF_DESKTOP_FILE_HINT; a real browser is an ELF. Treat

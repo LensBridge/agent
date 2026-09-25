@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MusallahBoard</title>
+<!--
+  The kiosk's first page on an enrolled board (packaging/start-kiosk.sh), and
+  where it waits when the agent is not answering: file://, so it needs nothing
+  from anyone. It pings the agent by loading an image from it (a file:// page
+  cannot read an http response, but an image either loads or it does not) and
+  moves to the board, whose address is in the fragment, the moment it answers.
+  Without it, Chromium would show its own "refused to connect" page.
+-->
+<style>
+  html, body { height: 100%; margin: 0; background: #082D5D; color: #fff;
+               font-family: "Montserrat", system-ui, sans-serif; }
+  main { height: 100%; display: grid; place-items: center; text-align: center; }
+  h1 { margin: 4vmin 0 0; font-weight: 300; font-size: 4.2vmin; letter-spacing: 0.01em; }
+  p  { margin: 2vmin auto 0; max-width: 60ch; font-size: 2.4vmin; line-height: 1.45; opacity: .75; }
+  p:empty { display: none; }
+  svg { width: 12vmin; height: 12vmin; overflow: visible; }
+  circle { fill: none; stroke: #F8E15D; stroke-width: 4; stroke-linecap: round;
+           stroke-dasharray: 120 358; transform-origin: 100px 100px;
+           animation: spin 1.4s linear infinite;
+           filter: drop-shadow(0 0 10px rgba(248, 225, 93, 0.45)); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+  <main>
+    <div>
+      <svg viewBox="0 0 200 200" aria-hidden="true"><circle cx="100" cy="100" r="76" /></svg>
+      <h1>MusallahBoard is starting</h1>
+      <p id="slow"></p>
+    </div>
+  </main>
+<script>
+(function () {
+  var target = decodeURIComponent(location.hash.slice(1)) || 'http://127.0.0.1:8080/';
+  var ping = target.replace(/\/*$/, '') + '/_mb/alive.gif';
+  var started = Date.now();
+  function check() {
+    var img = new Image();
+    img.onload = function () { location.replace(target); };
+    img.onerror = function () {
+      if (Date.now() - started > 3 * 60 * 1000) {
+        document.getElementById('slow').textContent =
+          'This is taking longer than usual. If it does not clear in a few minutes, switch the board off and on again.';
+      }
+      setTimeout(check, 2000);
+    };
+    img.src = ping + '?t=' + Date.now();
+  }
+  check();
+})();
+</script>
+</body>
+</html>

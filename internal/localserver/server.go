@@ -66,8 +66,11 @@ type Deps struct {
 	Clock func() clock.Info
 	// ServicePort and USBImport are the board's offline routes (agent.toml).
 	ServicePort, USBImport bool
-	Logger                 *slog.Logger
-	Now                    func() time.Time
+	// Backend reports the backend connection (wsclient.ConnState), or nil
+	// when there is none. May be nil.
+	Backend func() any
+	Logger  *slog.Logger
+	Now     func() time.Time
 }
 
 // Server serves the kiosk.
@@ -122,6 +125,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "not found")
 	case strings.HasPrefix(p, "/media/"):
 		s.handleMedia(w, r)
+	case p == "/_mb/alive.gif":
+		// The kiosk's starting page (packaging/starting.html) loads this to
+		// see whether the agent answers; an image is the one thing a
+		// file:// page can tell loaded from failed.
+		w.Header().Set("Cache-Control", cacheNoStore)
+		w.Header().Set("Content-Type", "image/gif")
+		_, _ = w.Write(aliveGIF)
 	case p == updatescreen.Path:
 		w.Header().Set("Cache-Control", cacheNoStore)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -135,6 +145,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Status() Status {
 	st := BuildStatus(s.d.Layout, s.d.DeviceID, s.d.AgentVersion, s.d.Now())
 	st.ServicePort, st.USBImport = s.d.ServicePort, s.d.USBImport
+	if s.d.Backend != nil {
+		st.Backend = s.d.Backend()
+	}
 	if s.d.Sync != nil {
 		st.Sync = s.d.Sync()
 	}
@@ -335,6 +348,10 @@ func (s *Server) noAppPage() string {
 	}
 	return strings.Replace(noAppHTML, "{{offline}}", html.EscapeString(offline), 1)
 }
+
+// aliveGIF is a transparent 1x1 GIF.
+var aliveGIF = []byte("GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\x00\x00\x00" +
+	"!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;")
 
 const noAppHTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>MusallahBoard</title>
