@@ -41,6 +41,8 @@ function loadStatus(){fetch('/api/status',{cache:'no-store'}).then(function(r){r
  var drift=Math.round(s.clock.unix-Date.now()/1000);
  row(dl,'Board clock',new Date(s.clock.unix*1000).toLocaleString()+(Math.abs(drift)>5?(' ('+drift+' s off this computer; corrected when you send an update)'):''));
  row(dl,'RTC',s.rtc?'present':'not fitted');
+ var src={ntp:'set from the internet',rtc:'kept by the hardware clock',uploader:'set from a laptop or phone',starting:'checking',unverified:'NOT CONFIRMED: send an update from this page to set it'};
+ if(s.clock.source)row(dl,'Clock',src[s.clock.source]||s.clock.source);
 }).catch(function(){document.getElementById('st').textContent='Could not reach the board.'})}
 function show(){var ul=document.getElementById('files');ul.textContent='';chosen.forEach(function(f){ul.appendChild(el('li',null,f.name+' ('+Math.round(f.size/1024)+' KB)'))});
  document.getElementById('send').disabled=!chosen.length}

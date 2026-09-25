@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LensBridge/agent/internal/clock"
 	"github.com/LensBridge/agent/internal/localserver"
 	"github.com/LensBridge/agent/internal/store"
 	"github.com/LensBridge/agent/internal/trust"
@@ -191,6 +192,21 @@ func printStatus(st cliStatus) {
 	}
 	t, _ := time.Parse(time.RFC3339, st.Clock.Now)
 	row("Clock", "%s (%s)", t.Format("Mon 2 Jan 2006 15:04:05 MST"), st.Clock.Timezone)
+	if c := st.Status.Clock; c != nil {
+		switch c.Source {
+		case clock.SourceNTP:
+			row("", "synchronised over the internet")
+		case clock.SourceRTC:
+			row("", "kept by the hardware clock")
+		case clock.SourceUploader:
+			row("", "set from a laptop or phone since boot")
+		case clock.SourceStarting:
+			row("", "not confirmed yet (just booted)")
+		default:
+			row("", "NOT CONFIRMED since boot: it may be wrong. Connect the board to the internet,")
+			row("", "fit an RTC (setup.sh --rtc), or send an update from http://10.77.0.1/")
+		}
+	}
 	if st.RTC {
 		row("RTC", "present (%s)", rtcDevice)
 	} else {

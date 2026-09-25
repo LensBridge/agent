@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LensBridge/agent/internal/clock"
 	"github.com/LensBridge/agent/internal/events"
 	"github.com/LensBridge/agent/internal/mbu"
 	"github.com/LensBridge/agent/internal/store"
@@ -60,8 +61,10 @@ type Deps struct {
 	UpdateActive func() bool
 	// Updates reports the software waiting to install. May be nil.
 	Updates func() updates.Info
-	Logger  *slog.Logger
-	Now     func() time.Time
+	// Clock says whether the board's clock can be believed. May be nil.
+	Clock  func() clock.Info
+	Logger *slog.Logger
+	Now    func() time.Time
 }
 
 // Server serves the kiosk.
@@ -137,6 +140,10 @@ func (s *Server) Status() Status {
 	if s.d.Updates != nil {
 		info := s.d.Updates()
 		st.Updates = &info
+	}
+	if s.d.Clock != nil {
+		c := s.d.Clock()
+		st.Clock = &c
 	}
 	return st
 }

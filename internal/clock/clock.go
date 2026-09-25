@@ -12,6 +12,10 @@
 // package in that same upload verified and the time is within 90 days of the
 // floor, so an unauthenticated client cannot set the board to any date it
 // likes.
+//
+// The floor keeps the clock from going backwards; it cannot say the clock is
+// right. Info does: a board without NTP, an RTC, or a laptop's time since it
+// last booted is showing whatever time it came up with, and says so.
 package clock
 
 import (
@@ -20,9 +24,12 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/LensBridge/agent/internal/importer"
+	"github.com/LensBridge/agent/internal/state"
 	"github.com/LensBridge/agent/internal/store"
 )
 
@@ -41,7 +48,33 @@ const (
 
 	// DefaultRTCDevice is the kernel's first hardware clock.
 	DefaultRTCDevice = "/dev/rtc0"
+
+	// BootGrace is how long after boot an unverified clock is given before
+	// the board says it may be wrong: an online board's NTP sync takes a
+	// moment, and a warning that flashes up at every boot is noise.
+	BootGrace = 3 * time.Minute
 )
+
+// Where the clock's time comes from.
+const (
+	SourceNTP      = "ntp"      // systemd-timesyncd has synchronised it
+	SourceRTC      = "rtc"      // a battery-backed hardware clock
+	SourceUploader = "uploader" // a laptop or phone's time, since boot
+	// SourceStarting: just booted, not verified yet, not yet worth a
+	// warning (BootGrace).
+	SourceStarting = "starting"
+	// SourceUnverified: nothing has confirmed the time since boot. After a
+	// power cut on an offline board without an RTC it can be days out.
+	SourceUnverified = "unverified"
+)
+
+// Info says whether the board's clock can be believed.
+type Info struct {
+	Source string `json:"source"`
+	// Trusted is false only when there is reason to warn: the board
+	// should say its clock may be wrong.
+	Trusted bool `json:"trusted"`
+}
 
 // ClockReport is what the upload server returns about the uploader's clock.
 // DriftSeconds is the board's clock minus the uploader's, measured before any
@@ -63,6 +96,10 @@ type Keeper struct {
 	WriteRTC func() error
 	// RTCDevice is checked for existence by RTCPresent.
 	RTCDevice string
+	// NTPSynced, Uptime and BootID are replaceable for tests.
+	NTPSynced func() bool
+	Uptime    func() time.Duration
+	BootID    func() string
 }
 
 // New returns a Keeper for the board's state in layout.
@@ -77,7 +114,71 @@ func New(layout store.Layout, logger *slog.Logger) *Keeper {
 		SetClock:  setSystemClock,
 		WriteRTC:  writeRTC,
 		RTCDevice: DefaultRTCDevice,
+		NTPSynced: timesyncdSynced,
+		Uptime:    uptime,
+		BootID:    bootID,
 	}
+}
+
+// Info reports where the clock's time comes from and whether to trust it.
+func (k *Keeper) Info() Info {
+	switch {
+	case k.NTPSynced():
+		return Info{Source: SourceNTP, Trusted: true}
+	case k.RTCPresent():
+		return Info{Source: SourceRTC, Trusted: true}
+	}
+	if st, err := k.layout.State().Load(); err == nil && st.ClockSetBoot != "" && st.ClockSetBoot == k.BootID() {
+		return Info{Source: SourceUploader, Trusted: true}
+	}
+	if k.Uptime() < BootGrace {
+		return Info{Source: SourceStarting, Trusted: true}
+	}
+	return Info{Source: SourceUnverified, Trusted: false}
+}
+
+// verifiedThisBoot records that an uploader's time confirmed the clock since
+// this boot.
+func (k *Keeper) verifiedThisBoot() {
+	id := k.BootID()
+	if id == "" {
+		return
+	}
+	if _, err := k.layout.State().Update(func(s *state.State) error { s.ClockSetBoot = id; return nil }); err != nil {
+		k.logger.Warn("clock: could not record the verified time", "err", err)
+	}
+}
+
+// timesyncdSynced reports whether systemd-timesyncd has synchronised the
+// clock since boot; it creates this file when it does (systemd 239 and
+// later).
+func timesyncdSynced() bool {
+	_, err := os.Stat("/run/systemd/timesync/synchronized")
+	return err == nil
+}
+
+func uptime() time.Duration {
+	raw, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		return 0
+	}
+	f := strings.Fields(string(raw))
+	if len(f) == 0 {
+		return 0
+	}
+	secs, err := strconv.ParseFloat(f[0], 64)
+	if err != nil {
+		return 0
+	}
+	return time.Duration(secs * float64(time.Second))
+}
+
+func bootID() string {
+	raw, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
 }
 
 // RTCPresent reports whether the board has a hardware clock.
@@ -151,6 +252,9 @@ func (k *Keeper) ApplyClientTime(clientUnix int64, b importer.Batch) ClockReport
 	rep := ClockReport{DriftSeconds: drift}
 	if abs(drift) <= int64(ClientTolerance/time.Second) {
 		rep.Note = "the board's clock agrees with this device"
+		if b.Verified {
+			k.verifiedThisBoot()
+		}
 		return rep
 	}
 	if !b.Verified {
@@ -178,6 +282,7 @@ func (k *Keeper) ApplyClientTime(clientUnix int64, b importer.Batch) ClockReport
 		return rep
 	}
 	rep.Adjusted = true
+	k.verifiedThisBoot()
 	rep.Note = fmt.Sprintf("the board's clock was %s and has been set to this device's time", describeDrift(drift))
 	k.logger.Info("clock set from uploader", "driftSeconds", drift, "to", target.UTC().Format(time.RFC3339))
 	if err := k.layout.State().RaiseClockFloor(clientUnix); err != nil {

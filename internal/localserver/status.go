@@ -4,6 +4,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/LensBridge/agent/internal/clock"
 	"github.com/LensBridge/agent/internal/importer"
 	"github.com/LensBridge/agent/internal/selfupdate"
 	"github.com/LensBridge/agent/internal/store"
@@ -24,6 +25,9 @@ type Status struct {
 	StaleDays     *int         `json:"staleDays"`
 	Sync          any          `json:"sync"`
 	Update        UpdateInfo   `json:"update"`
+	// Clock says whether the board's clock can be believed; only the
+	// daemon knows.
+	Clock *clock.Info `json:"clock,omitempty"`
 	// LastAgentUpdate is the root updater's last outcome, if any.
 	LastAgentUpdate *selfupdate.Outcome `json:"lastAgentUpdate"`
 	// Updates is the software waiting for its install window; only the

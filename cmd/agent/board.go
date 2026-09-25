@@ -111,6 +111,7 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 		},
 		UpdateActive: screen.Active,
 		Updates:      sched.Info,
+		Clock:        keeper.Info,
 		Logger:       logger,
 	})
 	ln, err := net.Listen("tcp", localserver.ListenAddr)
@@ -170,6 +171,7 @@ func startUploadServer(ctx context.Context, logger *slog.Logger, cfg *config.Con
 			return uploadserver.ClockReport{DriftSeconds: r.DriftSeconds, Adjusted: r.Adjusted, Note: r.Note}
 		},
 		RTCPresent:   keeper.RTCPresent,
+		ClockInfo:    keeper.Info,
 		UpdateActive: screen.Active,
 		Logger:       logger,
 	})

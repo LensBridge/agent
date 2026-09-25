@@ -614,6 +614,15 @@ Correct time decides which day's content is shown and the prayer times.
   sending; the board measures the offset when the request arrives) is applied only after at least one package in
   that request verified, only when it differs by more than 5 s, and only within
   `[clockFloor, clockFloor + 90 days]`. The response reports the drift.
+- **Trust.** The floor keeps the clock from going backwards; it cannot say
+  the clock is right. `clock` in `/api/local/status` does: `source` is `ntp`
+  (systemd-timesyncd has synchronised it), `rtc` (a hardware clock is
+  fitted), `uploader` (an upload with a verified package set or confirmed it
+  since this boot, recorded against the kernel boot id), `starting` (the
+  first 3 minutes after boot) or `unverified`. `trusted` is false only for
+  `unverified`, and then the board shows "The clock may be wrong: connect the
+  board to the internet, or send an update from a laptop", the upload page
+  says the clock is not confirmed, and `status` suggests an RTC.
 - A DS3231 RTC is still recommended (`setup.sh --rtc`), and online boards keep
   `systemd-timesyncd`.
 

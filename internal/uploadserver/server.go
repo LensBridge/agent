@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/LensBridge/agent/internal/clock"
 	"github.com/LensBridge/agent/internal/fsutil"
 	"github.com/LensBridge/agent/internal/importer"
 	"github.com/LensBridge/agent/internal/localserver"
@@ -65,9 +66,11 @@ type Deps struct {
 	// May be nil.
 	ApplyClientTime func(clientUnix int64, b importer.Batch) ClockReport
 	RTCPresent      func() bool
-	UpdateActive    func() bool
-	Logger          *slog.Logger
-	Now             func() time.Time
+	// ClockInfo says whether the board's clock can be believed. May be nil.
+	ClockInfo    func() clock.Info
+	UpdateActive func() bool
+	Logger       *slog.Logger
+	Now          func() time.Time
 }
 
 // Server is the upload server.
@@ -144,6 +147,7 @@ type Status struct {
 	Clock         struct {
 		Unix     int64  `json:"unix"`
 		Timezone string `json:"timezone"`
+		clock.Info
 	} `json:"clock"`
 	RTC    bool                   `json:"rtc"`
 	Update localserver.UpdateInfo `json:"update"`
@@ -158,6 +162,9 @@ func (s *Server) status() Status {
 	st.Clock.Timezone, _ = now.Zone()
 	if s.d.RTCPresent != nil {
 		st.RTC = s.d.RTCPresent()
+	}
+	if s.d.ClockInfo != nil {
+		st.Clock.Info = s.d.ClockInfo()
 	}
 	if s.d.UpdateActive != nil {
 		st.Update.Active = s.d.UpdateActive()
