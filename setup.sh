@@ -143,6 +143,12 @@ fi
 
 # ── Helper: read one answer ───────────────────────────────────────────────────
 # $1 variable to set   $2 prompt text   $3 default
+# _interactive: can we ask the person running this? Under `curl ... | bash`
+# stdin is the script itself, so questions go to the terminal, /dev/tty.
+_interactive() {
+    [[ "$MB_ASSUME_YES" != "1" ]] && { : < /dev/tty; } 2>/dev/null
+}
+
 _ask() {
     local _var="$1" _prompt="$2" _default="$3" _preset _reply
     _preset="${!_var-}"
@@ -152,22 +158,25 @@ _ask() {
         return 0
     fi
 
-    if [[ "$MB_ASSUME_YES" == "1" ]] || [[ ! -t 0 ]]; then
+    if ! _interactive; then
         printf -v "$_var" '%s' "$_default"
         printf '  %-34s %s (default)\n' "$_prompt" "$_default"
         return 0
     fi
 
-    read -rp "$(printf '  %-34s [%s]: ' "$_prompt" "$_default")" _reply
+    if [[ -n "$_default" ]]; then
+        read -rp "$(printf '  %-34s [%s]: ' "$_prompt" "$_default")" _reply < /dev/tty
+    else
+        read -rp "$(printf '  %-34s: ' "$_prompt")" _reply < /dev/tty
+    fi
     printf -v "$_var" '%s' "${_reply:-$_default}"
     return 0
 }
 
 _confirm() {
     local _prompt="$1" _reply
-    [[ "$MB_ASSUME_YES" == "1" ]] && return 0
-    [[ ! -t 0 ]] && return 0
-    read -rp "$_prompt" -n 1 _reply; echo
+    _interactive || return 0
+    read -rp "$_prompt" -n 1 _reply < /dev/tty; echo
     [[ $_reply =~ ^[Yy]$ ]]
 }
 
@@ -209,8 +218,13 @@ prompt_config() {
     TIMEZONE="${MB_TIMEZONE-}"
 
     _ask HOSTNAME   "Hostname for this board"          "musallahboard"
-    _ask ADMIN_USER "Admin username (SSH/sudo)"        "ibra"
+    _ask ADMIN_USER "Admin username (SSH/sudo)"        ""
     _ask TIMEZONE   "Timezone"                         "America/Toronto"
+
+    [[ -n "$ADMIN_USER" ]] || \
+        error "An admin username is required (the account you will SSH in as). Set MB_ADMIN_USER when not running interactively."
+    [[ "$ADMIN_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || \
+        error "'$ADMIN_USER' is not a valid Linux username (lowercase letters, digits, - and _)."
 
     # Validate admin user is not a reserved name.
     for _reserved in musallahdaemon "$KIOSK_USER"; do
@@ -222,13 +236,15 @@ prompt_config() {
     SSH_PUB_KEY="${MB_ADMIN_SSH_KEY-}"
     if [[ -n "$SSH_PUB_KEY" ]]; then
         info "SSH key supplied for $ADMIN_USER"
-    elif [[ -t 0 ]]; then
-        echo "Paste the SSH public key for $ADMIN_USER:"
-        read -rp "> " SSH_PUB_KEY
-        [[ -z "$SSH_PUB_KEY" ]] && error "SSH public key is required (headless Pi)."
+    elif _interactive; then
+        echo "Paste the SSH public key for $ADMIN_USER (one line, starting ssh-ed25519 or ssh-rsa):"
+        read -rp "> " SSH_PUB_KEY < /dev/tty
+        [[ -z "$SSH_PUB_KEY" ]] && error "An SSH public key is required: the board has no password login."
     else
-        error "SSH public key is required. Pass MB_ADMIN_SSH_KEY."
+        error "An SSH public key is required: the board has no password login. Set MB_ADMIN_SSH_KEY."
     fi
+    [[ "$SSH_PUB_KEY" =~ ^(ssh-|ecdsa-|sk-) ]] || \
+        error "That does not look like an SSH public key (it should start with ssh-ed25519, ssh-rsa or ecdsa-)."
 
     echo
     info "Summary"
