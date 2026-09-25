@@ -766,6 +766,17 @@ EOF
     # Apply the rtc0 permissions now. Not the block subsystem: that would
     # start an import from a stick that happens to be plugged in.
     sudo udevadm trigger --subsystem-match=rtc --action=change || true
+
+    # KEEP IN SYNC with packaging/modules-load.d/. The USB helper's sandbox
+    # (ProtectKernelModules=yes) cannot load filesystem drivers, so exFAT and
+    # NTFS sticks need them loaded at boot, and now.
+    sudo mkdir -p /etc/modules-load.d
+    printf '%s\n' \
+        "# MusallahBoard: filesystem drivers for USB update sticks (see setup.sh)." \
+        exfat ntfs3 | sudo tee /etc/modules-load.d/musallahboard.conf > /dev/null
+    sudo chmod 0644 /etc/modules-load.d/musallahboard.conf
+    sudo modprobe exfat 2>/dev/null || warn "Could not load exfat now; exFAT sticks work after a reboot"
+    sudo modprobe ntfs3 2>/dev/null || warn "Could not load ntfs3 now; NTFS sticks work after a reboot"
     info "USB sticks start musallahboard-usb-import@<dev>.service; rtc0 is writable by $SERVICE_USER"
 }
 

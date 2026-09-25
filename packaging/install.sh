@@ -313,6 +313,17 @@ if systemd_running && command -v udevadm >/dev/null; then
 fi
 info "Installed ${UDEV_RULES[*]} in $UDEV_DIR"
 
+# Filesystem drivers for USB sticks, loaded at boot: the USB helper's sandbox
+# (ProtectKernelModules=yes) cannot load them itself.
+install -d -m 0755 /etc/modules-load.d
+install -o root -g root -m 0644 "${AGENT_DIR}/packaging/modules-load.d/musallahboard.conf" \
+    /etc/modules-load.d/musallahboard.conf
+if systemd_running; then
+    modprobe exfat 2>/dev/null || warn "Could not load exfat now; exFAT sticks work after a reboot"
+    modprobe ntfs3 2>/dev/null || warn "Could not load ntfs3 now; NTFS sticks work after a reboot"
+fi
+info "Installed /etc/modules-load.d/musallahboard.conf (exfat, ntfs3)"
+
 # ── Kiosk (cage + Chromium) ───────────────────────────────────────────────────
 if [[ "$WANT_KIOSK" == "yes" ]]; then
     section "Kiosk (cage)"

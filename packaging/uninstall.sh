@@ -70,6 +70,7 @@ systemctl stop 'musallahboard-usb-import@*.service' 2>/dev/null || true
 # udev before the units, so a stick plugged in now starts nothing.
 rm -f /etc/udev/rules.d/90-musallahboard-usb.rules
 rm -f /etc/udev/rules.d/90-musallahboard-rtc.rules
+rm -f /etc/modules-load.d/musallahboard.conf
 udevadm control --reload 2>/dev/null || true
 rm -f /lib/systemd/system/musallahboard-agent.service
 rm -f /lib/systemd/system/musallahboard-kiosk.service

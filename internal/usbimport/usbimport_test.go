@@ -152,7 +152,6 @@ func newHelper(t *testing.T, f *fakeSys) (*Helper, *[]string) {
 		MountRoot:   filepath.Join(dir, "usb"),
 		DevDir:      "/dev",
 		Exec:        f.exec,
-		NTFS3:       func() bool { return false },
 		Logf:        func(format string, a ...any) { mu.Lock(); log = append(log, fmt.Sprintf(format, a...)); mu.Unlock() },
 		WaitTimeout: 2 * time.Second,
 		Poll:        10 * time.Millisecond,
@@ -242,22 +241,20 @@ func TestRunTimesOutWithoutDaemon(t *testing.T) {
 func TestRunRefusals(t *testing.T) {
 	cases := []struct {
 		name, dev, fs string
-		ntfs3         bool
 		unsupported   bool
 		mounted       string
 	}{
-		{"bad name", "mmcblk0p1", "vfat", false, false, ""},
-		{"path", "../sda1", "vfat", false, false, ""},
-		{"no filesystem", "sda1", "", false, true, ""},
-		{"iso", "sda1", "iso9660", false, true, ""},
-		{"ntfs without ntfs3", "sda1", "ntfs", false, true, ""},
-		{"ntfs with ntfs3", "sda1", "ntfs", true, false, "-t ntfs3"},
+		{"bad name", "mmcblk0p1", "vfat", false, ""},
+		{"path", "../sda1", "vfat", false, ""},
+		{"no filesystem", "sda1", "", true, ""},
+		{"iso", "sda1", "iso9660", true, ""},
+		{"ntfs goes through ntfs3", "sda1", "ntfs", false, "-t ntfs3"},
+		{"exfat", "sda1", "exfat", false, "-t exfat"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &fakeSys{fs: tc.fs, stick: map[string]int{}}
 			h, _ := newHelper(t, f)
-			h.NTFS3 = func() bool { return tc.ntfs3 }
 			err := h.Run(context.Background(), tc.dev)
 			cmds := strings.Join(f.cmds, "\n")
 			switch {
@@ -275,12 +272,5 @@ func TestRunRefusals(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestHasFS(t *testing.T) {
-	proc := "nodev\tsysfs\n\text4\n\tvfat\n\tntfs3\n"
-	if !hasFS(proc, "ntfs3") || hasFS(proc, "exfat") {
-		t.Fatal("hasFS")
 	}
 }
