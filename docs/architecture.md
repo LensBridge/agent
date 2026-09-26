@@ -501,7 +501,10 @@ still published in `signing-keys` during a rotation.
 ### 9.4 Online: release channels
 
 When `auto_update` is on, the daemon checks every 6 hours (and 2 minutes after
-start) two channel URLs, each returning:
+start) two channel URLs. A failed check (usually a board with no internet) is
+retried after 5 minutes, then 10, 20 and so on up to 6 hours, so the error
+clears soon after the network returns. Each channel fetch gives up after 30
+seconds and is retried once on a fresh connection. Each URL returns:
 
 ```json
 { "version": "2.1.0", "url": "https://…/musallahboard-app-2.1.0.mbu", "sha256": "…", "bytes": 1234567 }

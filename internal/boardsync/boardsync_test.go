@@ -550,3 +550,75 @@ func TestAutoUpdateOffSkipsChannels(t *testing.T) {
 		t.Fatal("status reports sync enabled with content_sync off")
 	}
 }
+
+// A channel request that gets no answer (a dead pooled connection, a board
+// that just lost its network) is given up on and retried once on a new
+// connection, instead of waiting minutes for response headers.
+func TestChannelFetchRetriesAStuckRequest(t *testing.T) {
+	cs := newChannelServer(t, "2.1.0", appPackage(t, "2.1.0"))
+	release := make(chan struct{})
+	var calls atomic.Int32
+	stuck := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		http.Redirect(w, r, cs.URL+"/channel.json", http.StatusFound)
+	}))
+	defer stuck.Close()
+	defer close(release)
+
+	e := newEnv(t, "http://127.0.0.1:1")
+	e.syncer.channelTimeout = 200 * time.Millisecond
+	ch, err := e.syncer.fetchChannel(context.Background(), stuck.URL+"/channel.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch.Version != "2.1.0" || calls.Load() != 2 {
+		t.Fatalf("version %q after %d calls", ch.Version, calls.Load())
+	}
+}
+
+// A server that answers is not asked twice.
+func TestChannelFetchDoesNotRetryAnAnswer(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	e := newEnv(t, "http://127.0.0.1:1")
+	if _, err := e.syncer.fetchChannel(context.Background(), srv.URL+"/channel.json"); err == nil || calls.Load() != 1 {
+		t.Fatalf("err %v after %d calls", err, calls.Load())
+	}
+}
+
+// A failed check is retried soon, not after the full channel interval.
+func TestFailedChannelCheckRetriesSoon(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.Error(w, "down", http.StatusBadGateway)
+	}))
+	defer srv.Close()
+	e := newEnv(t, "http://127.0.0.1:1")
+	e.cfg.AppChannelSet = strp(srv.URL + "/channel.json")
+	e.cfg.ContentSyncSet = boolp(false)
+	e.syncer.channelFirstDelay = time.Millisecond
+	e.syncer.channelRetry = 10 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go e.syncer.Run(ctx)
+	for calls.Load() < 3 {
+		if ctx.Err() != nil {
+			t.Fatalf("%d checks in 5s; a failure waited the full interval", calls.Load())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if e.updates.Info().LastCheckError == "" {
+		t.Fatal("the failure was not reported")
+	}
+}

@@ -42,6 +42,12 @@ const (
 	WeatherMaxAge     = 3 * time.Hour
 	ChannelFirstDelay = 2 * time.Minute
 	ChannelInterval   = 6 * time.Hour
+	// ChannelRetry is the first retry after a failed channel check. It
+	// doubles on each failure, up to ChannelInterval.
+	ChannelRetry = 5 * time.Minute
+	// ChannelTimeout bounds one fetch of a channel file, which is a few
+	// hundred bytes: a request that has had no answer by then is stuck.
+	ChannelTimeout    = 30 * time.Second
 	RefreshMinBackoff = time.Second
 	RefreshMaxBackoff = 5 * time.Minute
 
@@ -101,6 +107,7 @@ type Syncer struct {
 
 	contentInterval, triggerDelay, minBackoff, maxBackoff time.Duration
 	weatherInterval, channelFirstDelay, channelInterval   time.Duration
+	channelRetry, channelTimeout                          time.Duration
 	refreshMinBackoff, refreshMaxBackoff                  time.Duration
 
 	mu        sync.Mutex
@@ -132,6 +139,8 @@ func New(d Deps) *Syncer {
 		weatherInterval:   WeatherInterval,
 		channelFirstDelay: ChannelFirstDelay,
 		channelInterval:   ChannelInterval,
+		channelRetry:      ChannelRetry,
+		channelTimeout:    ChannelTimeout,
 		refreshMinBackoff: RefreshMinBackoff,
 		refreshMaxBackoff: RefreshMaxBackoff,
 	}
@@ -140,6 +149,11 @@ func New(d Deps) *Syncer {
 // NewHTTPClient is the client every sync request uses: a bounded connect so
 // a board with no route gives up fast, and an overall limit long enough for
 // a large package on a slow link.
+//
+// HTTP/2 connections are health-checked with pings. Without them a
+// connection that died silently (a NAT or firewall dropping it, a Wi-Fi
+// roam) stays in the pool, and every request to that host waits on it until
+// ResponseHeaderTimeout ("http2: timeout awaiting response headers").
 func NewHTTPClient() *http.Client {
 	return &http.Client{
 		Timeout: 10 * time.Minute,
@@ -151,6 +165,10 @@ func NewHTTPClient() *http.Client {
 			IdleConnTimeout:       90 * time.Second,
 			MaxIdleConns:          4,
 			ForceAttemptHTTP2:     true,
+			HTTP2: &http.HTTP2Config{
+				SendPingTimeout: 30 * time.Second,
+				PingTimeout:     15 * time.Second,
+			},
 		},
 	}
 }

@@ -35,16 +35,23 @@ func (s *Syncer) channelLoop(ctx context.Context) {
 	if !sleep(ctx, s.channelFirstDelay) {
 		return
 	}
+	retry := s.channelRetry
 	for {
 		err := s.CheckChannels(ctx)
 		if ctx.Err() != nil {
 			return
 		}
 		s.d.Updates.CheckDone(err)
+		wait := s.channelInterval
 		if err != nil {
-			s.log.Warn("release channel check failed", "err", err)
+			// A failed check is usually the network: try again soon rather
+			// than leave the board reporting the failure for hours.
+			wait, retry = retry, min(retry*2, s.channelInterval)
+			s.log.Warn("release channel check failed", "err", err, "retryIn", wait)
+		} else {
+			retry = s.channelRetry
 		}
-		if !sleep(ctx, s.channelInterval) {
+		if !sleep(ctx, wait+jitter(wait)) {
 			return
 		}
 	}
@@ -132,20 +139,14 @@ func (s *Syncer) checkChannel(ctx context.Context, kind mbu.Type, channelURL str
 }
 
 func (s *Syncer) fetchChannel(ctx context.Context, channelURL string) (*Channel, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, channelURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("bad channel URL: %w", err)
+	raw, err := s.fetchChannelFile(ctx, channelURL)
+	if err != nil && ctx.Err() == nil && !errors.As(err, new(statusError)) {
+		// No answer at all: the pooled connection may be dead. Drop it and
+		// try once more on a fresh one.
+		s.log.Info("release channel fetch failed; retrying on a new connection", "url", channelURL, "err", err)
+		s.client.CloseIdleConnections()
+		raw, err = s.fetchChannelFile(ctx, channelURL)
 	}
-	req.Header.Set("Accept", "application/json")
-	resp, err := s.do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("channel returned %d", resp.StatusCode)
-	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxChannelBytes+1))
 	if err != nil {
 		return nil, err
 	}
@@ -168,6 +169,31 @@ func (s *Syncer) fetchChannel(ctx context.Context, channelURL string) (*Channel,
 		return nil, fmt.Errorf("channel bytes %d is not a valid package size", ch.Bytes)
 	}
 	return &ch, nil
+}
+
+// statusError is a channel server that answered, but not with the file.
+type statusError int
+
+func (e statusError) Error() string { return fmt.Sprintf("channel returned %d", int(e)) }
+
+// fetchChannelFile makes one bounded attempt at a channel file.
+func (s *Syncer) fetchChannelFile(ctx context.Context, channelURL string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.channelTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, channelURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("bad channel URL: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := s.do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, statusError(resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, maxChannelBytes+1))
 }
 
 // download fetches the package and checks its size and hash against the
