@@ -1,0 +1,777 @@
+#!/usr/bin/env bash
+# =====================================================
+# mbvm: a MusallahBoard test board in a QEMU virtual machine
+# =====================================================
+# A Debian trixie VM provisioned by this checkout's setup.sh, running the
+# released agent (or a build of this checkout), showing the board in a window.
+# It is a board in every way that matters for testing: enrollment, content
+# sync, the update screen, release channels, USB sticks. It is not a Pi: no
+# service port, no RTC, no watchdog, software rendering.
+#
+# Everything lives in $MBVM_HOME (default ~/.local/share/musallahboard-vm):
+#   images/     downloaded Debian cloud images (kept across rebuilds)
+#   <name>/     one VM: base.qcow2 (freshly provisioned, never booted again),
+#               disk.qcow2 (the board: persistent, on top of base), its SSH key
+#
+# The disk persists across stop/start. `reset` throws it away and starts again
+# from the freshly provisioned base, with the agent version you ask for.
+#
+# Run `vm/mbvm help` for the commands; vm/README.md has more.
+# Works on Linux (KVM) and macOS (HVF); bash 3.2 compatible.
+
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MBVM_HOME="${MBVM_HOME:-$HOME/.local/share/musallahboard-vm}"
+NAME="${MBVM_NAME:-board}"
+DIR="$MBVM_HOME/$NAME"
+IMAGES="$MBVM_HOME/images"
+
+GITHUB_REPO="LensBridge/agent"
+ADMIN_USER=mbadmin
+SSH_PORT="${MBVM_SSH_PORT:-2222}"
+MEMORY="${MBVM_MEMORY:-2048}"
+CPUS="${MBVM_CPUS:-2}"
+DISK_SIZE="${MBVM_DISK_SIZE:-16G}"
+RESOLUTION="${MBVM_RESOLUTION:-1920x1080}"
+TIMEZONE="${MBVM_TIMEZONE:-America/Toronto}"
+# Host ports for `tunnel`: the board's local server and Chromium's DevTools.
+TUNNEL_BOARD_PORT="${MBVM_BOARD_PORT:-18080}"
+TUNNEL_CDP_PORT="${MBVM_CDP_PORT:-19222}"
+
+BASE="$DIR/base.qcow2"
+DISK="$DIR/disk.qcow2"
+KEY="$DIR/id_ed25519"
+PIDFILE="$DIR/qemu.pid"
+MONITOR="$DIR/monitor.sock"
+STICK="$DIR/usb-stick.img"
+
+RED='\033[0;31m'; YELLOW='\033[1;33m'; GREEN='\033[0;32m'; NC='\033[0m'
+info()  { echo -e "${GREEN}==>${NC} $*"; }
+warn()  { echo -e "${YELLOW}warning:${NC} $*" >&2; }
+die()   { echo -e "${RED}error:${NC} $*" >&2; exit 1; }
+
+usage() {
+    cat <<EOF
+mbvm: a MusallahBoard test board in a QEMU virtual machine
+
+  mbvm create [--agent=V]     download Debian, provision it with setup.sh, start
+  mbvm start [--headless]     boot the board (a window shows the screen)
+  mbvm stop                   shut it down; the disk is kept
+  mbvm reset [--agent=V]      back to a freshly provisioned, unenrolled board
+  mbvm agent V                install agent V on this board, keeping its state
+  mbvm enroll --token=T --backend=URL
+                              enroll; localhost in URL means this computer
+  mbvm usb FILE.mbu...        plug in a USB stick holding these files
+  mbvm usb --remove           pull the stick out
+  mbvm status                 VM state and \`musallahboard-agent status\`
+  mbvm logs                   follow the agent's log
+  mbvm ssh [command]          a shell (or one command) on the board
+  mbvm tunnel                 open the board and DevTools on this computer:
+                              http://127.0.0.1:$TUNNEL_BOARD_PORT/  http://127.0.0.1:$TUNNEL_CDP_PORT/
+  mbvm screenshot [FILE.png]  save what the screen shows
+  mbvm snapshot save|restore|delete NAME, snapshot list
+                              named copies of the board (VM stopped); they
+                              survive reset
+  mbvm rebuild                provision a new base (after setup.sh changes)
+  mbvm destroy                delete this VM (downloaded images are kept)
+
+Agent versions (V): latest, a release such as 0.2.1, local (build this
+checkout), or the path to an agent binary.
+
+Settings (environment): MBVM_NAME (several VMs side by side; give each its own
+MBVM_SSH_PORT), MBVM_ARCH (amd64|arm64, default: this computer's),
+MBVM_MEMORY, MBVM_CPUS, MBVM_RESOLUTION, MBVM_TIMEZONE, MBVM_DISPLAY (a raw
+QEMU -display value), MBVM_QEMU_ARGS (extra QEMU arguments), MBVM_HOME.
+EOF
+}
+
+# ── Host and QEMU ─────────────────────────────────────────────────────────────
+
+HOST_OS="$(uname -s)"
+case "$(uname -m)" in
+    arm64|aarch64) HOST_ARCH=arm64 ;;
+    x86_64|amd64)  HOST_ARCH=amd64 ;;
+    *)             HOST_ARCH="$(uname -m)" ;;
+esac
+
+# The architecture is fixed when the VM is created (it is baked into its disk).
+vm_arch() {
+    if [[ -f "$DIR/arch" ]]; then
+        cat "$DIR/arch"
+    else
+        echo "${MBVM_ARCH:-$HOST_ARCH}"
+    fi
+}
+
+qemu_binary() {
+    case "$1" in
+        amd64) echo qemu-system-x86_64 ;;
+        arm64) echo qemu-system-aarch64 ;;
+        *)     die "unsupported architecture '$1' (amd64 or arm64)" ;;
+    esac
+}
+
+# accel: hardware virtualisation when the VM matches this computer, else TCG
+# (emulation: it works, but provisioning takes an hour instead of minutes).
+accel() {
+    local arch="$1"
+    if [[ "$arch" == "$HOST_ARCH" ]]; then
+        if [[ "$HOST_OS" == "Darwin" ]]; then
+            echo hvf; return
+        elif [[ "$HOST_OS" == "Linux" && -w /dev/kvm ]]; then
+            echo kvm; return
+        fi
+    fi
+    echo tcg
+}
+
+# arm64 boots with UEFI: find the firmware QEMU ships (Homebrew or distro).
+aarch64_firmware() {
+    local prefix="" f
+    if command -v brew >/dev/null 2>&1; then
+        prefix="$(brew --prefix 2>/dev/null || true)"
+    fi
+    for f in \
+        "$prefix/share/qemu/edk2-aarch64-code.fd" \
+        /opt/homebrew/share/qemu/edk2-aarch64-code.fd \
+        /usr/local/share/qemu/edk2-aarch64-code.fd \
+        /usr/share/qemu/edk2-aarch64-code.fd \
+        /usr/share/AAVMF/AAVMF_CODE.fd \
+        /usr/share/qemu-efi-aarch64/QEMU_EFI.fd; do
+        [[ -f "$f" ]] && { echo "$f"; return; }
+    done
+    die "no aarch64 UEFI firmware found. Install it with QEMU (Homebrew: brew install qemu; Debian/Ubuntu: apt install qemu-efi-aarch64)"
+}
+
+need() {
+    local cmd
+    for cmd in "$@"; do
+        command -v "$cmd" >/dev/null 2>&1 || die "'$cmd' is not installed. $(install_hint "$cmd")"
+    done
+}
+
+install_hint() {
+    case "$1" in
+        qemu-*)  echo "Install QEMU (macOS: brew install qemu; Debian/Ubuntu: apt install qemu-system qemu-utils)." ;;
+        mformat|mcopy) echo "Install mtools (macOS: brew install mtools; Debian/Ubuntu: apt install mtools)." ;;
+        python3) echo "Install Python 3." ;;
+        go)      echo "Install Go to build the agent from this checkout." ;;
+        *)       echo "" ;;
+    esac
+}
+
+running() {
+    [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
+}
+
+require_vm() {
+    [[ -f "$DISK" ]] || die "there is no VM '$NAME' yet. Create it with: vm/mbvm create"
+}
+
+require_running() {
+    require_vm
+    running || die "VM '$NAME' is not running. Start it with: vm/mbvm start"
+}
+
+# display_args: the board in a window scaled to fit, unless headless.
+display_args() {
+    local headless="$1"
+    if [[ -n "${MBVM_DISPLAY:-}" ]]; then
+        echo "-display $MBVM_DISPLAY"
+    elif [[ "$headless" == "1" ]]; then
+        echo "-display none"
+    elif [[ "$HOST_OS" == "Darwin" ]]; then
+        echo "-display cocoa,zoom-to-fit=on"
+    else
+        echo "-display gtk,zoom-to-fit=on"
+    fi
+}
+
+# launch DISK HEADLESS [SEED]: start QEMU in the background.
+launch() {
+    local disk="$1" headless="$2" seed="${3:-}" arch qemu acc cpu xres yres
+    arch="$(vm_arch)"
+    qemu="$(qemu_binary "$arch")"
+    need "$qemu"
+    acc="$(accel "$arch")"
+    if [[ "$acc" == "tcg" ]]; then
+        cpu=max
+        warn "no hardware virtualisation for an $arch VM on this computer: running emulated, which is slow"
+    else
+        cpu=host
+    fi
+    xres="${RESOLUTION%x*}"; yres="${RESOLUTION#*x}"
+
+    # shellcheck disable=SC2054 # commas are inside QEMU option values
+    local args=(
+        -name "musallahboard-$NAME"
+        -m "$MEMORY" -smp "$CPUS" -cpu "$cpu"
+        -drive "if=virtio,format=qcow2,file=$disk"
+        -netdev "user,id=net0,hostname=musallahboard-vm,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22"
+        -device virtio-net-pci,netdev=net0
+        -device virtio-rng-pci
+        -device qemu-xhci,id=xhci -device usb-kbd -device usb-tablet
+        -monitor "unix:$MONITOR,server,nowait"
+        -serial "file:$DIR/serial.log"
+        -pidfile "$PIDFILE"
+        -rtc base=utc
+    )
+    if [[ "$arch" == "amd64" ]]; then
+        args+=(-machine "q35,accel=$acc" -vga none -device "virtio-vga,xres=$xres,yres=$yres")
+    else
+        args+=(-machine "virt,accel=$acc" -bios "$(aarch64_firmware)" -device "virtio-gpu-pci,xres=$xres,yres=$yres")
+    fi
+    if [[ -n "$seed" ]]; then
+        args+=(-drive "if=virtio,format=raw,readonly=on,file=$seed")
+    fi
+    # shellcheck disable=SC2207 # word splitting is the point
+    args+=($(display_args "$headless"))
+    if [[ -n "${MBVM_QEMU_ARGS:-}" ]]; then
+        # shellcheck disable=SC2206
+        args+=($MBVM_QEMU_ARGS)
+    fi
+
+    rm -f "$MONITOR" "$PIDFILE"
+    nohup "$qemu" "${args[@]}" >"$DIR/qemu.log" 2>&1 &
+    local pid=$! _
+    # QEMU writes the pidfile once it is up; a bad argument ends it at once.
+    for _ in $(seq 1 50); do
+        [[ -f "$PIDFILE" ]] && return 0
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.2
+    done
+    if ! kill -0 "$pid" 2>/dev/null; then
+        cat "$DIR/qemu.log" >&2
+        die "QEMU did not start (the output is above, and in $DIR/qemu.log)"
+    fi
+}
+
+# monitor CMD: one QEMU monitor command, printing its reply.
+monitor() {
+    need python3
+    python3 - "$MONITOR" "$*" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(30)
+s.connect(sys.argv[1])
+def until_prompt():
+    buf = b""
+    while not buf.endswith(b"(qemu) "):
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        buf += chunk
+    return buf.decode(errors="replace")
+until_prompt()
+s.sendall(sys.argv[2].encode() + b"\n")
+out = until_prompt().replace("\r", "")
+lines = out.split("\n")[1:-1]  # drop the echoed command and the prompt
+print("\n".join(l for l in lines if l.strip()))
+PY
+}
+
+# ── SSH ───────────────────────────────────────────────────────────────────────
+
+SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR
+          -o ConnectTimeout=5 -o ServerAliveInterval=15)
+
+vm_ssh() {
+    ssh -i "$KEY" -p "$SSH_PORT" "${SSH_OPTS[@]}" "$ADMIN_USER@127.0.0.1" "$@"
+}
+
+vm_scp() {
+    scp -q -i "$KEY" -P "$SSH_PORT" "${SSH_OPTS[@]}" "$1" "$ADMIN_USER@127.0.0.1:$2"
+}
+
+wait_for_ssh() {
+    local limit="$1" waited=0
+    while ! vm_ssh -o BatchMode=yes true 2>/dev/null; do
+        running || die "the VM stopped while booting (see $DIR/serial.log)"
+        (( waited >= limit )) && die "the VM did not answer SSH within ${limit}s (see $DIR/serial.log)"
+        sleep 3; waited=$((waited + 3))
+    done
+}
+
+wait_for_exit() {
+    local limit="$1" waited=0
+    while running; do
+        (( waited >= limit )) && return 1
+        sleep 1; waited=$((waited + 1))
+    done
+    rm -f "$PIDFILE" "$MONITOR"
+}
+
+# ── Agent versions ────────────────────────────────────────────────────────────
+
+latest_release() {
+    local url
+    url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$GITHUB_REPO/releases/latest")" ||
+        die "could not reach GitHub to find the latest agent release"
+    [[ "$url" == */tag/* ]] || die "no agent release found at $url"
+    echo "${url##*/tag/}"
+}
+
+# fetch_agent V OUT: put agent binary V for this VM's architecture at OUT and
+# print the version it reports.
+fetch_agent() {
+    local v="$1" out="$2" arch
+    arch="$(vm_arch)"
+    case "$v" in
+        local)
+            need go make
+            local ver="${MBVM_LOCAL_VERSION:-dev}"
+            info "Building the agent from $REPO_DIR (version $ver)"
+            if [[ -z "${MB_RELEASE_PUBLIC_KEYS:-}" ]]; then
+                warn "MB_RELEASE_PUBLIC_KEYS is not set: this build trusts no release key, so it refuses signed app and agent packages. Set it to the repository variable's value."
+            fi
+            make -s -C "$REPO_DIR" "build-$arch" VERSION="$ver" RELEASE_KEYS="${MB_RELEASE_PUBLIC_KEYS:-}" >/dev/null
+            cp "$REPO_DIR/build/musallahboard-agent-$arch" "$out"
+            ;;
+        */*)
+            [[ -f "$v" ]] || die "no such file: $v"
+            cp "$v" "$out"
+            ;;
+        *)
+            [[ "$v" == latest ]] && v="$(latest_release)"
+            local url="https://github.com/$GITHUB_REPO/releases/download/$v/musallahboard-agent-$arch"
+            info "Downloading agent $v ($arch)"
+            if ! curl -fsSL "$url" -o "$out"; then
+                die "agent $v has no $arch build ($url). Releases before 0.2.0 are arm64 only: use an arm64 VM (MBVM_ARCH=arm64 vm/mbvm create)."
+            fi
+            ;;
+    esac
+    chmod 0755 "$out"
+}
+
+# install_agent V: swap the agent binary on the running board. The board's
+# state, enrollment and content stay; downgrades are allowed (this is a test
+# board: a real one only moves forward, through signed packages).
+install_agent() {
+    local v="$1" tmp
+    tmp="$(mktemp "${TMPDIR:-/tmp}/mbvm-agent.XXXXXX")"
+    fetch_agent "$v" "$tmp"
+    vm_scp "$tmp" /tmp/musallahboard-agent.new
+    rm -f "$tmp"
+    vm_ssh 'set -e
+        sudo systemctl stop musallahboard-agent
+        sudo install -o root -g root -m 0755 /tmp/musallahboard-agent.new /usr/bin/musallahboard-agent
+        rm -f /tmp/musallahboard-agent.new
+        # Agents before 0.3.0 have no embedded splash; keep the installed one.
+        sudo musallahboard-agent splash install /usr/share/musallahboard/waiting.html >/dev/null 2>&1 || true
+        sudo systemctl start musallahboard-agent'
+    local got
+    got="$(vm_ssh musallahboard-agent version 2>/dev/null | head -1 || true)"
+    echo "$got" > "$DIR/agent"
+    info "Agent on the board: ${got:-unknown}"
+}
+
+# ── Provisioning ──────────────────────────────────────────────────────────────
+
+cloud_image() {
+    local arch="$1"
+    local url="${MBVM_IMAGE_URL:-https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-$arch.qcow2}"
+    local file
+    file="$IMAGES/$(basename "$url")"
+    mkdir -p "$IMAGES"
+    if [[ ! -f "$file" ]]; then
+        info "Downloading $url" >&2
+        curl -fL --progress-bar "$url" -o "$file.part" || die "could not download $url"
+        mv "$file.part" "$file"
+    fi
+    echo "$file"
+}
+
+make_seed() {
+    local out="$1" tmp
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/mbvm-seed.XXXXXX")"
+    cat > "$tmp/meta-data" <<EOF
+instance-id: musallahboard-$NAME-$(date +%s)
+local-hostname: musallahboard-vm
+EOF
+    cat > "$tmp/user-data" <<EOF
+#cloud-config
+users:
+  - name: $ADMIN_USER
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: true
+    ssh_authorized_keys:
+      - $(cat "$KEY.pub")
+ssh_pwauth: false
+disable_root: true
+EOF
+    rm -f "$out"
+    if command -v cloud-localds >/dev/null 2>&1; then
+        cloud-localds "$out" "$tmp/user-data" "$tmp/meta-data"
+    elif command -v xorriso >/dev/null 2>&1; then
+        xorriso -as mkisofs -quiet -output "$out" -volid cidata -joliet -rock "$tmp/user-data" "$tmp/meta-data" 2>/dev/null
+    elif command -v genisoimage >/dev/null 2>&1; then
+        genisoimage -quiet -output "$out" -volid cidata -joliet -rock "$tmp/user-data" "$tmp/meta-data"
+    elif command -v mkisofs >/dev/null 2>&1; then
+        mkisofs -quiet -output "$out" -volid cidata -joliet -rock "$tmp/user-data" "$tmp/meta-data"
+    elif command -v hdiutil >/dev/null 2>&1; then
+        hdiutil makehybrid -quiet -o "$out" -iso -joliet -default-volume-name cidata "$tmp"
+    else
+        die "no tool to build the cloud-init seed: install xorriso (or genisoimage, or cloud-image-utils)"
+    fi
+    rm -rf "$tmp"
+}
+
+# provision: a fresh Debian, set up by this checkout's setup.sh exactly as a
+# Pi is, then shut down. The result (base.qcow2) is never booted again: every
+# board disk is a copy-on-write layer on top of it.
+provision() {
+    local arch="$1" image seed
+    need qemu-img ssh scp curl
+    mkdir -p "$DIR"
+    echo "$arch" > "$DIR/arch"
+    [[ -f "$KEY" ]] || ssh-keygen -q -t ed25519 -N "" -C "mbvm-$NAME" -f "$KEY"
+
+    image="$(cloud_image "$arch")"
+    rm -f "$BASE" "$BASE.tmp"
+    qemu-img create -q -f qcow2 -F qcow2 -b "$image" "$BASE.tmp" "$DISK_SIZE"
+    seed="$DIR/seed.iso"
+    make_seed "$seed"
+
+    info "Booting Debian to provision it (headless)"
+    launch "$BASE.tmp" 1 "$seed"
+    local limit=300
+    [[ "$(accel "$arch")" == tcg ]] && limit=1800
+    wait_for_ssh "$limit"
+    vm_ssh 'cloud-init status --wait >/dev/null 2>&1 || true'
+
+    info "Running setup.sh from $REPO_DIR"
+    vm_scp "$REPO_DIR/setup.sh" /tmp/setup.sh
+    if ! vm_ssh "MB_ASSUME_YES=1 MB_REBOOT=never MB_HOSTNAME=musallahboard-vm \
+            MB_ADMIN_USER=$ADMIN_USER MB_TIMEZONE='$TIMEZONE' \
+            MB_ADMIN_SSH_KEY='$(cat "$KEY.pub")' bash /tmp/setup.sh"; then
+        vm_ssh 'sudo poweroff' >/dev/null 2>&1 || true
+        wait_for_exit 60 || kill "$(cat "$PIDFILE")" 2>/dev/null || true
+        die "setup.sh failed (its output is above). The VM was not saved; fix it and run: vm/mbvm rebuild"
+    fi
+    # Later boots have no seed: cloud-init would only slow them down.
+    vm_ssh 'sudo touch /etc/cloud/cloud-init.disabled; rm -f /tmp/setup.sh'
+    vm_ssh musallahboard-agent version 2>/dev/null | head -1 > "$DIR/base-agent" || true
+    (cd "$REPO_DIR" && git rev-parse --short HEAD 2>/dev/null || echo unknown) > "$DIR/base-setup"
+
+    info "Provisioned. Shutting down to save the base image"
+    vm_ssh 'sudo poweroff' >/dev/null 2>&1 || true
+    wait_for_exit 120 || die "the VM did not shut down"
+    rm -f "$seed"
+    mv "$BASE.tmp" "$BASE"
+    chmod a-w "$BASE"
+}
+
+# new_disk: a clean board on top of the base.
+new_disk() {
+    rm -f "$DISK"
+    qemu-img create -q -f qcow2 -F qcow2 -b "$BASE" "$DISK"
+    cp "$DIR/base-agent" "$DIR/agent" 2>/dev/null || true
+}
+
+# ── Commands ──────────────────────────────────────────────────────────────────
+
+parse_agent_flag() {
+    AGENT=""
+    HEADLESS=0
+    local a
+    for a in "$@"; do
+        case "$a" in
+            --agent=*)  AGENT="${a#*=}" ;;
+            --headless) HEADLESS=1 ;;
+            *) die "unknown option: $a" ;;
+        esac
+    done
+}
+
+# boot_board: start the board and, if asked, put agent AGENT on it.
+boot_board() {
+    info "Starting the board"
+    launch "$DISK" "$HEADLESS"
+    wait_for_ssh 600
+    if [[ -n "$AGENT" ]]; then
+        install_agent "$AGENT"
+    fi
+    ready
+}
+
+ready() {
+    cat <<EOF
+
+  The board is running$( [[ "$HEADLESS" == 1 ]] && echo " (headless: vm/mbvm screenshot shows the screen)" ).
+  Agent: $(cat "$DIR/agent" 2>/dev/null || echo unknown)
+
+  Enroll it:     vm/mbvm enroll --token=<token> --backend=<url>
+  Shell:         vm/mbvm ssh
+  Agent log:     vm/mbvm logs
+  Stop it:       vm/mbvm stop   (the board keeps its state; vm/mbvm reset starts over)
+
+EOF
+}
+
+cmd_create() {
+    parse_agent_flag "$@"
+    if [[ -f "$DISK" ]]; then
+        die "VM '$NAME' already exists. vm/mbvm start boots it; vm/mbvm reset starts it over."
+    fi
+    local arch
+    arch="${MBVM_ARCH:-$HOST_ARCH}"
+    [[ -f "$BASE" ]] || provision "$arch"
+    new_disk
+    # The base has the latest release as of provisioning; only swap when
+    # something else was asked for.
+    [[ "$AGENT" == latest ]] && AGENT=""
+    boot_board
+}
+
+cmd_start() {
+    parse_agent_flag "$@"
+    [[ -z "$AGENT" ]] || die "start takes no --agent; use vm/mbvm agent V on a running board"
+    require_vm
+    if running; then
+        info "VM '$NAME' is already running"
+        return
+    fi
+    boot_board
+}
+
+cmd_stop() {
+    require_vm
+    if ! running; then
+        info "VM '$NAME' is not running"
+        return
+    fi
+    info "Shutting down"
+    vm_ssh 'sudo poweroff' >/dev/null 2>&1 || monitor system_powerdown >/dev/null 2>&1 || true
+    if ! wait_for_exit 90; then
+        warn "no clean shutdown after 90s; stopping QEMU"
+        monitor quit >/dev/null 2>&1 || kill "$(cat "$PIDFILE")" 2>/dev/null || true
+        wait_for_exit 10 || true
+    fi
+    info "Stopped. The board's disk is kept."
+}
+
+cmd_reset() {
+    parse_agent_flag "$@"
+    [[ -f "$BASE" ]] || die "there is no VM '$NAME' yet. Create it with: vm/mbvm create"
+    if running; then
+        cmd_stop
+    fi
+    info "Resetting to a freshly provisioned board (not enrolled, no content)"
+    new_disk
+    if [[ "$AGENT" == latest ]]; then
+        local want
+        want="$(latest_release)"
+        # The base already has it unless a release came out since.
+        grep -q "$want" "$DIR/base-agent" 2>/dev/null && AGENT=""
+    fi
+    boot_board
+}
+
+cmd_agent() {
+    [[ $# -eq 1 ]] || die "usage: vm/mbvm agent latest|X.Y.Z|local|PATH"
+    require_running
+    install_agent "$1"
+}
+
+cmd_enroll() {
+    require_running
+    local args=() a
+    for a in "$@"; do
+        case "$a" in
+            --backend=*)
+                # The VM reaches this computer at 10.0.2.2 (QEMU user networking).
+                a="$(echo "$a" | sed -E 's#//(localhost|127\.0\.0\.1)([:/]|$)#//10.0.2.2\2#')"
+                ;;
+        esac
+        args+=("$a")
+    done
+    [[ ${#args[@]} -gt 0 ]] || die "usage: vm/mbvm enroll --token=T --backend=URL"
+    local quoted="" x
+    for x in "${args[@]}"; do quoted+=" $(printf '%q' "$x")"; done
+    vm_ssh "sudo musallahboard-agent enroll$quoted"
+}
+
+cmd_usb() {
+    require_running
+    if [[ "${1:-}" == "--remove" ]]; then
+        if ! monitor info usb | grep -q mbstick; then
+            info "No USB stick is plugged in"
+            return
+        fi
+        local out
+        out="$(monitor device_del mbstickdev)"
+        [[ -z "$out" ]] || die "could not remove the stick: $out"
+        info "USB stick removed"
+        return
+    fi
+    [[ $# -gt 0 ]] || die "usage: vm/mbvm usb FILE.mbu... | vm/mbvm usb --remove"
+    need mformat mcopy
+    local f total=0 size
+    for f in "$@"; do
+        [[ -f "$f" ]] || die "no such file: $f"
+        size=$(( ($(wc -c < "$f") + 1048575) / 1048576 ))
+        total=$(( total + size ))
+    done
+    # FAT32, with room to spare, like a real stick.
+    local mb=$(( total + 64 ))
+    (( mb < 64 )) && mb=64
+    if monitor info usb | grep -q "mbstick"; then
+        monitor device_del mbstickdev >/dev/null
+        sleep 1
+    fi
+    # A partition table with one FAT32 partition from 1 MiB, as a stick comes
+    # from the shop. (A bare filesystem shows up as both sda and sda1.)
+    rm -f "$STICK"
+    need python3
+    python3 - "$STICK" "$mb" <<'PY'
+import struct, sys
+path, mb = sys.argv[1], int(sys.argv[2])
+sectors = mb * 2048
+with open(path, "wb") as f:
+    f.truncate(sectors * 512)
+    entry = struct.pack("<B3sB3sII", 0, b"\xfe\xff\xff", 0x0C, b"\xfe\xff\xff", 2048, sectors - 2048)
+    f.seek(446); f.write(entry)
+    f.seek(510); f.write(b"\x55\xaa")
+PY
+    local part="$STICK@@1048576"
+    mformat -i "$part" -T $(( mb * 2048 - 2048 )) -h 64 -s 32 -H 2048 -F -v MBSTICK :: >/dev/null
+    for f in "$@"; do
+        mcopy -i "$part" "$f" "::$(basename "$f")"
+    done
+    monitor drive_add 0 "if=none,id=mbstick,format=raw,file=$STICK" >/dev/null
+    local out
+    out="$(monitor device_add "usb-storage,bus=xhci.0,drive=mbstick,id=mbstickdev,removable=on")"
+    [[ -z "$out" ]] || die "could not plug in the stick: $out"
+    info "USB stick plugged in with $# file(s). Watch the board; then: vm/mbvm usb --remove"
+}
+
+cmd_status() {
+    require_vm
+    echo "VM:        $NAME ($(vm_arch)), $DIR"
+    echo "Base:      setup.sh at $(cat "$DIR/base-setup" 2>/dev/null || echo '?'), agent $(cat "$DIR/base-agent" 2>/dev/null || echo '?')"
+    if running; then
+        echo "State:     running (SSH on 127.0.0.1:$SSH_PORT)"
+        echo
+        vm_ssh 'sudo musallahboard-agent status' || true
+    else
+        echo "State:     stopped"
+    fi
+}
+
+cmd_screenshot() {
+    require_running
+    local out="${1:-musallahboard-$(date +%Y%m%d-%H%M%S).png}"
+    case "$out" in /*) ;; *) out="$PWD/$out" ;; esac
+    local reply
+    reply="$(monitor screendump "$out" -f png)"
+    [[ -z "$reply" ]] || die "screendump failed: $reply"
+    info "Saved $out"
+}
+
+cmd_tunnel() {
+    require_running
+    info "Board:    http://127.0.0.1:$TUNNEL_BOARD_PORT/"
+    info "DevTools: http://127.0.0.1:$TUNNEL_CDP_PORT/ (or chrome://inspect, add 127.0.0.1:$TUNNEL_CDP_PORT)"
+    info "Ctrl-C to close"
+    vm_ssh -N -L "127.0.0.1:$TUNNEL_BOARD_PORT:127.0.0.1:8080" -L "127.0.0.1:$TUNNEL_CDP_PORT:127.0.0.1:9222"
+}
+
+# Snapshots are copies of the board's disk layer, kept beside it, so they
+# survive `reset` (restore one to get that board back, enrolled and all).
+cmd_snapshot() {
+    require_vm
+    local action="${1:-}" name="${2:-}" snaps="$DIR/snapshots"
+    case "$action" in
+        list)
+            if ! ls "$snaps"/*.qcow2 >/dev/null 2>&1; then
+                info "No snapshots. Save one with: vm/mbvm snapshot save NAME"
+                return
+            fi
+            local f
+            for f in "$snaps"/*.qcow2; do
+                printf '  %-24s %-28s %s\n' "$(basename "$f" .qcow2)" \
+                    "$(cat "${f%.qcow2}.agent" 2>/dev/null || echo '?')" \
+                    "$(date -r "$f" '+%Y-%m-%d %H:%M' 2>/dev/null || true)"
+            done
+            return
+            ;;
+        save|restore|delete)
+            [[ -n "$name" ]] || die "usage: vm/mbvm snapshot $action NAME"
+            [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || die "snapshot names are letters, digits, '.', '_' and '-'"
+            ;;
+        *) die "usage: vm/mbvm snapshot save|restore|delete NAME, or snapshot list" ;;
+    esac
+    local snap="$snaps/$name.qcow2"
+    case "$action" in
+        save)
+            running && die "stop the VM first (vm/mbvm stop): a snapshot is of a shut-down board"
+            mkdir -p "$snaps"
+            cp "$DISK" "$snap"
+            cp "$DIR/agent" "$snaps/$name.agent" 2>/dev/null || true
+            info "Saved snapshot '$name'"
+            ;;
+        restore)
+            [[ -f "$snap" ]] || die "no snapshot '$name' (vm/mbvm snapshot list)"
+            running && die "stop the VM first (vm/mbvm stop)"
+            cp "$snap" "$DISK"
+            cp "$snaps/$name.agent" "$DIR/agent" 2>/dev/null || true
+            info "Restored snapshot '$name'. Start it with: vm/mbvm start"
+            ;;
+        delete)
+            [[ -f "$snap" ]] || die "no snapshot '$name'"
+            rm -f "$snap" "$snaps/$name.agent"
+            info "Deleted snapshot '$name'"
+            ;;
+    esac
+}
+
+cmd_rebuild() {
+    if running; then cmd_stop; fi
+    rm -f "$DISK" "$DIR/agent"
+    if [[ -f "$BASE" ]]; then chmod u+w "$BASE"; rm -f "$BASE"; fi
+    local arch
+    arch="$(vm_arch)"
+    provision "$arch"
+    new_disk
+    AGENT=""; HEADLESS=0
+    boot_board
+}
+
+cmd_destroy() {
+    [[ -d "$DIR" ]] || { info "There is no VM '$NAME'"; return; }
+    if running; then
+        monitor quit >/dev/null 2>&1 || kill "$(cat "$PIDFILE")" 2>/dev/null || true
+        wait_for_exit 10 || true
+    fi
+    chmod -R u+w "$DIR"
+    rm -rf "$DIR"
+    info "Deleted VM '$NAME' (downloaded images are kept in $IMAGES)"
+}
+
+main() {
+    local cmd="${1:-help}"
+    [[ $# -gt 0 ]] && shift
+    case "$cmd" in
+        create)     cmd_create "$@" ;;
+        start)      cmd_start "$@" ;;
+        stop)       cmd_stop ;;
+        reset)      cmd_reset "$@" ;;
+        agent)      cmd_agent "$@" ;;
+        enroll)     cmd_enroll "$@" ;;
+        usb)        cmd_usb "$@" ;;
+        status)     cmd_status ;;
+        logs)       require_running; vm_ssh -t 'sudo journalctl -fu musallahboard-agent -n 100' ;;
+        ssh)        require_running; if [[ $# -gt 0 ]]; then vm_ssh -t "$@"; else vm_ssh -t; fi ;;
+        tunnel)     cmd_tunnel ;;
+        screenshot) cmd_screenshot "$@" ;;
+        snapshot)   cmd_snapshot "$@" ;;
+        rebuild)    cmd_rebuild ;;
+        destroy)    cmd_destroy ;;
+        help|-h|--help) usage ;;
+        *) usage >&2; exit 1 ;;
+    esac
+}
+
+main "$@"

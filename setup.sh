@@ -42,7 +42,18 @@ if [[ "$VERSION" == "latest" ]]; then
 else
     RELEASE_URL="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}"
 fi
-BINARY_URL="${RELEASE_URL}/musallahboard-agent-arm64"
+# A board is a Raspberry Pi (arm64). A virtual machine (vm/mbvm, for testing)
+# may also be amd64; it skips the Pi-only steps.
+IS_VM=0
+if systemd-detect-virt --vm --quiet 2>/dev/null; then
+    IS_VM=1
+fi
+case "$(uname -m)" in
+    aarch64) ARCH=arm64 ;;
+    x86_64)  ARCH=amd64 ;;
+    *)       ARCH="$(uname -m)" ;;
+esac
+BINARY_URL="${RELEASE_URL}/musallahboard-agent-${ARCH}"
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
 RED='\033[0;31m'; YELLOW='\033[1;33m'; GREEN='\033[0;32m'; BOLD='\033[1m'; NC='\033[0m'
@@ -185,11 +196,17 @@ preflight() {
     [[ $EUID -eq 0 ]] && error "Do not run as root. Run as a user with sudo access."
     sudo -v || error "This script requires sudo access."
 
-    [[ "$(uname -m)" == "aarch64" ]] || error "This script is for arm64 (Raspberry Pi) only. Got: $(uname -m)"
+    if [[ "$IS_VM" == "1" ]]; then
+        [[ "$ARCH" == "arm64" || "$ARCH" == "amd64" ]] || \
+            error "Unsupported architecture in a virtual machine: $(uname -m)"
+        warn "Virtual machine: a test board (vm/mbvm), not a Raspberry Pi. Pi-only steps are skipped."
+    else
+        [[ "$ARCH" == "arm64" ]] || error "This script is for arm64 (Raspberry Pi) only. Got: $(uname -m)"
 
-    # Check for Raspberry Pi OS
-    [[ -f /boot/firmware/config.txt ]] || [[ -f /boot/config.txt ]] || \
-        error "This does not look like Raspberry Pi OS (no config.txt found)."
+        # Check for Raspberry Pi OS
+        [[ -f /boot/firmware/config.txt ]] || [[ -f /boot/config.txt ]] || \
+            error "This does not look like Raspberry Pi OS (no config.txt found)."
+    fi
 
     command -v apt-get >/dev/null || error "apt-get not found — is this Debian/Raspbian?"
     command -v systemctl >/dev/null || error "systemctl not found — systemd required"
@@ -201,7 +218,7 @@ banner() {
 
   +----------------------------------------------+
   |       MusallahBoard Setup                    |
-  |       Raspberry Pi (arm64)                   |
+  |       Raspberry Pi (arm64) or test VM        |
   |       Kiosk - Hardened SSH - Wayland/cage    |
   +----------------------------------------------+
 
@@ -270,14 +287,10 @@ install_packages() {
     # cage: single-app Wayland kiosk compositor
     # chromium: deb browser (not snap)
     # rpi-connect: Raspberry Pi Connect for remote access
-    sudo apt-get install -y \
-        cage \
-        chromium \
-        rpi-connect \
-        ufw \
-        unattended-upgrades \
-        apt-listchanges \
-        curl
+    local pkgs=(cage chromium ufw unattended-upgrades apt-listchanges curl)
+    # rpi-connect is only in the Raspberry Pi OS archive.
+    [[ "$IS_VM" == "1" ]] || pkgs+=(rpi-connect)
+    sudo apt-get install -y "${pkgs[@]}"
 
     # Purge services that add unnecessary network attack surface
     info "Purging unnecessary network services..."
@@ -523,6 +536,10 @@ setup_ufw() {
 
 # ── Pi-specific extras ────────────────────────────────────────────────────────
 setup_pi_extras() {
+    if [[ "$IS_VM" == "1" ]]; then
+        info "Virtual machine: no hardware watchdog or Raspberry Pi Connect"
+        return
+    fi
     section "Hardware watchdog"
     sudo mkdir -p /etc/systemd/system.conf.d
     sudo tee /etc/systemd/system.conf.d/watchdog.conf > /dev/null << 'EOF'

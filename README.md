@@ -73,6 +73,20 @@ make mbpack
 
 Requires Go 1.24+. Binaries land in `build/`. A plain build is a dev build: it trusts no release key of its own (see Release signing below).
 
+## A test board without a Pi
+
+`vm/mbvm` runs a board in a QEMU virtual machine on macOS or Linux. The VM is
+provisioned by `setup.sh`, persists between runs, and can be reset to any
+agent release (or a build of this checkout):
+
+```bash
+vm/mbvm create
+vm/mbvm enroll --token=<token> --backend=http://localhost:8080
+vm/mbvm reset --agent=0.2.1
+```
+
+See [vm/README.md](vm/README.md).
+
 ## How a board gets updates (v2)
 
 Every board renders from its own disk: the kiosk always loads the agent's local server at `http://127.0.0.1:8080/`. Content (payloads and posters), the board app and the agent itself all arrive as signed `.mbu` packages, which the board checks against keys it has pinned before installing anything. The network only changes how fresh the board is. [docs/architecture.md](docs/architecture.md) is the full design and the contract with the backend, the frontend and the Android app.
