@@ -77,6 +77,16 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 		logger.Error("device key unreadable: serving installed content only (no sync, no remote commands)",
 			"err", keyErr, "keyPath", cfg.KeyPath)
 	}
+	// Nothing that talks to the backend is built from an insecure config:
+	// content sync, its refresh channel and the command WebSocket all take
+	// their addresses from it (docs/architecture.md, section 11).
+	transportErr := backendTransport(logger, cfg)
+	offline := func() string {
+		if transportErr != nil {
+			return "not talking to LensBridge: " + transportErr.Error()
+		}
+		return "device key unreadable"
+	}
 	hour, minute := cfg.UpdateTime()
 	var syncer *boardsync.Syncer
 	sched := updates.New(updates.Deps{
@@ -84,12 +94,12 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 		Changed: func(info updates.Info) { hub.UpdatesChanged(info) },
 		Check: func(ctx context.Context) error {
 			if syncer == nil {
-				return errors.New("this board cannot reach the release channels (device key unreadable)")
+				return errors.New("this board cannot reach the release channels (" + offline() + ")")
 			}
 			return syncer.CheckChannels(ctx)
 		},
 	})
-	if keyErr == nil {
+	if keyErr == nil && transportErr == nil {
 		syncer = boardsync.New(boardsync.Deps{
 			Cfg: cfg, Key: priv, Layout: layout, Importer: imp, Updates: sched,
 			AgentVersion: version.Version, Logger: logger,
@@ -103,7 +113,9 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 		Layout: layout, DeviceID: cfg.DeviceID, AgentVersion: version.Version, Hub: hub,
 		Sync: func() any {
 			if syncer == nil {
-				return map[string]any{"enabled": false, "lastError": "device key unreadable"}
+				// Enabled as configured, so the board app and `status` show
+				// the reason as a sync error rather than "sync off".
+				return map[string]any{"enabled": transportErr != nil && cfg.ContentSync(), "lastError": offline()}
 			}
 			return syncer.Status()
 		},
@@ -120,6 +132,9 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 			if ws := backend.Load(); ws != nil {
 				s := ws.State()
 				return &s
+			}
+			if transportErr != nil {
+				return map[string]any{"connected": false, "lastError": offline()}
 			}
 			return nil
 		},
@@ -145,7 +160,11 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 		logger.Warn("could not write kiosk url", "err", err)
 	}
 	_, _ = daemon.SdNotify(false, daemon.SdNotifyReady)
-	_, _ = daemon.SdNotify(false, "STATUS=serving the board on "+localserver.ListenAddr)
+	if transportErr != nil {
+		_, _ = daemon.SdNotify(false, "STATUS=serving installed content only; refusing the backend: "+transportErr.Error())
+	} else {
+		_, _ = daemon.SdNotify(false, "STATUS=serving the board on "+localserver.ListenAddr)
+	}
 
 	logInstalled(logger, layout, cfg)
 	goRun(wg, func() { watchKiosk(ctx, logger, cdpClient, screen.Active) })
@@ -168,6 +187,30 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 		ws := startCommandChannel(ctx, logger, cfg, priv, safeMode, cdpClient, syncer, sched,
 			func() any { return local.Status().Board() }, wg)
 		backend.Store(ws)
+	}
+	return nil
+}
+
+// backendTransport checks that the config may be used to talk to the
+// backend (config.CheckTransport) and says so loudly at every start when it
+// may not, or when it may only because of the insecure_dev opt-in. A board
+// enrolled over plain http before https was required lands here: it keeps
+// showing what it has, and the log, `systemctl status`, `musallahboard-agent
+// status` and the board app's sync error all carry the reason and the fix.
+func backendTransport(logger *slog.Logger, cfg *config.Config) error {
+	if err := cfg.CheckTransport(); err != nil {
+		logger.Error("REFUSING TO TALK TO THE BACKEND: this board's config is not safe to use. "+
+			"Serving installed content only: no content sync, no release channel checks, no remote commands. "+
+			"Re-enroll it over https (sudo musallahboard-agent enroll --force --token=... --backend=https://...), "+
+			"or, for a development board only, add insecure_dev = true to "+defaultConfigPath+" and restart the agent.",
+			"err", err, "backendUrl", cfg.BackendURL, "websocketUrl", cfg.WebSocketURL)
+		return err
+	}
+	if cfg.InsecureDev() {
+		logger.Warn("INSECURE DEVELOPMENT BOARD: insecure_dev = true, so this board accepts a plaintext backend. "+
+			"Anyone on its network can impersonate the backend: send it content, reboot it, read its screen and logs. "+
+			"Never deploy a board like this.",
+			"backendUrl", cfg.BackendURL, "websocketUrl", cfg.WebSocketURL)
 	}
 	return nil
 }
