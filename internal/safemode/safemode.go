@@ -1,3 +1,4 @@
+// Package safemode counts agent starts that did not lead to a stable run.
 package safemode
 
 import (
@@ -6,6 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/LensBridge/agent/internal/fsutil"
 )
 
 const (
@@ -18,10 +21,15 @@ const (
 // resets it after the agent has been up long enough to be considered
 // stable (typically 5 minutes — caller schedules that).
 //
-// If the counter exceeds safeModeThreshold, the agent should boot in
-// heartbeat-only mode: still report in (so admins see the device is
-// degraded) but refuse to execute commands. This complements systemd's
-// StartLimitBurst, which stops the death-loop entirely.
+// If the counter exceeds safeModeThreshold, the agent is "in safe mode".
+// That is a report, nothing more: the flag goes out with every backend
+// heartbeat (telemetry safeMode) so the admin portal shows that the board is
+// restarting over and over. The agent does not behave differently in safe
+// mode, it does not refuse commands, and nothing stops the restarts:
+// musallahboard-agent.service restarts the agent for ever
+// (StartLimitIntervalSec=0), with a growing delay. A new agent that crashes
+// in its first minutes after a self-update is rolled back by the root
+// updater's probation (package selfupdate), independently of this counter.
 type Manager struct {
 	path string
 }
@@ -61,9 +69,5 @@ func (m *Manager) write(n int) {
 	if err := os.MkdirAll(filepath.Dir(m.path), 0o755); err != nil {
 		return
 	}
-	tmp := m.path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(fmt.Sprintf("%d\n", n)), 0o644); err != nil {
-		return
-	}
-	_ = os.Rename(tmp, m.path)
+	_ = fsutil.WriteAtomic(m.path, []byte(fmt.Sprintf("%d\n", n)), 0o644)
 }
