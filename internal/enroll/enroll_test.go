@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -42,11 +43,17 @@ func signingKeyJSON(pub ed25519.PublicKey) map[string]any {
 	return map[string]any{"keyId": trust.KeyID(pub), "publicKey": base64.StdEncoding.EncodeToString(pub)}
 }
 
+// wsURL is the WebSocket URL a backend at server would hand out.
+func wsURL(server *httptest.Server, scheme string) string {
+	return scheme + "://" + strings.TrimPrefix(strings.TrimPrefix(server.URL, "https://"), "http://") + "/api/agent/ws"
+}
+
 func TestRunEnrollsAndPersistsConfig(t *testing.T) {
 	const deviceID = "6f1e1d94-1f4a-4a1e-9a1e-2f3c4d5e6a7b"
 
 	var gotBody map[string]any
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/agent/enroll" {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
@@ -61,7 +68,7 @@ func TestRunEnrollsAndPersistsConfig(t *testing.T) {
 		// port-patching behaviour has its own test below.
 		json.NewEncoder(w).Encode(map[string]any{
 			"deviceId":           deviceID,
-			"websocketUrl":       "ws://board.example:8080/api/agent/ws",
+			"websocketUrl":       wsURL(server, "wss"),
 			"contentSigningKeys": []any{signingKeyJSON(contentPub)},
 		})
 	}))
@@ -75,6 +82,7 @@ func TestRunEnrollsAndPersistsConfig(t *testing.T) {
 		KeyPath:      keyPath,
 		TrustPath:    trustPathBeside(cfgPath),
 		AgentVersion: "1.2.3",
+		HTTPClient:   server.Client(),
 	})
 	if err != nil {
 		t.Fatalf("Run() = %v, want nil", err)
@@ -101,8 +109,11 @@ func TestRunEnrollsAndPersistsConfig(t *testing.T) {
 	if cfg.DeviceID != deviceID {
 		t.Errorf("DeviceID = %q, want %q", cfg.DeviceID, deviceID)
 	}
-	if cfg.WebSocketURL != "ws://board.example:8080/api/agent/ws" {
+	if cfg.WebSocketURL != wsURL(server, "wss") {
 		t.Errorf("WebSocketURL = %q", cfg.WebSocketURL)
+	}
+	if cfg.InsecureDev() || cfg.CheckTransport() != nil {
+		t.Errorf("a TLS enrollment must give a secure config: insecure_dev=%v, CheckTransport=%v", cfg.InsecureDev(), cfg.CheckTransport())
 	}
 	if _, err := os.Stat(keyPath); err != nil {
 		t.Errorf("private key not written: %v", err)
@@ -121,11 +132,12 @@ func TestRunEnrollsAndPersistsConfig(t *testing.T) {
 // A backend with no content signing key configured sends no keys; the board
 // still enrolls, and gets them later from `trust fetch`.
 func TestRunWithoutContentKeys(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"deviceId":     "6f1e1d94-1f4a-4a1e-9a1e-2f3c4d5e6a7b",
-			"websocketUrl": "ws://board.example:8080/api/agent/ws",
+			"websocketUrl": wsURL(server, "wss"),
 		})
 	}))
 	defer server.Close()
@@ -133,7 +145,7 @@ func TestRunWithoutContentKeys(t *testing.T) {
 	cfgPath, keyPath := paths(t)
 	if err := Run(context.Background(), quietLogger(), Params{
 		Token: "t", BackendURL: server.URL, ConfigPath: cfgPath, KeyPath: keyPath,
-		TrustPath: trustPathBeside(cfgPath),
+		TrustPath: trustPathBeside(cfgPath), HTTPClient: server.Client(),
 	}); err != nil {
 		t.Fatalf("Run() = %v", err)
 	}
@@ -189,7 +201,7 @@ func TestFetchSigningKeys(t *testing.T) {
 // Before the client was generated this response body was untyped, so the reason
 // was not reliably available to report.
 func TestRunReportsRejectionMessage(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(map[string]any{
@@ -205,6 +217,7 @@ func TestRunReportsRejectionMessage(t *testing.T) {
 		ConfigPath: cfgPath,
 		KeyPath:    keyPath,
 		TrustPath:  trustPathBeside(cfgPath),
+		HTTPClient: server.Client(),
 	})
 	if err == nil {
 		t.Fatal("Run() = nil, want error")
@@ -222,7 +235,7 @@ func TestRunReportsRejectionMessage(t *testing.T) {
 }
 
 func TestRunRejectsIncompleteResponse(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// deviceId present, websocketUrl missing.
 		json.NewEncoder(w).Encode(map[string]any{
@@ -238,9 +251,106 @@ func TestRunRejectsIncompleteResponse(t *testing.T) {
 		ConfigPath: cfgPath,
 		KeyPath:    keyPath,
 		TrustPath:  trustPathBeside(cfgPath),
+		HTTPClient: server.Client(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "missing deviceId or websocketUrl") {
 		t.Fatalf("Run() = %v, want missing-field error", err)
+	}
+}
+
+// A plain-http backend is refused before anything is sent: the reply would
+// pin the content keys and the WebSocket URL, and anyone on the LAN could
+// write it.
+func TestRunRefusesPlainHTTPBackend(t *testing.T) {
+	hits := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits++ }))
+	defer server.Close()
+
+	cfgPath, keyPath := paths(t)
+	err := Run(context.Background(), quietLogger(), Params{
+		Token: "t", BackendURL: server.URL, ConfigPath: cfgPath, KeyPath: keyPath,
+		TrustPath: trustPathBeside(cfgPath),
+	})
+	if !errors.Is(err, config.ErrInsecureTransport) || !strings.Contains(err.Error(), "--insecure-dev") {
+		t.Fatalf("Run() = %v, want ErrInsecureTransport naming --insecure-dev", err)
+	}
+	if hits != 0 {
+		t.Errorf("the token was sent over plain http (%d requests)", hits)
+	}
+	assertNothingSaved(t, cfgPath, keyPath)
+}
+
+// --insecure-dev enrolls over http and records the opt-in in the config.
+func TestRunInsecureDevEnrollsOverHTTP(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"deviceId":     "6f1e1d94-1f4a-4a1e-9a1e-2f3c4d5e6a7b",
+			"websocketUrl": wsURL(server, "ws"),
+		})
+	}))
+	defer server.Close()
+
+	cfgPath, keyPath := paths(t)
+	if err := Run(context.Background(), quietLogger(), Params{
+		Token: "t", BackendURL: server.URL, ConfigPath: cfgPath, KeyPath: keyPath,
+		TrustPath: trustPathBeside(cfgPath), InsecureDev: true,
+	}); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	b, _ := os.ReadFile(cfgPath)
+	if !strings.Contains(string(b), "insecure_dev = true") {
+		t.Errorf("insecure_dev not written:\n%s", b)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil || cfg.CheckTransport() != nil {
+		t.Fatalf("Load = %v, CheckTransport = %v", err, cfg.CheckTransport())
+	}
+}
+
+// The backend's WebSocket URL must be wss:// on the backend's own host;
+// otherwise nothing is saved and the board stays unenrolled.
+func TestRunRefusesUnsafeWebSocketURL(t *testing.T) {
+	for name, ws := range map[string]func(*httptest.Server) string{
+		"plain ws":   func(s *httptest.Server) string { return wsURL(s, "ws") },
+		"other host": func(*httptest.Server) string { return "wss://attacker.example/api/agent/ws" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			var server *httptest.Server
+			server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]any{
+					"deviceId":           "6f1e1d94-1f4a-4a1e-9a1e-2f3c4d5e6a7b",
+					"websocketUrl":       ws(server),
+					"contentSigningKeys": []any{signingKeyJSON(contentPub)},
+				})
+			}))
+			defer server.Close()
+
+			cfgPath, keyPath := paths(t)
+			err := Run(context.Background(), quietLogger(), Params{
+				Token: "t", BackendURL: server.URL, ConfigPath: cfgPath, KeyPath: keyPath,
+				TrustPath: trustPathBeside(cfgPath), HTTPClient: server.Client(),
+			})
+			if !errors.Is(err, config.ErrInsecureTransport) {
+				t.Fatalf("Run() = %v, want ErrInsecureTransport", err)
+			}
+			assertNothingSaved(t, cfgPath, keyPath)
+			if _, err := os.Stat(trustPathBeside(cfgPath)); err == nil {
+				t.Error("content keys pinned from a refused reply")
+			}
+		})
+	}
+}
+
+func assertNothingSaved(t *testing.T, cfgPath, keyPath string) {
+	t.Helper()
+	if _, err := os.Stat(cfgPath); err == nil {
+		t.Error("config written")
+	}
+	if _, err := os.Stat(keyPath); err == nil {
+		t.Error("private key written")
 	}
 }
 
