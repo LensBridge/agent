@@ -40,7 +40,9 @@ The v1 offline design was bolted onto an online-only board. The audit found:
    self-updater and the USB import helper.
 6. **Atomic and recoverable.** Every install is stage, fsync, rename, symlink
    swap. A power cut at any point leaves the previous state serving. A new
-   agent that does not come up healthy is rolled back automatically.
+   agent is on probation for its first minutes and is rolled back
+   automatically if it fails it; an interrupted agent update is finished
+   from its journal at the next boot.
 
 ## 3. Components
 
@@ -247,6 +249,8 @@ packer (`scripts/package-mbu.mjs`) producing the same format.
 |---|---|---|
 | `/usr/bin/musallahboard-agent` | root 0755 | the agent |
 | `/usr/lib/musallahboard/agent.prev` | root 0755 | previous agent, for rollback |
+| `/usr/lib/musallahboard/update-in-progress.json` | root 0644 | journal of an agent update not yet finished (section 12) |
+| `/usr/lib/musallahboard/update-strikes.json` | root 0644 | per agent version, updates rolled back only for not reconnecting (section 12) |
 | `/etc/musallahboard/agent.toml` | daemon 0600 | config (section 11) |
 | `/etc/musallahboard/agent.key` | daemon 0600 | device identity key (unchanged) |
 | `/etc/musallahboard/trust.json` | root 0644 | trust roots |
@@ -664,27 +668,75 @@ route and cost nothing, and the moment it gets a network it starts syncing.
 2. `musallahboard-agent-update.path` (`PathExists=` on `ready`) starts
    `musallahboard-agent-update.service` (root, oneshot):
    `musallahboard-agent selfupdate apply`.
-3. As root, the updater: removes `ready`; copies `package.mbu` into a
+3. As root, the updater: removes `ready`; finishes any unfinished update
+   first (below) and stops there; copies `package.mbu` into a
    root-only temporary directory (so the daemon cannot swap it mid-check);
-   verifies it from scratch against root-trusted keys only; checks arch and
-   that the version is newer than its own; extracts the binary to
+   verifies it from scratch against root-trusted keys only; checks arch,
+   that the version is newer than its own and that it is not in
+   `agentVersionsRejected`; extracts the binary to
    `/usr/bin/.musallahboard-agent.new`; runs `.new version` and requires the
    expected version; copies the current binary to
-   `/usr/lib/musallahboard/agent.prev`; renames the new binary into place;
-   restarts `musallahboard-agent.service`.
-4. Health check: within 120 s, `GET http://127.0.0.1:8080/api/local/status`
-   must report the new `agentVersion`. Otherwise the updater restores
-   `agent.prev`, restarts the service, and adds the version to
-   `agentVersionsRejected`, so a broken release cannot loop.
-5. The outcome is written to `agent/last-update.json`, and only then, after a
-   rollback, is the previous agent restarted, so it can read it.
+   `/usr/lib/musallahboard/agent.prev`; asks the running agent whether it is
+   connected to LensBridge; writes the journal; renames the new binary into
+   place; restarts `musallahboard-agent.service`.
+4. Probation. The new agent must report its `agentVersion` on
+   `GET http://127.0.0.1:8080/api/local/status` within 2 minutes; then
+   systemd must not restart it (same `MainPID` and `NRestarts`, still
+   `active`) for 4 minutes; and if the board was connected before the update
+   (`backend.connected`, or `sync.lastSuccessAt` with no `lastError`), it
+   must connect again within 3 minutes. A board that was offline is not
+   asked to be online. If it passes, the outcome is written and the
+   enrollment splash refreshed (`splash install`).
+5. If it fails, the updater restores `agent.prev`, records the outcome in
+   `agent/last-update.json`, and only then restarts the previous agent, so it
+   can read it. Not coming up, a restart or crash loop, or a probation cut
+   short 3 times adds the version to `agentVersionsRejected`, so a broken
+   release cannot loop. Not reconnecting only counts a strike
+   (`update-strikes.json`), because the backend or the network may be what
+   failed; the second strike rejects the version. If `agent.prev` cannot be
+   restored the outcome is `rollback-failed` and the new agent keeps running.
+
+**The update journal.** `/usr/lib/musallahboard/update-in-progress.json` is
+root-owned, outside the daemon's reach, and written (temp file, fsync,
+rename, fsync of the directory) before the binary is replaced and at every
+change of phase. It names both versions and the SHA-256 of the previous and
+the new binary. The path unit watches it as well as `ready`, and the updater
+also puts `ready` back while an update is open (boards whose path unit
+predates the journal watch only `ready`), so an update cut short by a power
+cut, a reboot or the updater being stopped is finished by the next run, at
+boot at the latest. That run is the binary installed then, so the record's
+format only ever gains fields. What it does:
+
+| Journal phase | Installed binary | The next run |
+|---|---|---|
+| none | | nothing to finish; handles a staged package, if any |
+| `swapping` | previous | the swap never happened: removes the extracted binary, outcome `refused` ("interrupted"), nothing else changes |
+| `swapping` or `probation` | new | starts the probation again from scratch, without restarting the agent; after 3 cut-short probations, rolls back and rejects |
+| `swapping` or `probation` | anything else | someone installed another agent: left alone, outcome `refused` |
+| `committing` | | writes the `ok` outcome again (same timestamp), refreshes the splash, removes the journal |
+| `rolling-back` | | repeats the rollback: restores `agent.prev` if it is not in place, rejects or strikes (idempotent), writes the outcome, removes the journal, restarts the agent |
+| unreadable | | puts `agent.prev` back if it differs, outcome `rolled-back` |
+
+The journal is removed only after the outcome is written, and whenever the
+updater ends other than by being stopped, so the path unit cannot loop on
+it. SIGTERM (shutdown, or the unit's 15 minute start timeout) stops a
+probation and leaves the journal; a rollback that has begun always finishes.
+Boards set up before the journal existed run the updater under a 5 minute
+timeout; a typical update (seconds, then the 4 minute probation) fits, and
+one that does not is resumed as above.
+
+Not covered: a new agent that starts crashing after its probation is
+restarted by systemd for ever (with a growing delay) and is not rolled
+back. Safe mode (`internal/safemode`) only reports such a board, as
+`safeMode` in its heartbeats; it does not change what the agent does.
 
 Telling the people at the board (`internal/agentupdate`): the agent that
 staged the package leaves the screen on "Restarting MusallahBoard" and its
 batch's notice in `agent/pending-notice.json`. Then:
 
 - **success**: the new agent shows that notice ("Update complete · Agent
-  0.3.0 · Board app 2.1.0") at startup;
+  0.3.0 · Board app 2.1.0") at startup, which is before its probation ends:
+  a rollback afterwards replaces it with the rollback notice below;
 - **rollback**: the previous agent, restarted, finds an unseen `rolled-back`
   outcome and shows "Update not installed · Agent 0.3.0 did not start
   correctly, so the board went back to 0.2.1", with the batch's other lines;
@@ -728,6 +780,14 @@ connecting a board to a network permanently.
 - The agent's unit never gives up restarting (`StartLimitIntervalSec=0`); a
   crash loop backs off from 5 s to 2 minutes (`RestartSteps`,
   `RestartMaxDelaySec`, systemd 254 and later).
+- systemd's watchdog (`WatchdogSec=60s`) restarts an agent that is alive but
+  stuck. The agent pings only while a heartbeat is fresh: before enrollment
+  its poll loop bumps it, once enrolled a probe of its own
+  `/api/local/status` every 10 s (the local server and the locks of the sync,
+  backend, update and clock state). A heartbeat older than 60 s withholds
+  the ping, so a stuck agent is restarted within about 2 minutes. The probe
+  never waits on the network, so an offline board is not restarted for it;
+  a stall in the network loops themselves is not detected.
 - The daemon still watches for Chromium's error page and navigates back to the
   board, as a backstop.
 
@@ -763,7 +823,7 @@ per-day payloads from installed content, and weather comes through the agent.
 | Malicious code (SPA or agent) | Only the release key signs software; the backend never holds it. |
 | Backend compromise | Limited to content on screens; cannot push code. Content key rotation via `previous-public-keys` and `trust` CLI. |
 | Replay of old packages | Monotonic sequence/version in `state.json`. |
-| Bad agent release | Health-checked self-update with automatic rollback and a rejected-version list. |
+| Bad agent release | Self-update with a crash-safe journal and a probation (stays up; reconnects if it was connected), automatic rollback and a rejected-version list. |
 | Daemon compromise escalating to root | Daemon is unprivileged (only `CAP_SYS_TIME`, `CAP_NET_BIND_SERVICE`); the root updater re-verifies from a private copy with root-owned keys. |
 | Zip-slip, zip bombs, disk exhaustion | Strict entry names, declared sizes enforced while reading, global caps, one import at a time. |
 | Hostile USB stick | Allow-listed filesystems, read-only `nosuid,nodev,noexec` mount, only `*.mbu` regular files copied, no network in the helper, signature checks as for any source. |
