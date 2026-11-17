@@ -109,6 +109,35 @@ func (f File) RaiseClockFloor(unix int64) error {
 	return err
 }
 
+// CapClockFloor lowers the floor, and the signed floor, to at most unix. It is
+// for a time source that outranks the floor (an NTP-synchronised clock): a
+// floor ahead of that time was raised by something wrong (an uploader's
+// clock, a manual date, a bad RTC, a backend signing from the future) and is
+// itself wrong. It returns the state as it was before, and whether anything
+// was lowered.
+func (f File) CapClockFloor(unix int64) (before State, lowered bool, err error) {
+	_, err = f.Update(func(s *State) error {
+		before = *s
+		if s.ClockFloor > unix {
+			s.ClockFloor, lowered = unix, true
+		}
+		if s.SignedClockFloor > unix {
+			s.SignedClockFloor, lowered = unix, true
+		}
+		if !lowered {
+			return errUnchanged
+		}
+		return nil
+	})
+	if errors.Is(err, errUnchanged) {
+		err = nil
+	}
+	return before, lowered, err
+}
+
+// errUnchanged aborts an Update that would write the same state back.
+var errUnchanged = errors.New("unchanged")
+
 // RaiseSignedClockFloor records a verified package's createdAt, which also
 // raises the floor.
 func (f File) RaiseSignedClockFloor(unix int64) error {
