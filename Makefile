@@ -95,7 +95,9 @@ deploy: build-arm64
 	ssh -t $(PI) 'sudo bash /tmp/update.sh /tmp/musallahboard-agent-arm64'
 
 # First-time full install on a remote host via the release tarball.
-# Usage: make install-remote PI=admin@pi.local TOKEN=xxx BACKEND=http://host:8080
+# Usage: make install-remote PI=admin@pi.local TOKEN=xxx BACKEND=https://backend.example.org
+# (BACKEND must be https://; for a plain-http dev backend, enroll afterwards on
+# the board with `musallahboard-agent enroll ... --insecure-dev`.)
 install-remote: package
 	@if [ -z "$(PI)" ]; then echo "Usage: make install-remote PI=user@host [TOKEN=xxx BACKEND=url]"; exit 1; fi
 	scp build/musallahboard-agent-$(VERSION)-arm64.tar.gz $(PI):/tmp/
@@ -104,7 +106,7 @@ install-remote: package
 	    $(if $(TOKEN),--token=$(TOKEN)) $(if $(BACKEND),--backend=$(BACKEND))'
 
 # First-time full install on a remote x86-64 host via the release tarball.
-# Usage: make install-remote-x86 HOST=admin@server TOKEN=xxx BACKEND=http://host:8080
+# Usage: make install-remote-x86 HOST=admin@server TOKEN=xxx BACKEND=https://backend.example.org
 install-remote-x86: package-amd64
 	@if [ -z "$(HOST)" ]; then echo "Usage: make install-remote-x86 HOST=user@host [TOKEN=xxx BACKEND=url]"; exit 1; fi
 	scp build/musallahboard-agent-$(VERSION)-amd64.tar.gz $(HOST):/tmp/

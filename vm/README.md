@@ -26,12 +26,23 @@ architecture is emulated, which works but is very slow.
 
 ```sh
 vm/mbvm create        # first time: downloads Debian, runs setup.sh (a few minutes)
-vm/mbvm enroll --token=<token from the portal> --backend=http://localhost:8080
+vm/mbvm enroll --token=<token from the portal> --backend=http://localhost:8080 --insecure-dev
 ```
 
 `localhost` in `--backend` means your computer: mbvm rewrites it to the
 address the VM reaches your computer at (10.0.2.2). A deployed backend URL is
 passed through unchanged.
+
+The agent only enrolls over `https://` (with a `wss://` socket on the same
+host). A local backend on plain http needs `--insecure-dev`, which the VM's
+config keeps as `insecure_dev = true`; the backend must then hand out a
+`ws://` URL on the host the board used, `10.0.2.2`, which it does when it
+builds the URL from the request's `Host`. For a deployed backend leave the
+flag off:
+
+```sh
+vm/mbvm enroll --token=<token> --backend=https://backend.example.org
+```
 
 Once enrolled, the board installs the latest board app from its release
 channel, syncs content and shows the board, exactly like a Pi.
