@@ -122,7 +122,7 @@ Common fields, all required unless noted:
 | `format` | `"mbu"` |
 | `formatVersion` | `2`. Anything else is rejected. |
 | `type` | `"content"`, `"app"` or `"agent"` |
-| `createdAt` | RFC 3339 UTC, second precision. Used as a signed lower bound for the clock (section 10). |
+| `createdAt` | RFC 3339 UTC, second precision. Used as a signed lower bound for the clock (section 10). With an NTP-synchronised clock, a package whose `createdAt` is more than a day ahead of it is refused. |
 | `files` | Array as above. `sha256` lowercase hex of the file bytes; `bytes` its exact size. Paths unique and valid per the entry-name rules. |
 
 Per type:
@@ -385,7 +385,10 @@ Per package:
    - agent: write the verified package to `agent/staged/package.mbu` and create
      `agent/staged/ready`. The root updater does the rest (section 12).
 4. **Clock**: every verified package raises `clockFloor` to its `createdAt`
-   (section 10).
+   (section 10). With NTP synchronised, a `createdAt` more than a day ahead
+   of the clock is refused before anything is recorded ("An update is dated
+   in the future: the computer that made it has a wrong clock"), and one
+   less than a day ahead raises the floor only to NTP time.
 
 A batch processes `agent` packages first, then `app`, then `content`. When an
 agent package is staged, the rest of the batch stays in the inbox and is
@@ -612,21 +615,44 @@ installs.
 
 ## 10. Clock
 
-Correct time decides which day's content is shown and the prayer times.
+Correct time decides which day's content is shown and the prayer times, and
+the backend refuses a board's signed requests when its clock is more than 5
+minutes off.
 
-- `clockFloor` in `state.json` is the maximum of every verified package's
-  `createdAt` (also kept as `signedClockFloor`) and the wall clock the daemon
-  persists every 10 minutes. The persisted wall clock may not raise the floor
-  more than 400 days past `signedClockFloor`, so a clock once set far into the
-  future cannot lock the board there.
-- At daemon start and every 10 minutes: if the clock is more than 60 s behind
-  `clockFloor`, set it to `clockFloor` (the agent has `CAP_SYS_TIME`) and write
-  the RTC when one is present. A signed `createdAt` in the future of the board
-  is proof its clock is behind.
+- **NTP is the authority.** When systemd-timesyncd has synchronised the
+  clock (`/run/systemd/timesync/synchronized`), the agent never moves the
+  clock, ignores uploaders' clocks, and refuses packages signed more than a
+  day in its future (section 8).
+- `clockFloor` in `state.json` is a lower bound on the time: the maximum of
+  every verified package's `createdAt` (also kept as `signedClockFloor`) and
+  the trusted time the daemon persists every 10 minutes. The persisted time
+  may not raise the floor more than 400 days past `signedClockFloor`.
+- **What is persisted.** With NTP: NTP time, once two checks 10 minutes
+  apart agree with the monotonic clock (a clock stepped by hand between
+  timesyncd's polls is not taken for NTP time). Without NTP: the last
+  trusted time (the floor at daemon start, a newer signed `createdAt`, or NTP
+  time earlier this boot) carried forward by the monotonic clock. The wall
+  clock itself is never written to the floor without NTP: a manual `date`, a
+  wrong RTC or an uploader's time cannot raise it.
+- **A floor ahead of NTP time is wrong** (an earlier agent let an uploader,
+  a manual date or a wrong RTC raise it, or a backend signed from the
+  future). With NTP, once two checks agree, `clockFloor` and
+  `signedClockFloor` are lowered to NTP time and the journal says so
+  (`clock: the clock floor was ahead of NTP-synchronised time`). A board in
+  that state recovers by itself within about 10 minutes of NTP
+  synchronising.
+- **Without NTP**, at daemon start and every 10 minutes: if the clock is
+  more than 60 s behind `clockFloor`, set it to `clockFloor` (the agent has
+  `CAP_SYS_TIME`) and write the RTC when one is present. This is what keeps
+  a board with no RTC and no network from coming up in the past after a
+  power cut.
 - An upload's `X-MB-Client-Time` (the uploader's clock when it started
-  sending; the board measures the offset when the request arrives) is applied only after at least one package in
-  that request verified, only when it differs by more than 5 s, and only within
-  `[clockFloor, clockFloor + 90 days]`. The response reports the drift.
+  sending; the board measures the offset when the request arrives) is
+  applied only when the clock is not NTP-synchronised, only after at least
+  one package in that request verified, only when it differs by more than
+  5 s, and only within `[clockFloor, clockFloor + 90 days]`. It sets the
+  clock and the RTC but not the floor, so a later uploader with a right
+  clock, or NTP, undoes a wrong one. The response reports the drift.
 - **Trust.** The floor keeps the clock from going backwards; it cannot say
   the clock is right. `clock` in `/api/local/status` does: `source` is `ntp`
   (systemd-timesyncd has synchronised it), `rtc` (a hardware clock is
@@ -636,6 +662,18 @@ Correct time decides which day's content is shown and the prayer times.
   `unverified`, and then the board shows "The clock may be wrong: connect the
   board to the internet, or send an update from a laptop", the upload page
   says the clock is not confirmed, and `status` suggests an RTC.
+- **Trade-offs.** Without NTP, the floor resists rollback as before: nothing
+  moves the clock below it, and an uploader moves it at most 90 days ahead.
+  The floor now only counts time the board was running since its last
+  trusted time, so an uploader's correction and time spent powered off are
+  not in it, and a later uploader (with a verified package) can set the
+  clock back as far as the floor. Whoever can answer the board's NTP
+  queries (unauthenticated NTP: on the LAN, or on the path to the NTP
+  servers) decides the time, as they always could through timesyncd; the
+  floor no longer fights them, and they can lower it to their time. Set
+  back more than a day, the board also refuses new packages as dated in the
+  future until the spoofing stops. Signed content still cannot be replayed
+  (sequence and versions are monotonic and do not depend on the clock).
 - A DS3231 RTC is still recommended (`setup.sh --rtc`), and online boards keep
   `systemd-timesyncd`.
 
@@ -768,7 +806,7 @@ per-day payloads from installed content, and weather comes through the agent.
 | Zip-slip, zip bombs, disk exhaustion | Strict entry names, declared sizes enforced while reading, global caps, one import at a time. |
 | Hostile USB stick | Allow-listed filesystems, read-only `nosuid,nodev,noexec` mount, only `*.mbu` regular files copied, no network in the helper, signature checks as for any source. |
 | Rogue DHCP on a building network | Service port only after a DHCP client attempt fails; off by default; `service-port off` before connecting. |
-| Clock tampering | Clock only moves forward to signed times automatically; uploader time only with a verified package and within 90 days of the floor. |
+| Clock tampering | With NTP, nothing but NTP moves the clock, and a floor ahead of NTP time is lowered. Without NTP, the clock only moves forward to the floor automatically; uploader time only with a verified package and within 90 days past the floor, and never into the floor. Packages signed more than a day ahead of an NTP clock are refused. |
 | DNS rebinding against the upload server | `Host` allow-list. |
 
 ## 17. Out of scope

@@ -87,8 +87,12 @@ func build(t *testing.T, m mbu.Manifest, src []mbu.Source, k ed25519.PrivateKey)
 }
 
 func content(t *testing.T, seq int64, device, poster string, omitMedia bool) string {
+	return contentAt(t, seq, device, poster, omitMedia, "2026-09-24T10:00:00Z")
+}
+
+func contentAt(t *testing.T, seq int64, device, poster string, omitMedia bool, createdAt string) string {
 	m := mbu.Manifest{Type: mbu.TypeContent, Sequence: seq, DeviceID: device,
-		CreatedAt: "2026-09-24T10:00:00Z",
+		CreatedAt: createdAt,
 		Content: &mbu.ContentInfo{Timezone: "America/Toronto", FirstDay: "2026-09-24", LastDay: "2026-09-25",
 			Media: []mbu.MediaInfo{{Path: imgPath(), ContentType: "image/png"}}}}
 	src := []mbu.Source{
@@ -353,4 +357,84 @@ func otherArch() string {
 		return "amd64"
 	}
 	return "arm64"
+}
+
+// F4: a backend whose clock is briefly far ahead signs createdAt in the
+// future. Taken as a lower bound on the time it would pin every board there.
+// With NTP the board refuses such a package outright, so neither its time nor
+// its sequence is recorded; a createdAt only slightly ahead installs but
+// counts only up to NTP time. Without NTP there is nothing better than the
+// signed time, and it counts as it is.
+func TestSignedCreatedAtAgainstNTP(t *testing.T) {
+	ntp := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name       string
+		synced     bool
+		createdAt  time.Time
+		action     string
+		wantSigned int64 // signedClockFloor afterwards
+	}{
+		{"synced, backend in 2030", true, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), ActionRejected, 0},
+		{"synced, two days ahead", true, ntp.Add(48 * time.Hour), ActionRejected, 0},
+		{"synced, a minute past the limit", true, ntp.Add(mbu.MaxCreatedAhead + time.Minute), ActionRejected, 0},
+		{"synced, at the limit", true, ntp.Add(mbu.MaxCreatedAhead), ActionInstalled, ntp.Unix()},
+		{"synced, an hour ahead", true, ntp.Add(time.Hour), ActionInstalled, ntp.Unix()},
+		{"synced, in the past", true, ntp.Add(-2 * time.Hour), ActionInstalled, ntp.Add(-2 * time.Hour).Unix()},
+		{"not synced, backend in 2030", false, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), ActionInstalled,
+			time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC).Unix()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			im, l, _, _ := setup(t)
+			im.d.TrustedNow = func() (time.Time, bool) { return ntp, tc.synced }
+			p := contentAt(t, 100, dev, "/"+imgPath(), false, tc.createdAt.Format(time.RFC3339))
+			b := im.Import(context.Background(), SourceSync, []string{p})
+			r := one(t, b)
+			if r.Action != tc.action {
+				t.Fatalf("action = %s (%s: %s), want %s", r.Action, r.Message, r.Detail, tc.action)
+			}
+			st, _ := l.State().Load()
+			if st.SignedClockFloor != tc.wantSigned || st.ClockFloor != tc.wantSigned {
+				t.Fatalf("signed floor %d, floor %d; want %d", st.SignedClockFloor, st.ClockFloor, tc.wantSigned)
+			}
+			if tc.action == ActionRejected {
+				if r.Message != futureMessage || !strings.Contains(r.Detail, "createdAt") {
+					t.Fatalf("rejection: %+v", r)
+				}
+				if st.ContentSequence != 0 {
+					t.Fatalf("a refused package's sequence was recorded: %d", st.ContentSequence)
+				}
+				if _, err := l.CurrentContent(); err == nil {
+					t.Fatal("a refused package was installed")
+				}
+				if b.Verified {
+					t.Fatal("a refused package counted as verified")
+				}
+				// The board is not wedged: the backend's next, right package
+				// installs even though its sequence is lower.
+				fixed := contentAt(t, 99, dev, "/"+imgPath(), false, ntp.Format(time.RFC3339))
+				if r := one(t, im.Import(context.Background(), SourceSync, []string{fixed})); r.Action != ActionInstalled {
+					t.Fatalf("next package after a refused one: %+v", r)
+				}
+			}
+		})
+	}
+}
+
+func TestFutureSoftwareIsRefused(t *testing.T) {
+	im, _, _, _ := setup(t)
+	real := time.Now()
+	im.d.TrustedNow = func() (time.Time, bool) { return real.Add(-3 * mbu.MaxCreatedAhead), true }
+	// app() signs with the real time: three days "ahead" of this board.
+	p := app(t, "2.1.0", 2)
+	if r := one(t, im.Import(context.Background(), SourceUpload, []string{p})); r.Action != ActionRejected || r.Message != futureMessage {
+		t.Fatalf("future app: %+v", r)
+	}
+	if _, err := im.Preflight(p); err == nil || !strings.Contains(err.Error(), "createdAt") {
+		t.Fatalf("Preflight = %v", err)
+	}
+	im.d.TrustedNow = func() (time.Time, bool) { return real, true }
+	if _, err := im.Preflight(p); err != nil {
+		t.Fatalf("Preflight with a right clock: %v", err)
+	}
 }

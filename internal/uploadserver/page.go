@@ -40,7 +40,7 @@ function loadStatus(){fetch('/api/status',{cache:'no-store'}).then(function(r){r
  row(dl,'Content',s.content?(s.content.firstDay+' to '+s.content.lastDay):'none installed');
  if(s.content){row(dl,'Days left',s.staleDays>0?('ran out '+s.staleDays+' day(s) ago'):String(s.daysRemaining))}
  var drift=Math.round(s.clock.unix-Date.now()/1000);
- row(dl,'Board clock',new Date(s.clock.unix*1000).toLocaleString()+(Math.abs(drift)>5?(' ('+drift+' s off this computer; corrected when you send an update)'):''));
+ row(dl,'Board clock',new Date(s.clock.unix*1000).toLocaleString()+(Math.abs(drift)>5?(' ('+drift+' s off this computer; '+(s.clock.source==='ntp'?'the board is set from the internet, so this computer\'s clock is probably wrong':'corrected when you send an update')+')'):''));
  row(dl,'RTC',s.rtc?'present':'not fitted');
  var src={ntp:'set from the internet',rtc:'kept by the hardware clock',uploader:'set from a laptop or phone',starting:'checking',unverified:'NOT CONFIRMED: send an update from this page to set it'};
  if(s.clock.source)row(dl,'Clock',src[s.clock.source]||s.clock.source);

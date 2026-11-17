@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/LensBridge/agent/internal/clock/timesync"
 	"github.com/LensBridge/agent/internal/fsutil"
 	"github.com/LensBridge/agent/internal/mbu"
 	"github.com/LensBridge/agent/internal/notice"
@@ -135,6 +136,10 @@ type Deps struct {
 	AgentStaged func(n notice.Notice)
 	Logger      *slog.Logger
 	Now         func() time.Time
+	// TrustedNow is the system clock and whether it is NTP-synchronised.
+	// Only a synchronised clock may judge a signed createdAt (section 10).
+	// Nil means timesync.Now.
+	TrustedNow func() (time.Time, bool)
 }
 
 // Importer serialises imports.
@@ -179,6 +184,9 @@ func New(d Deps) *Importer {
 	}
 	if d.Logger == nil {
 		d.Logger = slog.New(slog.DiscardHandler)
+	}
+	if d.TrustedNow == nil {
+		d.TrustedNow = timesync.Now
 	}
 	return &Importer{d: d}
 }
@@ -360,12 +368,17 @@ func (im *Importer) one(ctx context.Context, src Source, path, name string, ring
 	}
 	defer pkg.Close()
 	m := pkg.Manifest
+	created, err := im.signedTime(m)
+	if err != nil {
+		return Result{File: name, Type: m.Type, Version: m.Version, Sequence: m.Sequence, Action: ActionRejected,
+			Message: futureMessage, Detail: err.Error()}
+	}
 	b.Verified = true
-	if t := m.CreatedTime(); t.After(b.MaxCreatedAt) {
-		b.MaxCreatedAt = t
+	if created.After(b.MaxCreatedAt) {
+		b.MaxCreatedAt = created
 	}
 	// A signed createdAt is a lower bound on the real time (section 10).
-	if err := l.State().RaiseSignedClockFloor(m.CreatedTime().Unix()); err != nil {
+	if err := l.State().RaiseSignedClockFloor(created.Unix()); err != nil {
 		im.d.Logger.Warn("could not record clock floor", "err", err)
 	}
 	st, err := l.State().Load()
@@ -450,6 +463,31 @@ func (im *Importer) one(ctx context.Context, src Source, path, name string, ring
 	return res
 }
 
+// futureMessage is what the board says about a package refused by
+// signedTime.
+const futureMessage = "An update is dated in the future: the computer that made it has a wrong clock"
+
+// signedTime is the time a verified package proves has passed: its createdAt.
+// With an NTP-synchronised clock, NTP outranks it: a createdAt more than
+// mbu.MaxCreatedAhead ahead is refused (the signer's clock was wrong, and the
+// package is not installed, so neither its time nor its sequence is
+// recorded), and one slightly ahead counts only up to NTP time. Without NTP,
+// createdAt is the best evidence the board has and counts as it is.
+func (im *Importer) signedTime(m *mbu.Manifest) (time.Time, error) {
+	created := m.CreatedTime()
+	now, synced := im.d.TrustedNow()
+	if !synced {
+		return created, nil
+	}
+	if err := m.CheckCreatedAt(now); err != nil {
+		return time.Time{}, err
+	}
+	if created.After(now) {
+		created = now
+	}
+	return created, nil
+}
+
 // describe names a package for the working screen's caption.
 func describe(m *mbu.Manifest) string {
 	switch m.Type {
@@ -525,6 +563,9 @@ func (im *Importer) Preflight(path string) (*mbu.Manifest, error) {
 		return nil, err
 	}
 	defer pkg.Close()
+	if _, err := im.signedTime(pkg.Manifest); err != nil {
+		return nil, fmt.Errorf("%s: %w", futureMessage, err)
+	}
 	st, err := im.d.Layout.State().Load()
 	if err != nil {
 		return nil, err

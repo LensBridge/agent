@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/LensBridge/agent/internal/trust"
 )
@@ -229,6 +230,33 @@ func TestManifestRules(t *testing.T) {
 		mut(&m, &src)
 		if err := Build(&bytes.Buffer{}, m, src, []ed25519.PrivateKey{ck}); err == nil {
 			t.Errorf("case %d: invalid manifest built", i)
+		}
+	}
+}
+
+func TestCheckCreatedAt(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		createdAt string
+		ok        bool
+	}{
+		{"2026-11-17T12:00:00Z", true},
+		{"2020-01-01T00:00:00Z", true},       // old is fine: an old USB stick
+		{"2026-11-17T12:05:00Z", true},       // a backend a few minutes fast
+		{"2026-11-18T12:00:00Z", true},       // exactly MaxCreatedAhead
+		{"2026-11-18T12:00:01Z", false},      // just past it
+		{"2030-01-01T00:00:00Z", false},      // a backend clock years ahead
+		{"2026-11-18T14:00:00+05:00", true},  // offsets count: 09:00Z
+		{"2026-11-19T00:00:00-01:00", false}, // 01:00Z on the 19th
+	}
+	for _, tc := range cases {
+		m, err := ParseManifest([]byte(`{"format":"mbu","formatVersion":2,"type":"app","version":"1.0.0","createdAt":"` +
+			tc.createdAt + `","files":[{"path":"index.html","sha256":"` + strings.Repeat("a", 64) + `","bytes":1}],"app":{"localApi":1}}`))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.createdAt, err)
+		}
+		if err := m.CheckCreatedAt(now); (err == nil) != tc.ok {
+			t.Errorf("%s: err = %v, want ok=%v", tc.createdAt, err, tc.ok)
 		}
 	}
 }
