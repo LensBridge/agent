@@ -1,31 +1,41 @@
 [Unit]
 Description=Apply a staged MusallahBoard agent update
 Documentation=https://github.com/LensBridge/agent/blob/main/docs/architecture.md
-# Started only by musallahboard-agent-update.path. Runs as root: it replaces
-# /usr/bin/musallahboard-agent, keeps the previous binary in
+# Started only by musallahboard-agent-update.path: when the daemon has staged
+# a package, or when an update is unfinished (its journal,
+# /usr/lib/musallahboard/update-in-progress.json, exists: at boot after a
+# power cut, or after this unit was stopped mid-way). Runs as root: it
+# replaces /usr/bin/musallahboard-agent, keeps the previous binary in
 # /usr/lib/musallahboard/agent.prev, restarts musallahboard-agent.service and
-# rolls back if the new agent does not report its version on
-# 127.0.0.1:8080 within 120 s. Nothing the daemon can write decides trust
-# here: the updater re-verifies against /etc/musallahboard/trust.json
-# (root-owned) and the keys compiled into this binary.
+# keeps the new agent on probation: it must report its version on
+# 127.0.0.1:8080 within 2 minutes, then run 4 minutes without a restart and,
+# if the board was connected to LensBridge before, connect again. Otherwise it
+# rolls back. Nothing the daemon can write decides trust here: the updater
+# re-verifies against /etc/musallahboard/trust.json (root-owned, only read)
+# and the keys compiled into this binary.
 After=musallahboard-agent.service
 
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/musallahboard-agent selfupdate apply
-# Verify + swap + restart + a 120 s health check, with room to spare. Killing
-# it mid-way is safe (every step is a rename), but it would leave the version
-# unjudged, so the limit is generous.
-TimeoutStartSec=5min
+# Verify + swap + restart + up to 2 minutes to come up + 4 minutes of
+# probation + a rollback, with room to spare. Stopping it mid-way is safe:
+# the journal stays, the path unit starts it again, and it judges the new
+# agent from scratch (at most 3 times, then it rolls back).
+TimeoutStartSec=15min
 
 # Hardening. It needs to write /usr/bin (the binary), /usr/lib/musallahboard
-# (agent.prev), /var/lib/musallahboard (state.json, agent/last-update.json)
-# and /etc/musallahboard (trust.json, when it runs `trust fetch` because no
-# content key is pinned yet). It needs the network for that fetch and for
-# the loopback health check, and it talks to PID 1 over its private socket
-# to restart the agent, which a read-only /run does not prevent.
+# (agent.prev, the journal, update-strikes.json), /var/lib/musallahboard
+# (state.json, agent/last-update.json, agent/staged/ready) and
+# /usr/share/musallahboard (the kiosk pages `splash install` refreshes after
+# an update). It only reads /etc/musallahboard. Its only network use is the
+# loopback status check, and it talks to PID 1 over its private socket to
+# restart the agent and read its state, which a read-only /run does not
+# prevent.
 ProtectSystem=strict
-ReadWritePaths=/usr/bin -/usr/lib/musallahboard /var/lib/musallahboard /etc/musallahboard
+ReadWritePaths=/usr/bin -/usr/lib/musallahboard /var/lib/musallahboard -/usr/share/musallahboard
+IPAddressDeny=any
+IPAddressAllow=localhost
 ProtectHome=yes
 PrivateTmp=yes
 NoNewPrivileges=yes
