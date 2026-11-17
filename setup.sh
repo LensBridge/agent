@@ -702,8 +702,9 @@ ExecStart=/bin/systemctl --no-block try-restart musallahboard-kiosk.service
 EOF
 
     # Root self-updater: the daemon stages a verified agent package and
-    # creates staged/ready; this re-verifies it as root, swaps the binary and
-    # rolls back if the new agent does not come up.
+    # creates staged/ready; this re-verifies it as root, swaps the binary,
+    # keeps the new agent on probation and rolls back if it fails. The update
+    # journal in $LIB_DIR also starts it, to finish an interrupted update.
     sudo tee "$UNIT_DIR/musallahboard-agent-update.path" > /dev/null << 'EOF'
 [Unit]
 Description=Watch for a staged MusallahBoard agent update
@@ -711,6 +712,7 @@ Documentation=https://github.com/LensBridge/agent/blob/main/docs/architecture.md
 
 [Path]
 PathExists=/var/lib/musallahboard/agent/staged/ready
+PathExists=/usr/lib/musallahboard/update-in-progress.json
 Unit=musallahboard-agent-update.service
 
 [Install]
@@ -726,9 +728,11 @@ After=musallahboard-agent.service
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/musallahboard-agent selfupdate apply
-TimeoutStartSec=5min
+TimeoutStartSec=15min
 ProtectSystem=strict
-ReadWritePaths=/usr/bin -/usr/lib/musallahboard /var/lib/musallahboard /etc/musallahboard
+ReadWritePaths=/usr/bin -/usr/lib/musallahboard /var/lib/musallahboard -/usr/share/musallahboard
+IPAddressDeny=any
+IPAddressAllow=localhost
 ProtectHome=yes
 PrivateTmp=yes
 NoNewPrivileges=yes

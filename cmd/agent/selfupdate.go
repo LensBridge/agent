@@ -14,21 +14,25 @@ import (
 
 // runSelfUpdate is `selfupdate apply` (docs/architecture.md, section 12),
 // started as root by musallahboard-agent-update.service when the daemon has
-// staged an agent package. Its output goes to the journal. It exits non-zero
-// when the update was refused or rolled back, so `systemctl status` shows
-// that something needs a look; the outcome is also in last-update.json.
+// staged an agent package, or when an update a previous run left unfinished
+// (a power cut, a reboot) has to be resumed. Its output goes to the journal.
+// It exits non-zero when the update was refused, rolled back or interrupted,
+// so `systemctl status` shows that something needs a look; the outcome is
+// also in last-update.json.
 func runSelfUpdate(args []string) {
 	if len(args) != 1 || args[0] != "apply" {
 		fmt.Fprintln(os.Stderr, "usage: musallahboard-agent selfupdate apply")
-		fmt.Fprintln(os.Stderr, "  Installs the agent update the daemon staged, and rolls it back if the new agent does not start.")
+		fmt.Fprintln(os.Stderr, "  Installs the agent update the daemon staged, watches the new agent for a few minutes,")
+		fmt.Fprintln(os.Stderr, "  and rolls it back if it does not stay up (or reconnect, if the board was connected).")
 		fmt.Fprintln(os.Stderr, "  It normally runs by itself; there is rarely a reason to run it by hand.")
 		os.Exit(2)
 	}
 	requireRoot("selfupdate apply")
 
-	// Once the binary is swapped the rest must finish (health check, and
-	// rollback if needed), so a hangup of an interactive terminal is ignored
-	// and SIGTERM only cancels the waits.
+	// A hangup of an interactive terminal is ignored. SIGTERM (shutdown, or
+	// the unit's start timeout) stops a probation where it is: the update
+	// record stays, and the next run (at boot at the latest) judges the new
+	// agent again. A rollback that has begun finishes regardless.
 	signal.Ignore(syscall.SIGHUP, syscall.SIGPIPE)
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
@@ -38,6 +42,9 @@ func runSelfUpdate(args []string) {
 	switch {
 	case errors.Is(err, selfupdate.ErrNothingStaged):
 		fmt.Println("No agent update is staged; nothing to do.")
+	case errors.Is(err, selfupdate.ErrInterrupted):
+		fmt.Printf("Agent update %s -> %s: %v; it will be resumed.\n", out.From, out.To, err)
+		os.Exit(1)
 	case err != nil:
 		fmt.Printf("Agent update %s: %s\n", out.Status, out.Message)
 		os.Exit(1)
