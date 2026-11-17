@@ -107,6 +107,9 @@ Enroll flags:
   --backend   Backend base URL (e.g. https://backend.utmmsa.ca)
   --config    Path to write agent config (default: ` + defaultConfigPath + `)
   --force     Enroll a board that is already enrolled (it gets a new identity)
+  --insecure-dev
+              Development boards only: allow an http:// backend and ws:// socket
+              (saved in the config as insecure_dev = true; never on a deployed board)
 `)
 }
 
@@ -116,6 +119,7 @@ func runEnroll(args []string) {
 	backend := fs.String("backend", "", "backend base URL")
 	configPath := fs.String("config", defaultConfigPath, "path to write config")
 	force := fs.Bool("force", false, "enroll again, replacing this board's identity")
+	insecureDev := fs.Bool("insecure-dev", false, "development only: allow a plaintext http:// backend")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
@@ -123,6 +127,9 @@ func runEnroll(args []string) {
 		fmt.Fprintln(os.Stderr, "usage: sudo musallahboard-agent enroll --token=<token> --backend=<url>")
 		fmt.Fprintln(os.Stderr, "Copy the whole command from the admin portal: Devices, Enroll a board.")
 		os.Exit(2)
+	}
+	if err := config.CheckBackendURL(*backend, *insecureDev); err != nil {
+		fail("%v", err)
 	}
 	requireRoot("enroll")
 
@@ -141,6 +148,7 @@ func runEnroll(args []string) {
 		BackendURL:   *backend,
 		ConfigPath:   *configPath,
 		AgentVersion: version.Version,
+		InsecureDev:  *insecureDev,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "Enrollment failed: %v\n", err)
 		fmt.Fprintln(os.Stderr, "Tokens can be used once and expire; if this one was used or has expired, issue a new one in the portal.")

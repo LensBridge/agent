@@ -162,10 +162,14 @@ func readDiskUsedPct() (float64, error) {
 //
 // The systemd unit is Restart=always, so `is-active` says "active" almost
 // unconditionally — including while Chromium is crash-looping, parked on the
-// enrollment splash, or showing a network error page. That made kioskAlive
-// useless as an alert signal. Ask the browser instead, and fall back to the
-// unit state only when the debugger is unreachable (no CDP port, browser still
-// starting, or a build without --remote-debugging-port).
+// enrollment splash, or showing a crashed tab ("Aw, Snap!"). Ask the browser
+// instead, and fall back to the unit state only when there is no browser to
+// ask (no CDP port, browser still starting, or a build without
+// --remote-debugging-port).
+//
+// A browser that is reachable but whose page target crashed or does not
+// answer evaluate in time is not alive, whatever systemd says: that is the
+// blank board the admin console must see.
 func checkKiosk(ctx context.Context, prober PageProber) (alive bool, frameID string) {
 	if prober != nil {
 		pctx, cancel := context.WithTimeout(ctx, pageProbeTimeout)
@@ -176,12 +180,18 @@ func checkKiosk(ctx context.Context, prober PageProber) (alive bool, frameID str
 		case err == nil:
 			// The board answered. It's alive by definition.
 			return true, status.SlideKey
-		case errors.Is(err, cdp.ErrEvalUndefined):
-			// A page exists but isn't the board — the splash, or a frontend
-			// too old to expose getStatus(). The browser is up regardless.
+		case errors.Is(err, cdp.ErrEvalUndefined),
+			errors.Is(err, cdp.ErrPageThrew),
+			errors.Is(err, cdp.ErrPageNavigating):
+			// A page answered (or is between documents) but isn't the board:
+			// the splash, the update screen, a frontend too old to expose
+			// getStatus(), or a reload in flight. The browser is up.
 			return true, ""
+		case errors.Is(err, cdp.ErrPageCrashed), errors.Is(err, cdp.ErrPageUnresponsive):
+			// The browser is there and its page is dead.
+			return false, ""
 		}
-		// Anything else: Chromium unreachable. Fall through.
+		// Anything else: Chromium unreachable, or no page yet. Fall through.
 	}
 	return systemdKioskActive(ctx), ""
 }

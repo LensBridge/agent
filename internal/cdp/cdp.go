@@ -1,6 +1,7 @@
-// Package cdp is a minimal Chrome DevTools Protocol client for the three
+// Package cdp is a minimal Chrome DevTools Protocol client for the few
 // methods the agent actually uses against the kiosk Chromium instance:
-// Page.reload, Page.captureScreenshot, Runtime.evaluate.
+// Page.reload, Page.navigate, Page.captureScreenshot, Runtime.evaluate, and
+// Inspector.enable to tell a crashed renderer from a live one.
 //
 // We don't pull in chromedp because we don't drive a browser — we attach to
 // an already-running Chromium with --remote-debugging-port=9222 and only
@@ -65,8 +66,63 @@ func New(debuggerURL string) *Client {
 	}
 }
 
+// Errors that say how far a probe of the kiosk got. They separate "the
+// browser is not there (yet)", which only the kiosk unit's state can answer,
+// from "the browser is there but its page is dead", which is a broken board.
+var (
+	// ErrDebuggerUnreachable: nothing answers on the debugging port, or it
+	// answers garbage. Chromium is starting, restarting, or was built without
+	// --remote-debugging-port.
+	ErrDebuggerUnreachable = errors.New("chrome not reachable")
+	// ErrNoPageTarget: the browser answers but has no page open, which is
+	// normal for a moment while it starts.
+	ErrNoPageTarget = errors.New("no page targets in chrome")
+	// ErrPageCrashed: the page's renderer is gone ("Aw, Snap!"). The browser
+	// keeps the tab, and its URL, so /json alone does not show it.
+	ErrPageCrashed = errors.New("cdp: page renderer crashed")
+	// ErrPageUnresponsive: the browser accepted a debugger connection to the
+	// page but the page did not answer in time (hung JavaScript, a wedged or
+	// crashed renderer).
+	ErrPageUnresponsive = errors.New("cdp: page is not answering")
+	// ErrPageNavigating: the page's JavaScript context went away under the
+	// call, because the page is navigating or reloading. Transient.
+	ErrPageNavigating = errors.New("cdp: page is navigating")
+	// ErrPageThrew: the expression threw. The page is alive and answered.
+	ErrPageThrew = errors.New("cdp: page threw")
+)
+
+// RPCError is an error reply from Chromium to one CDP method call.
+type RPCError struct {
+	Method  string
+	Code    int
+	Message string
+}
+
+func (e *RPCError) Error() string {
+	return fmt.Sprintf("cdp %s: %s (code %d)", e.Method, e.Message, e.Code)
+}
+
+// navigatingMessages are the error replies Chromium gives a Runtime call
+// whose execution context was torn down by a navigation or reload.
+var navigatingMessages = []string{
+	"Execution context was destroyed",
+	"Cannot find default execution context",
+	"Cannot find context with specified id",
+	"Inspected target navigated or closed",
+}
+
+func isNavigatingError(e *RPCError) bool {
+	for _, m := range navigatingMessages {
+		if strings.Contains(e.Message, m) {
+			return true
+		}
+	}
+	return false
+}
+
 // FirstPageTarget returns the WS URL of the first non-DevTools page tab.
-// Errors if Chromium isn't reachable or has no pages open.
+// Errors if Chromium isn't reachable (ErrDebuggerUnreachable) or has no pages
+// open (ErrNoPageTarget).
 func (c *Client) FirstPageTarget(ctx context.Context) (Target, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.debuggerURL+"/json", nil)
 	if err != nil {
@@ -74,23 +130,23 @@ func (c *Client) FirstPageTarget(ctx context.Context) (Target, error) {
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return Target{}, fmt.Errorf("chrome not reachable at %s: %w", c.debuggerURL, err)
+		return Target{}, fmt.Errorf("%w at %s: %w", ErrDebuggerUnreachable, c.debuggerURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return Target{}, fmt.Errorf("chrome /json returned %d: %s", resp.StatusCode, body)
+		return Target{}, fmt.Errorf("%w: /json returned %d: %s", ErrDebuggerUnreachable, resp.StatusCode, body)
 	}
 	var targets []Target
 	if err := json.NewDecoder(resp.Body).Decode(&targets); err != nil {
-		return Target{}, fmt.Errorf("decode targets: %w", err)
+		return Target{}, fmt.Errorf("%w: decode targets: %w", ErrDebuggerUnreachable, err)
 	}
 	for _, t := range targets {
 		if t.Type == "page" && t.WebSocketDebuggerURL != "" {
 			return t, nil
 		}
 	}
-	return Target{}, fmt.Errorf("no page targets in chrome (%d total)", len(targets))
+	return Target{}, fmt.Errorf("%w (%d total)", ErrNoPageTarget, len(targets))
 }
 
 type rpcRequest struct {
@@ -143,7 +199,7 @@ func (c *Client) Call(ctx context.Context, target Target, method string, params,
 			continue
 		}
 		if resp.Error != nil {
-			return fmt.Errorf("cdp %s: %s (code %d)", method, resp.Error.Message, resp.Error.Code)
+			return &RPCError{Method: method, Code: resp.Error.Code, Message: resp.Error.Message}
 		}
 		if out != nil && len(resp.Result) > 0 {
 			if err := json.Unmarshal(resp.Result, out); err != nil {
@@ -192,18 +248,131 @@ type PageStatus struct {
 	Error         string `json:"error"`
 }
 
-// PageStatus asks the board what it is currently showing.
-//
-// Three outcomes worth distinguishing:
-//   - nil error: the board is up and answered.
-//   - ErrEvalUndefined: a browser page exists but has no hook — the local
-//     enrollment splash, or a frontend build older than getStatus(). The
-//     browser is alive; it just isn't the board.
-//   - any other error: Chromium is unreachable.
+// PageStatus asks the board what it is currently showing. It probes the page
+// the way ProbeEvaluate does, so the error says what state the kiosk is in:
+//   - nil: the board is up and answered.
+//   - ErrEvalUndefined: a page answered but has no hook — the local
+//     enrollment splash, the update screen, or a frontend build older than
+//     getStatus(). The page is alive; it just isn't the board.
+//   - ErrPageThrew, ErrPageNavigating: the page is alive.
+//   - ErrPageCrashed, ErrPageUnresponsive: the browser is up and the page is
+//     dead. The board is not on screen.
+//   - ErrDebuggerUnreachable, ErrNoPageTarget: nothing to ask; the browser
+//     is not (yet) there.
 func (c *Client) PageStatus(ctx context.Context) (PageStatus, error) {
 	var s PageStatus
-	err := c.EvaluateValue(ctx, "window.MusallahBoard?.getStatus?.() ?? null", &s)
+	raw, err := c.ProbeEvaluate(ctx, "window.MusallahBoard?.getStatus?.() ?? null")
+	if err != nil {
+		return s, err
+	}
+	err = decodeEvalReply(raw, &s)
 	return s, err
+}
+
+// PageHealth reports whether the kiosk page's renderer answers, with the
+// same errors as PageStatus. A nil error means the page ran a trivial script.
+func (c *Client) PageHealth(ctx context.Context) error {
+	raw, err := c.ProbeEvaluate(ctx, "true")
+	if err != nil {
+		return err
+	}
+	return decodeEvalReply(raw, nil)
+}
+
+// ProbeEvaluate runs expression in the first page target like RuntimeEvaluate,
+// but classifies how a failure happened instead of returning a bare network
+// error:
+//
+//   - the debugger cannot be reached or the WebSocket to the page cannot be
+//     opened: ErrDebuggerUnreachable (or ErrNoPageTarget);
+//   - Chromium reports the renderer crashed (Inspector.targetCrashed, which
+//     Inspector.enable sends at once on a tab whose renderer is gone):
+//     ErrPageCrashed;
+//   - the connection is open but no reply arrives before ctx's deadline:
+//     ErrPageUnresponsive. The Inspector domain is answered by the browser
+//     process, Runtime by the renderer, so a hung or dead renderer shows up
+//     here;
+//   - the call is cut off by a navigation: ErrPageNavigating.
+//
+// The caller's deadline is the evaluate timeout; it should leave the browser
+// a few seconds (the board probes with 3-5 s on loopback).
+func (c *Client) ProbeEvaluate(ctx context.Context, expression string) (json.RawMessage, error) {
+	target, err := c.FirstPageTarget(ctx)
+	if err != nil {
+		return nil, err
+	}
+	conn, _, err := websocket.Dial(ctx, target.WebSocketDebuggerURL, nil)
+	if err != nil {
+		// Not even a connection: the browser is going away or not there yet,
+		// which says nothing about the page.
+		return nil, fmt.Errorf("%w: ws dial cdp: %w", ErrDebuggerUnreachable, err)
+	}
+	defer conn.CloseNow()
+	conn.SetReadLimit(maxReplyBytes)
+
+	enableID := c.id.Add(1)
+	evalID := c.id.Add(1)
+	for _, req := range []rpcRequest{
+		{ID: enableID, Method: "Inspector.enable"},
+		{ID: evalID, Method: "Runtime.evaluate", Params: map[string]any{
+			"expression":    expression,
+			"awaitPromise":  true,
+			"returnByValue": true,
+		}},
+	} {
+		data, err := json.Marshal(req)
+		if err != nil {
+			return nil, fmt.Errorf("marshal: %w", err)
+		}
+		if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+			return nil, probeReadError(ctx, "write", err)
+		}
+	}
+
+	for {
+		_, msg, err := conn.Read(ctx)
+		if err != nil {
+			return nil, probeReadError(ctx, "read", err)
+		}
+		var frame struct {
+			rpcResponse
+			Method string `json:"method"`
+		}
+		if err := json.Unmarshal(msg, &frame); err != nil {
+			return nil, fmt.Errorf("decode response: %w", err)
+		}
+		switch {
+		case frame.Method == "Inspector.targetCrashed":
+			return nil, fmt.Errorf("%w (%s)", ErrPageCrashed, target.URL)
+		case frame.Method != "" || frame.ID != evalID:
+			// Other events, and the reply to Inspector.enable.
+			continue
+		case frame.Error != nil:
+			rerr := &RPCError{Method: "Runtime.evaluate", Code: frame.Error.Code, Message: frame.Error.Message}
+			if isNavigatingError(rerr) {
+				return nil, fmt.Errorf("%w: %w", ErrPageNavigating, rerr)
+			}
+			if strings.Contains(strings.ToLower(rerr.Message), "crashed") {
+				return nil, fmt.Errorf("%w: %w", ErrPageCrashed, rerr)
+			}
+			return nil, rerr
+		default:
+			return frame.Result, nil
+		}
+	}
+}
+
+// probeReadError classifies a failure on an open debugger connection. Once
+// the browser has accepted the connection, running out of time means the page
+// did not answer; the connection dropping means the browser went away.
+func probeReadError(ctx context.Context, op string, err error) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("%w: %s: %w", ErrPageUnresponsive, op, err)
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return fmt.Errorf("%w: %s: %w", ErrDebuggerUnreachable, op, err)
 }
 
 // ErrEvalUndefined means the expression resolved to `undefined`. Usually an
@@ -237,6 +406,12 @@ func (c *Client) EvaluateValue(ctx context.Context, expression string, out any) 
 	if err != nil {
 		return err
 	}
+	return decodeEvalReply(raw, out)
+}
+
+// decodeEvalReply turns a Runtime.evaluate result into out, ErrPageThrew or
+// ErrEvalUndefined.
+func decodeEvalReply(raw json.RawMessage, out any) error {
 	var reply evalReply
 	if err := json.Unmarshal(raw, &reply); err != nil {
 		return fmt.Errorf("cdp: decode evaluate reply: %w", err)
@@ -246,7 +421,7 @@ func (c *Client) EvaluateValue(ctx context.Context, expression string, out any) 
 		if reply.ExceptionDetails.Exception != nil && reply.ExceptionDetails.Exception.Description != "" {
 			msg = reply.ExceptionDetails.Exception.Description
 		}
-		return fmt.Errorf("cdp: page threw: %s", msg)
+		return fmt.Errorf("%w: %s", ErrPageThrew, msg)
 	}
 	if reply.Result.Type == "undefined" || len(reply.Result.Value) == 0 || string(reply.Result.Value) == "null" {
 		return ErrEvalUndefined
@@ -269,8 +444,8 @@ func (c *Client) RuntimeEvaluate(ctx context.Context, expression string) (json.R
 	}
 	var out json.RawMessage
 	if err := c.Call(ctx, target, "Runtime.evaluate", map[string]any{
-		"expression":   expression,
-		"awaitPromise": true,
+		"expression":    expression,
+		"awaitPromise":  true,
 		"returnByValue": true,
 	}, &out); err != nil {
 		return nil, err

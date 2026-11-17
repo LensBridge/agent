@@ -684,7 +684,16 @@ minutes off.
 ## 11. Configuration (`/etc/musallahboard/agent.toml`)
 
 Existing keys (`device_id`, `backend_url`, `websocket_url`, `key_path`) are
-unchanged. New keys, all optional:
+unchanged, with one rule (`config.CheckTransport`): `backend_url` must be
+`https://` and `websocket_url` `wss://` on the same host as `backend_url` (the
+port may differ: TLS binds the host name, not the port; there is no override
+for a socket on another host). `enroll` checks the backend URL before it sends
+the token and the returned WebSocket URL before it saves anything, and the
+daemon checks both at every start. A config that fails is still read, so the
+board keeps showing what it has and the local CLI keeps working, but nothing
+that talks to the backend is started (content sync, refresh channel, release
+checks, the command WebSocket); the reason goes to the log, `systemctl status`
+and the `sync`/backend errors in `/api/local/status`. New keys, all optional:
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -695,6 +704,7 @@ unchanged. New keys, all optional:
 | `auto_update` | `true` | Follow the release channels. |
 | `app_channel_url`, `agent_channel_url` | section 9.4 | Channel pointers. Empty disables that channel. |
 | `update_time` | `"23:00"` | When software from the channels installs, `HH:MM` in the board's time zone (section 9.4). |
+| `insecure_dev` | `false` | Development boards only: allow `http://` and `ws://` (the same-host rule still applies). Set by `enroll --insecure-dev`; the daemon logs a warning at every start while it is on. |
 
 An offline board needs no configuration change: sync attempts fail fast with no
 route and cost nothing, and the moment it gets a network it starts syncing.
@@ -828,6 +838,21 @@ connecting a board to a network permanently.
   a stall in the network loops themselves is not detected.
 - The daemon still watches for Chromium's error page and navigates back to the
   board, as a backstop.
+- Every 30 s it also probes the page over CDP: `Inspector.enable` (which
+  Chromium answers with `Inspector.targetCrashed` when the tab's renderer is
+  gone, "Aw, Snap!") and a trivial `Runtime.evaluate` with a 5 s limit. A
+  crashed page (one probe) or one that has not answered three probes in a row
+  is reloaded; if it is still dead at the next threshold the kiosk unit is
+  restarted (`sudo -n systemctl restart`, as the `kiosk.restart` command).
+  Restarts are at least 5 minutes apart, doubling to an hour, and the backoff
+  starts over only after an hour of a healthy page. A reload is tried at most
+  once until the page answers again or the kiosk restarts. Nothing is done
+  while the update screen is up, nor for a page that answers without the
+  board's `getStatus()` hook (splash, update screen, an old board app), a page
+  mid-navigation, or a browser that is not up yet.
+- The heartbeat's `kioskAlive` comes from the same probe: false when the
+  browser is reachable but the page crashed or does not answer; the unit's
+  state is used only when the browser cannot be reached.
 
 ## 15. Frontend (MusallahBoard)
 
@@ -868,6 +893,7 @@ per-day payloads from installed content, and weather comes through the agent.
 | Rogue DHCP on a building network | Service port only after a DHCP client attempt fails; off by default; `service-port off` before connecting. |
 | Clock tampering | With NTP, nothing but NTP moves the clock, and a floor ahead of NTP time is lowered. Without NTP, the clock only moves forward to the floor automatically; uploader time only with a verified package and within 90 days past the floor, and never into the floor. Packages signed more than a day ahead of an NTP clock are refused. |
 | DNS rebinding against the upload server | `Host` allow-list. |
+| Enrollment or backend impersonated on the LAN | `https://` backend and `wss://` socket on the backend's host, enforced at enrollment and at every daemon start; plaintext only with the explicit `insecure_dev` opt-in (section 11). |
 
 ## 17. Out of scope
 

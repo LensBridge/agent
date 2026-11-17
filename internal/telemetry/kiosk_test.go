@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/LensBridge/agent/internal/cdp"
@@ -72,5 +73,51 @@ func TestCheckKioskNilProber(t *testing.T) {
 
 	if frame != "" {
 		t.Errorf("frame = %q, want empty", frame)
+	}
+}
+
+// A crashed or hung renderer leaves the kiosk unit active, so the unit state
+// must not be consulted: the board is blank and has to be reported as such.
+func TestCheckKioskDeadPageIsNotAlive(t *testing.T) {
+	for _, err := range []error{
+		fmt.Errorf("%w (http://127.0.0.1:8080/)", cdp.ErrPageCrashed),
+		fmt.Errorf("%w: read: context deadline exceeded", cdp.ErrPageUnresponsive),
+	} {
+		p := &stubProber{err: err}
+		alive, frame := checkKiosk(context.Background(), p)
+		if alive {
+			t.Errorf("%v: kiosk reported alive", err)
+		}
+		if frame != "" {
+			t.Errorf("%v: frame = %q, want empty", err, frame)
+		}
+	}
+}
+
+// A page between documents, or one whose hook threw, still answered.
+func TestCheckKioskTransientPageStatesAreAlive(t *testing.T) {
+	for _, err := range []error{
+		fmt.Errorf("%w: Execution context was destroyed.", cdp.ErrPageNavigating),
+		fmt.Errorf("%w: TypeError: x is undefined", cdp.ErrPageThrew),
+	} {
+		p := &stubProber{err: err}
+		if alive, _ := checkKiosk(context.Background(), p); !alive {
+			t.Errorf("%v: kiosk reported dead", err)
+		}
+	}
+}
+
+// No browser to ask is not proof of death: the unit's state decides, and
+// the probe errors that mean "no browser" must take that path.
+func TestCheckKioskUnreachableUsesUnitState(t *testing.T) {
+	want := systemdKioskActive(context.Background())
+	for _, err := range []error{
+		fmt.Errorf("%w at http://localhost:9222: connection refused", cdp.ErrDebuggerUnreachable),
+		fmt.Errorf("%w (0 total)", cdp.ErrNoPageTarget),
+	} {
+		p := &stubProber{err: err}
+		if alive, _ := checkKiosk(context.Background(), p); alive != want {
+			t.Errorf("%v: alive = %v, want the unit state %v", err, alive, want)
+		}
 	}
 }
