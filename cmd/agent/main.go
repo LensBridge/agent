@@ -6,10 +6,12 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/LensBridge/agent/internal/cdp"
 	"github.com/LensBridge/agent/internal/config"
 	"github.com/LensBridge/agent/internal/enroll"
+	"github.com/LensBridge/agent/internal/localserver"
 	"github.com/LensBridge/agent/internal/netinfo"
 	"github.com/LensBridge/agent/internal/safemode"
 	"github.com/LensBridge/agent/internal/splash"
@@ -163,16 +166,18 @@ func runDaemon() {
 
 	// Started before the config gate: awaitEnrollment below can hold the
 	// process for days, and systemd's WatchdogSec does not pause for it.
+	// It pings only while hb is fresh (watchdogLoop).
+	hb := newHeartbeat()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		watchdogLoop(ctx)
+		watchdogLoop(ctx, logger, hb)
 	}()
 
 	cfg, err := config.Load(defaultConfigPath)
 	if err != nil {
 		logger.Info("not enrolled yet — entering pre-enrollment mode", "reason", err)
-		cfg = awaitEnrollment(ctx, logger)
+		cfg = awaitEnrollment(ctx, logger, hb)
 		if cfg == nil { // context cancelled while waiting
 			wg.Wait()
 			logger.Info("shutdown complete")
@@ -187,10 +192,17 @@ func runDaemon() {
 		logger.Warn("agent starting in safe mode (repeated crashes detected)")
 	}
 
+	hb.beat()
 	if err := startBoard(ctx, logger, cfg, safeMode, &wg); err != nil {
 		logger.Error("could not start", "err", err)
 		os.Exit(1)
 	}
+	// From now on the heartbeat is the local server answering.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		probeLoop(ctx, hb, "http://"+localserver.ListenAddr+"/api/local/status", livenessProbeInterval)
+	}()
 
 	wg.Add(1)
 	go func() {
@@ -225,7 +237,7 @@ func runDaemon() {
 // Waiting is a legitimate running state rather than a slow start, so we report
 // READY to systemd up front; otherwise Type=notify would hold the unit in
 // "activating" and kill it at TimeoutStartSec.
-func awaitEnrollment(ctx context.Context, logger *slog.Logger) *config.Config {
+func awaitEnrollment(ctx context.Context, logger *slog.Logger, hb *heartbeat) *config.Config {
 	_, _ = daemon.SdNotify(false, daemon.SdNotifyReady)
 	_, _ = daemon.SdNotify(false, "STATUS=waiting for enrollment")
 
@@ -237,6 +249,9 @@ func awaitEnrollment(ctx context.Context, logger *slog.Logger) *config.Config {
 	t := time.NewTicker(enrollPollInterval)
 	defer t.Stop()
 	for {
+		// Every step below is bounded, so a loop that stops coming round
+		// is stuck, and the watchdog should restart us.
+		hb.beat()
 		info := netinfo.Collect(ctx)
 		if !reported || !info.Equal(last) {
 			logger.Info("device network address",
@@ -268,24 +283,119 @@ func awaitEnrollment(ctx context.Context, logger *slog.Logger) *config.Config {
 	}
 }
 
-// watchdogLoop pings systemd's WATCHDOG=1 at half the configured interval.
-// systemd kills (and restarts) the agent if it stops pinging — useful when
-// a goroutine deadlocks but the process is technically still alive.
-func watchdogLoop(ctx context.Context) {
+// The systemd watchdog (WatchdogSec= in musallahboard-agent.service).
+//
+// A ping on a timer of its own would only prove that the Go runtime still
+// schedules goroutines. So the agent pings only while a heartbeat is fresh,
+// and the heartbeat is bumped by real work: before enrollment by the poll
+// loop in awaitEnrollment (every 5 s), and once enrolled by probeLoop, which
+// asks the agent's own local server for /api/local/status. Answering that
+// takes the HTTP server and the locks of the sync, backend, update and clock
+// state, i.e. what the board and the admin portal depend on. None of it
+// waits on the network or on the disk beyond a few small files, so an idle or
+// offline board stays live; only a wedged server or a deadlock goes stale.
+//
+// The loops that do wait on the network (backend WebSocket, content sync,
+// release channels) are not covered: a stall there is indistinguishable here
+// from a slow network, and restarting the agent for it would do more harm
+// than good.
+const (
+	// livenessProbeInterval is how often probeLoop asks the local server.
+	livenessProbeInterval = 10 * time.Second
+	// livenessProbeTimeout bounds one probe.
+	livenessProbeTimeout = 15 * time.Second
+)
+
+// heartbeat is the time of the last proof of life. It holds a time.Time
+// with its monotonic reading, so stepping the wall clock (which this agent
+// does, with CAP_SYS_TIME) never makes it look stale.
+type heartbeat struct{ last atomic.Pointer[time.Time] }
+
+func newHeartbeat() *heartbeat {
+	h := &heartbeat{}
+	h.beat()
+	return h
+}
+
+func (h *heartbeat) beat() {
+	t := time.Now()
+	h.last.Store(&t)
+}
+
+func (h *heartbeat) age() time.Duration { return time.Since(*h.last.Load()) }
+
+// watchdogLoop pings systemd's WATCHDOG=1 while the heartbeat is fresh.
+func watchdogLoop(ctx context.Context, logger *slog.Logger, hb *heartbeat) {
 	interval, err := daemon.SdWatchdogEnabled(false)
 	if err != nil || interval == 0 {
 		return
 	}
-	t := time.NewTicker(interval / 2)
+	runWatchdog(ctx, logger, hb, interval, func() { _, _ = daemon.SdNotify(false, daemon.SdNotifyWatchdog) })
+}
+
+// runWatchdog checks every interval/4 and pings when the heartbeat is at
+// most interval old. A daemon that stops beating is therefore killed between
+// interval and about 2.25 x interval after its last beat (2 to 2.5 minutes
+// with WatchdogSec=60s): long enough that a busy moment is not mistaken for
+// a hang.
+func runWatchdog(ctx context.Context, logger *slog.Logger, hb *heartbeat, interval time.Duration, ping func()) {
+	t := time.NewTicker(interval / 4)
 	defer t.Stop()
+	withheld := false
 	for {
 		select {
 		case <-t.C:
-			_, _ = daemon.SdNotify(false, daemon.SdNotifyWatchdog)
+		case <-ctx.Done():
+			return
+		}
+		age := hb.age()
+		if age <= interval {
+			if withheld {
+				logger.Info("agent is live again; watchdog pings resumed")
+				withheld = false
+			}
+			ping()
+			continue
+		}
+		if !withheld {
+			logger.Error("agent is not live: no heartbeat; withholding the watchdog ping so systemd restarts it",
+				"lastHeartbeat", age.Round(time.Second).String())
+			withheld = true
+		}
+	}
+}
+
+// probeLoop bumps hb whenever the local server answers url with 200.
+func probeLoop(ctx context.Context, hb *heartbeat, url string, every time.Duration) {
+	client := &http.Client{
+		Timeout:   livenessProbeTimeout,
+		Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true},
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		if probe(ctx, client, url) {
+			hb.beat()
+		}
+		select {
+		case <-t.C:
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+func probe(ctx context.Context, client *http.Client, url string) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
 
 func newLogger() *slog.Logger {
