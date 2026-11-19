@@ -191,23 +191,31 @@ func (s *Server) handlePayload(w http.ResponseWriter, _ *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "payload missing from installed content")
 		return
 	}
+	// Run-out (spec C6): past the bundle's last day the board keeps
+	// serving that day, and says so, so the page can drop what is dated.
+	expired, _ := json.Marshal(day.StaleDays > 0)
+	lastDay, _ := json.Marshal(c.Manifest.Content.LastDay)
+	fields := map[string]json.RawMessage{"expired": expired, "lastDay": lastDay}
 	if s.d.Weather != nil {
 		if weather, ok := s.d.Weather(); ok {
-			raw = overlayWeather(raw, weather)
+			fields["weather"] = weather
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(raw)
+	_, _ = w.Write(overlay(raw, fields))
 }
 
-// overlayWeather replaces the payload's weather with a live one. Only the one
-// key changes; if the payload cannot be re-encoded it is served untouched.
-func overlayWeather(raw, weather []byte) []byte {
+// overlay sets top-level keys of the payload object: the run-out fields and
+// a live weather object. Nothing else changes; a payload that cannot be
+// re-encoded is served untouched.
+func overlay(raw []byte, fields map[string]json.RawMessage) []byte {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return raw
 	}
-	obj["weather"] = weather
+	for k, v := range fields {
+		obj[k] = v
+	}
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return raw

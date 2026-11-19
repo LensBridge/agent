@@ -87,6 +87,28 @@ func TestPayloadPicksDayAndClamps(t *testing.T) {
 	}
 }
 
+// Past its last day (2026-09-25) the board serves that day, marked expired.
+func TestPayloadRunOut(t *testing.T) {
+	l := installed(t)
+	for day, want := range map[int]bool{24: false, 25: false, 26: true, 40: true} {
+		s := New(Deps{Layout: l, Config: config.InMemory(config.Config{DeviceID: dev}), Now: at(day, 12)})
+		var p struct {
+			Day     int     `json:"day"`
+			Expired *bool   `json:"expired"`
+			LastDay *string `json:"lastDay"`
+		}
+		if err := json.Unmarshal(get(t, s, "/api/musallah/payload").Body.Bytes(), &p); err != nil {
+			t.Fatal(err)
+		}
+		if p.Expired == nil || *p.Expired != want || p.LastDay == nil || *p.LastDay != "2026-09-25" {
+			t.Errorf("day %d: expired=%v lastDay=%v, want expired=%v lastDay 2026-09-25", day, p.Expired, p.LastDay, want)
+		}
+		if want && p.Day != 25 {
+			t.Errorf("day %d: served day %d, want the last one", day, p.Day)
+		}
+	}
+}
+
 func TestWeatherOverlay(t *testing.T) {
 	l := installed(t)
 	s := New(Deps{Layout: l, Config: config.InMemory(config.Config{DeviceID: dev}), Now: at(24, 12),
