@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LensBridge/agent/internal/cdp"
-	"github.com/LensBridge/agent/internal/config"
+	"github.com/LensBridge/agent/internal/core/cdp"
+	"github.com/LensBridge/agent/internal/core/config"
 )
 
 // fakeKiosk scripts what the browser reports and records what the healer did.

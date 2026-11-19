@@ -8,9 +8,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/LensBridge/agent/internal/config"
-	"github.com/LensBridge/agent/internal/notice"
-	"github.com/LensBridge/agent/internal/usbimport"
+	"github.com/LensBridge/agent/internal/core/config"
+	"github.com/LensBridge/agent/internal/core/notice"
+	"github.com/LensBridge/agent/internal/core/usbimport"
 )
 
 // runUSBImport is `usb-import <kernel name>` (docs/architecture.md, section

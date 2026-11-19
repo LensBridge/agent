@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LensBridge/agent/internal/config"
-	"github.com/LensBridge/agent/internal/enroll"
-	"github.com/LensBridge/agent/internal/trust"
+	"github.com/LensBridge/agent/internal/core/config"
+	"github.com/LensBridge/agent/internal/core/trust"
+	"github.com/LensBridge/agent/internal/online/enroll"
 )
 
 // runTrust is `trust show|add|remove|fetch` (docs/architecture.md, section

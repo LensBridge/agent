@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/LensBridge/agent/internal/fsutil"
+	"github.com/LensBridge/agent/internal/core/fsutil"
 	"github.com/LensBridge/agent/packaging"
 )
 

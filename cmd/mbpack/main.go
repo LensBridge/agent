@@ -24,8 +24,8 @@ import (
 	"strings"
 	_ "time/tzdata" // content timezones must resolve on any OS
 
-	"github.com/LensBridge/agent/internal/mbu"
-	"github.com/LensBridge/agent/internal/trust"
+	"github.com/LensBridge/agent/internal/core/mbu"
+	"github.com/LensBridge/agent/internal/core/trust"
 )
 
 func main() {

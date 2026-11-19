@@ -11,11 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LensBridge/agent/internal/cdp"
-	"github.com/LensBridge/agent/internal/clock"
-	"github.com/LensBridge/agent/internal/localserver"
-	"github.com/LensBridge/agent/internal/store"
-	"github.com/LensBridge/agent/internal/trust"
+	"github.com/LensBridge/agent/internal/core/cdp"
+	"github.com/LensBridge/agent/internal/core/clock"
+	"github.com/LensBridge/agent/internal/core/localserver"
+	"github.com/LensBridge/agent/internal/core/store"
+	"github.com/LensBridge/agent/internal/core/trust"
 	"github.com/LensBridge/agent/internal/version"
 )
 

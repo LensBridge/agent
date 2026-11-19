@@ -17,12 +17,12 @@ import (
 
 	"github.com/coreos/go-systemd/v22/daemon"
 
-	"github.com/LensBridge/agent/internal/cdp"
-	"github.com/LensBridge/agent/internal/config"
-	"github.com/LensBridge/agent/internal/enroll"
-	"github.com/LensBridge/agent/internal/localserver"
-	"github.com/LensBridge/agent/internal/netinfo"
-	"github.com/LensBridge/agent/internal/splash"
+	"github.com/LensBridge/agent/internal/core/cdp"
+	"github.com/LensBridge/agent/internal/core/config"
+	"github.com/LensBridge/agent/internal/core/localserver"
+	"github.com/LensBridge/agent/internal/core/netinfo"
+	"github.com/LensBridge/agent/internal/core/splash"
+	"github.com/LensBridge/agent/internal/online/enroll"
 	"github.com/LensBridge/agent/internal/version"
 )
 

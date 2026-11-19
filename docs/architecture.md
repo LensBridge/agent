@@ -232,7 +232,7 @@ packer (`scripts/package-mbu.mjs`) producing the same format.
   (`GET /api/agent/signing-keys`, over TLS) re-reads them, for example after a
   key rotation.
 - **Release keys** are compiled into the agent (`-ldflags -X
-  github.com/LensBridge/agent/internal/trust.BuiltinReleaseKeys=<b64>[,<b64>]`)
+  github.com/LensBridge/agent/internal/core/trust.BuiltinReleaseKeys=<b64>[,<b64>]`)
   and may be extended in `trust.json`. A dev build without a compiled key
   accepts only keys in `trust.json`.
 - `musallahboard-agent trust show|add <role> <b64>|remove <keyId>|fetch` manage

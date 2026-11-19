@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/LensBridge/agent/internal/config"
+	"github.com/LensBridge/agent/internal/core/config"
 )
 
 // Names shared with setup.sh --service-port. Change them together.

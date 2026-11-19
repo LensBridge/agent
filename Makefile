@@ -12,7 +12,7 @@ RELEASE_KEYS ?=
 # here ships a binary that reports "dev" forever (or trusts no release key).
 PKG     := github.com/LensBridge/agent
 LDFLAGS := -s -w -X $(PKG)/internal/version.Version=$(VERSION) \
-           -X $(PKG)/internal/trust.BuiltinReleaseKeys=$(RELEASE_KEYS)
+           -X $(PKG)/internal/core/trust.BuiltinReleaseKeys=$(RELEASE_KEYS)
 # Where the release channel points boards at (docs/architecture.md 9.4).
 RELEASE_DOWNLOAD := https://github.com/LensBridge/agent/releases/download/$(RELEASE_TAG)
 
