@@ -25,27 +25,30 @@ architecture is emulated, which works but is very slow.
 ## Getting started
 
 ```sh
-vm/mbvm create        # first time: downloads Debian, runs setup.sh (a few minutes)
+# first time: downloads Debian, runs setup.sh (a few minutes). The key is
+# the backend's content signing public key (GET /api/agent/signing-keys).
+MBVM_CONTENT_KEY=<base64> vm/mbvm create
+# set it up like a Pi: plug in a "USB stick" with its setup file and content
+vm/mbvm usb setup-xxxxxxxx.mbu content-xxxxxxxx.mbu
+```
+
+The board takes its identity from the setup file, installs the content, and
+fetches the board app from its release channel when it has internet. A setup
+file exported for an online board also makes it claim its key and connect.
+
+A maintainer can enroll it with a token instead:
+
+```sh
 vm/mbvm enroll --token=<token from the portal> --backend=http://localhost:8080 --insecure-dev
 ```
 
 `localhost` in `--backend` means your computer: mbvm rewrites it to the
 address the VM reaches your computer at (10.0.2.2). A deployed backend URL is
-passed through unchanged.
-
-The agent only enrolls over `https://` (with a `wss://` socket on the same
-host). A local backend on plain http needs `--insecure-dev`, which the VM's
-config keeps as `insecure_dev = true`; the backend must then hand out a
-`ws://` URL on the host the board used, `10.0.2.2`, which it does when it
-builds the URL from the request's `Host`. For a deployed backend leave the
-flag off:
-
-```sh
-vm/mbvm enroll --token=<token> --backend=https://backend.example.org
-```
-
-Once enrolled, the board installs the latest board app from its release
-channel, syncs content and shows the board, exactly like a Pi.
+passed through unchanged. The agent only talks to an `https://` backend (with
+a `wss://` socket on the same host). A local backend on plain http needs
+`--insecure-dev`, which the VM's config keeps as `insecure_dev = true`, and
+the backend's `musallahboard.agent.websocketUrl` must then be a `ws://` URL
+on `10.0.2.2`.
 
 ## Commands
 
@@ -53,7 +56,7 @@ channel, syncs content and shows the board, exactly like a Pi.
 |---|---|
 | `create [--agent=V]` | Provision a new VM and start it |
 | `start [--headless]` / `stop` | Boot or shut down; the board keeps its state |
-| `reset [--agent=V]` | Back to a freshly provisioned, unenrolled board |
+| `reset [--agent=V]` | Back to a freshly installed board that is not set up yet |
 | `agent V` | Install agent `V` on the running board, keeping its state |
 | `enroll --token=T --backend=URL` | Enroll the board |
 | `usb FILE.mbu...` / `usb --remove` | Plug in, or pull out, a USB stick holding these files |
