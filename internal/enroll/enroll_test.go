@@ -64,8 +64,6 @@ func TestRunEnrollsAndPersistsConfig(t *testing.T) {
 			t.Fatalf("decode request: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		// Carries an explicit port so restorePort leaves it untouched; the
-		// port-patching behaviour has its own test below.
 		json.NewEncoder(w).Encode(map[string]any{
 			"deviceId":           deviceID,
 			"websocketUrl":       wsURL(server, "wss"),
@@ -351,38 +349,6 @@ func assertNothingSaved(t *testing.T, cfgPath, keyPath string) {
 	}
 	if _, err := os.Stat(keyPath); err == nil {
 		t.Error("private key written")
-	}
-}
-
-func TestRestorePort(t *testing.T) {
-	tests := []struct {
-		name, wsURL, backendURL, want string
-	}{
-		{
-			name:       "port restored when backend has one and ws does not",
-			wsURL:      "ws://board.example/api/agent/ws",
-			backendURL: "http://board.example:8080",
-			want:       "ws://board.example:8080/api/agent/ws",
-		},
-		{
-			name:       "existing ws port is left alone",
-			wsURL:      "ws://board.example:9999/api/agent/ws",
-			backendURL: "http://board.example:8080",
-			want:       "ws://board.example:9999/api/agent/ws",
-		},
-		{
-			name:       "nothing to restore when backend has no port",
-			wsURL:      "ws://board.example/api/agent/ws",
-			backendURL: "https://board.example",
-			want:       "ws://board.example/api/agent/ws",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := restorePort(tc.wsURL, tc.backendURL); got != tc.want {
-				t.Errorf("restorePort() = %q, want %q", got, tc.want)
-			}
-		})
 	}
 }
 

@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,11 +117,7 @@ func Run(ctx context.Context, logger *slog.Logger, p Params) error {
 		contentKeys = append(contentKeys, SigningKey{KeyID: k.KeyId, PublicKey: k.PublicKey})
 	}
 
-	// The backend sometimes constructs the WebSocket URL from the HTTP request's
-	// Host header, which drops the port when behind a reverse proxy or when the
-	// client connects directly without a Host: port. Patch it back in if the
-	// backend URL carried an explicit port that the returned WS URL is missing.
-	websocketURL := restorePort(*enrolled.WebsocketUrl, p.BackendURL)
+	websocketURL := *enrolled.WebsocketUrl
 	if err := config.CheckWebSocketURL(websocketURL, p.BackendURL, p.InsecureDev); err != nil {
 		// Nothing is saved: the board stays unenrolled. The backend has
 		// consumed the token, so a retry needs a new one once it is fixed.
@@ -216,21 +211,4 @@ func readHardwareModel() string {
 		return ""
 	}
 	return strings.TrimRight(strings.TrimSpace(string(b)), "\x00")
-}
-
-// restorePort patches wsURL's host with the port from backendURL when the
-// backend omits it — this happens when the backend derives the WebSocket URL
-// from the HTTP Host header, which proxies or direct HTTP/1.0 clients may
-// omit the port from.
-func restorePort(wsURL, backendURL string) string {
-	ws, err := url.Parse(wsURL)
-	if err != nil || ws.Port() != "" {
-		return wsURL // already has a port (or unparseable — leave alone)
-	}
-	be, err := url.Parse(backendURL)
-	if err != nil || be.Port() == "" {
-		return wsURL // backend URL has no explicit port either — nothing to restore
-	}
-	ws.Host = ws.Hostname() + ":" + be.Port()
-	return ws.String()
 }
