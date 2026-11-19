@@ -1,4 +1,4 @@
-package telemetry
+package wsclient
 
 import (
 	"bufio"
@@ -15,24 +15,6 @@ import (
 	"github.com/LensBridge/agent/internal/core/netinfo"
 )
 
-// Snapshot is one heartbeat payload's worth of telemetry. Optional fields
-// (any with omitempty) may be missing if the underlying source isn't
-// available — collecting telemetry must never fail; degraded data is fine.
-type Snapshot struct {
-	Timestamp         int64    `json:"timestamp"`
-	UptimeSec         int64    `json:"uptimeSec"`
-	CPUTempC          float64  `json:"cpuTempC,omitempty"`
-	ThrottleFlags     string   `json:"throttleFlags,omitempty"`
-	MemUsedMB         int64    `json:"memUsedMb"`
-	MemTotalMB        int64    `json:"memTotalMb"`
-	DiskUsedPct       float64  `json:"diskUsedPct,omitempty"`
-	KioskAlive        bool     `json:"kioskAlive"`
-	DisplayedFrameKey string   `json:"displayedFrameKey,omitempty"`
-	IPAddrs           []string `json:"ipAddrs,omitempty"`
-	SSID              string   `json:"ssid,omitempty"`
-	AgentVersion      string   `json:"agentVersion"`
-}
-
 // PageProber reports what the kiosk browser is currently showing. Satisfied by
 // *kiosk.Client; pass nil to skip the browser probe entirely.
 type PageProber interface {
@@ -43,25 +25,36 @@ type PageProber interface {
 // is generous; the point is that a wedged browser must never stall a heartbeat.
 const pageProbeTimeout = 3 * time.Second
 
-// Collect gathers a fresh snapshot. Errors in individual collectors are
-// swallowed and the corresponding field left zero/empty.
-func Collect(ctx context.Context, agentVersion string, prober PageProber) Snapshot {
-	s := Snapshot{
-		Timestamp:    time.Now().Unix(),
-		AgentVersion: agentVersion,
+// collectTelemetry gathers one heartbeat's telemetry. It never fails: a
+// reading that cannot be taken is left out (nil, so the backend stores NULL
+// rather than a misleading zero).
+func collectTelemetry(ctx context.Context, agentVersion string, prober PageProber) Telemetry {
+	t := Telemetry{AgentVersion: agentVersion}
+	if v, err := readUptime(); err == nil && v > 0 {
+		t.UptimeSec = &v
 	}
-	s.UptimeSec, _ = readUptime()
-	s.CPUTempC, _ = readCPUTemp()
-	s.ThrottleFlags, _ = readThrottleFlags(ctx)
-	s.MemUsedMB, s.MemTotalMB, _ = readMemInfo()
-	s.DiskUsedPct, _ = readDiskUsedPct()
-	s.KioskAlive, s.DisplayedFrameKey = checkKiosk(ctx, prober)
-	// Unfiltered on purpose: the heartbeat reports every address the box holds,
-	// link-local included, so the backend can see a board that failed DHCP.
-	// The enrollment splash uses netinfo.Collect, which drops those.
-	s.IPAddrs = netinfo.IPv4Addrs()
-	s.SSID, _ = netinfo.SSID(ctx)
-	return s
+	if v, err := readCPUTemp(); err == nil && v > 0 {
+		t.CPUTempC = &v
+	}
+	t.ThrottleFlags, _ = readThrottleFlags(ctx)
+	if used, total, err := readMemInfo(); err == nil && total > 0 {
+		u, tot := int(used), int(total)
+		t.MemUsedMb, t.MemTotalMb = &u, &tot
+	}
+	if v, err := readDiskUsedPct(); err == nil && v > 0 {
+		pct := int(v + 0.5) // nearest percent
+		t.DiskUsedPct = &pct
+	}
+	// kioskAlive is always sent: "could not tell" and "the board is down"
+	// must not look the same to the fleet dashboard.
+	alive, frame := checkKiosk(ctx, prober)
+	t.KioskAlive, t.DisplayedFrameKey = &alive, frame
+	// Unfiltered on purpose: the heartbeat reports every address the box
+	// holds, link-local included, so the backend can see a board that
+	// failed DHCP.
+	t.IPv4 = netinfo.IPv4Addrs()
+	t.WifiSSID, _ = netinfo.SSID(ctx)
+	return t
 }
 
 func readUptime() (int64, error) {

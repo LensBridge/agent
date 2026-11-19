@@ -1,10 +1,6 @@
 package wsclient
 
-import (
-	"encoding/json"
-
-	"github.com/LensBridge/agent/internal/online/telemetry"
-)
+import "encoding/json"
 
 // IncomingFrame is the union of every frame the backend sends. Fields are all
 // optional except {type, seq, sessionId} — which type is in play is decided by
@@ -109,38 +105,4 @@ type CommandResultFrame struct {
 	Output       any    `json:"output,omitempty"`
 	ErrorMessage string `json:"errorMessage,omitempty"`
 	DurationMs   *int64 `json:"durationMs,omitempty"`
-}
-
-// TelemetryFromSnapshot adapts the local telemetry.Snapshot (long-lived) into
-// the wire shape the backend expects. Zero-ish values become nils so the
-// backend stores them as NULL rather than misleading zeroes.
-func TelemetryFromSnapshot(s telemetry.Snapshot) Telemetry {
-	t := Telemetry{
-		ThrottleFlags:     s.ThrottleFlags,
-		IPv4:              s.IPAddrs,
-		WifiSSID:          s.SSID,
-		AgentVersion:      s.AgentVersion,
-		DisplayedFrameKey: s.DisplayedFrameKey,
-	}
-	if s.UptimeSec > 0 {
-		v := s.UptimeSec
-		t.UptimeSec = &v
-	}
-	if s.CPUTempC > 0 {
-		v := s.CPUTempC
-		t.CPUTempC = &v
-	}
-	if s.MemTotalMB > 0 {
-		used := int(s.MemUsedMB)
-		total := int(s.MemTotalMB)
-		t.MemUsedMb = &used
-		t.MemTotalMb = &total
-	}
-	if s.DiskUsedPct > 0 {
-		v := int(s.DiskUsedPct + 0.5) // round to nearest percent
-		t.DiskUsedPct = &v
-	}
-	alive := s.KioskAlive
-	t.KioskAlive = &alive
-	return t
 }

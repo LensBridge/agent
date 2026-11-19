@@ -3,29 +3,28 @@ package wsclient
 import (
 	"encoding/json"
 	"testing"
-
-	"github.com/LensBridge/agent/internal/online/telemetry"
 )
 
 // The wire names here are a contract with the backend's HeartbeatFrame.Telemetry.
 // Renaming a field without renaming it there means the value is silently dropped,
 // which is how agentVersion went missing for the entire fleet.
-func TestTelemetryFromSnapshotWireNames(t *testing.T) {
-	snap := telemetry.Snapshot{
-		UptimeSec:         3600,
-		CPUTempC:          51.5,
+func TestTelemetryWireNames(t *testing.T) {
+	up, temp, used, total, disk, alive := int64(3600), 51.5, 512, 2048, 42, true
+	tel := Telemetry{
+		UptimeSec:         &up,
+		CPUTempC:          &temp,
 		ThrottleFlags:     "0x0",
-		MemUsedMB:         512,
-		MemTotalMB:        2048,
-		DiskUsedPct:       41.6,
-		KioskAlive:        true,
+		MemUsedMb:         &used,
+		MemTotalMb:        &total,
+		DiskUsedPct:       &disk,
+		KioskAlive:        &alive,
 		DisplayedFrameKey: "poster-3",
-		IPAddrs:           []string{"10.0.0.7"},
-		SSID:              "MSA-WIFI",
+		IPv4:              []string{"10.0.0.7"},
+		WifiSSID:          "MSA-WIFI",
 		AgentVersion:      "1.2.3",
 	}
 
-	raw, err := json.Marshal(TelemetryFromSnapshot(snap))
+	raw, err := json.Marshal(tel)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -40,7 +39,7 @@ func TestTelemetryFromSnapshotWireNames(t *testing.T) {
 		"throttleFlags":     "0x0",
 		"memUsedMb":         float64(512),
 		"memTotalMb":        float64(2048),
-		"diskUsedPct":       float64(42), // rounded to nearest percent
+		"diskUsedPct":       float64(42),
 		"kioskAlive":        true,
 		"displayedFrameKey": "poster-3",
 		"wifiSsid":          "MSA-WIFI",
@@ -56,18 +55,10 @@ func TestTelemetryFromSnapshotWireNames(t *testing.T) {
 	}
 }
 
-// The frame key is a kiosk slide key, never a UUID. Asserting a value the
-// backend could not parse as one keeps that explicit.
-func TestTelemetryFrameKeyIsNotAUUID(t *testing.T) {
-	tel := TelemetryFromSnapshot(telemetry.Snapshot{DisplayedFrameKey: "next-prayer"})
-	if tel.DisplayedFrameKey != "next-prayer" {
-		t.Fatalf("DisplayedFrameKey = %q", tel.DisplayedFrameKey)
-	}
-}
-
 // Missing readings must serialize as absent, not as a misleading zero.
-func TestTelemetryFromSnapshotOmitsUnreadValues(t *testing.T) {
-	raw, err := json.Marshal(TelemetryFromSnapshot(telemetry.Snapshot{}))
+func TestTelemetryOmitsUnreadValues(t *testing.T) {
+	dead := false
+	raw, err := json.Marshal(Telemetry{KioskAlive: &dead})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -82,8 +73,6 @@ func TestTelemetryFromSnapshotOmitsUnreadValues(t *testing.T) {
 			t.Errorf("%s should be omitted when unread, got %v", absent, got[absent])
 		}
 	}
-	// kioskAlive is always sent: "we could not tell" and "the board is down"
-	// must not look the same to the fleet dashboard.
 	if got["kioskAlive"] != false {
 		t.Errorf("kioskAlive = %v, want false", got["kioskAlive"])
 	}

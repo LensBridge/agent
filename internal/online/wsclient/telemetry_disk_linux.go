@@ -1,6 +1,6 @@
 //go:build linux
 
-package telemetry
+package wsclient
 
 import "syscall"
 

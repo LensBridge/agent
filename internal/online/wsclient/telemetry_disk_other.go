@@ -1,6 +1,6 @@
 //go:build !linux
 
-package telemetry
+package wsclient
 
 // Stub for non-Linux dev environments (Windows/macOS) so the package
 // compiles. Pi builds use disk_linux.go via build tag.

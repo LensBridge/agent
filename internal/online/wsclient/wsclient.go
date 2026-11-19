@@ -26,7 +26,6 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/LensBridge/agent/internal/core/config"
-	"github.com/LensBridge/agent/internal/online/telemetry"
 )
 
 const (
@@ -70,7 +69,7 @@ type Client struct {
 	agentVersion string
 
 	onCommand   CommandHandler
-	prober      telemetry.PageProber
+	prober      PageProber
 	boardReport func() any
 
 	stateMu sync.Mutex
@@ -121,7 +120,7 @@ func (c *Client) SetCommandHandler(h CommandHandler) { c.onCommand = h }
 // SetPageProber supplies the browser probe used to fill kioskAlive and
 // displayedFrameKey. Optional — without one, heartbeats fall back to the
 // systemd unit state. Must be called before Run.
-func (c *Client) SetPageProber(p telemetry.PageProber) { c.prober = p }
+func (c *Client) SetPageProber(p PageProber) { c.prober = p }
 
 // SetBoardReport supplies the board's own report for every heartbeat
 // (localserver.BoardReport). Optional. Must be called before Run.
@@ -285,12 +284,11 @@ func (c *Client) serve(ctx context.Context, sess *session, hbInterval time.Durat
 
 func (c *Client) heartbeatLoop(ctx context.Context, sess *session, interval time.Duration) error {
 	send := func() error {
-		snap := telemetry.Collect(ctx, c.agentVersion, c.prober)
 		hb := HeartbeatFrame{
 			Type:      "heartbeat",
 			Seq:       sess.nextSeq(),
 			SessionID: sess.sessionID,
-			Telemetry: TelemetryFromSnapshot(snap),
+			Telemetry: collectTelemetry(ctx, c.agentVersion, c.prober),
 		}
 		if c.boardReport != nil {
 			hb.Telemetry.Board = c.boardReport()
