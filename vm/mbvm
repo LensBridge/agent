@@ -35,6 +35,8 @@ CPUS="${MBVM_CPUS:-2}"
 DISK_SIZE="${MBVM_DISK_SIZE:-16G}"
 RESOLUTION="${MBVM_RESOLUTION:-1920x1080}"
 TIMEZONE="${MBVM_TIMEZONE:-America/Toronto}"
+# LensBridge's content signing public key, which setup.sh pins.
+CONTENT_KEY="${MBVM_CONTENT_KEY:-}"
 # Host ports for `tunnel`: the board's local server and Chromium's DevTools.
 TUNNEL_BOARD_PORT="${MBVM_BOARD_PORT:-18080}"
 TUNNEL_CDP_PORT="${MBVM_CDP_PORT:-19222}"
@@ -81,7 +83,7 @@ checkout), or the path to an agent binary.
 
 Settings (environment): MBVM_NAME (several VMs side by side; give each its own
 MBVM_SSH_PORT), MBVM_ARCH (amd64|arm64, default: this computer's),
-MBVM_MEMORY, MBVM_CPUS, MBVM_RESOLUTION, MBVM_TIMEZONE, MBVM_DISPLAY (a raw
+MBVM_MEMORY, MBVM_CPUS, MBVM_RESOLUTION, MBVM_TIMEZONE, MBVM_CONTENT_KEY, MBVM_DISPLAY (a raw
 QEMU -display value), MBVM_QEMU_ARGS (extra QEMU arguments), MBVM_HOME.
 EOF
 }
@@ -357,8 +359,8 @@ install_agent() {
         sudo systemctl stop musallahboard-agent
         sudo install -o root -g root -m 0755 /tmp/musallahboard-agent.new /usr/bin/musallahboard-agent
         rm -f /tmp/musallahboard-agent.new
-        # Agents before 0.3.0 have no embedded splash; keep the installed one.
-        sudo musallahboard-agent splash install /usr/share/musallahboard/waiting.html >/dev/null 2>&1 || true
+        # Its system files: agents before install-system keep what is there.
+        sudo musallahboard-agent install-system >/dev/null 2>&1 || true
         sudo systemctl start musallahboard-agent'
     local got
     got="$(vm_ssh musallahboard-agent version 2>/dev/null | head -1 || true)"
@@ -441,11 +443,12 @@ provision() {
     wait_for_ssh "$limit"
     vm_ssh 'cloud-init status --wait >/dev/null 2>&1 || true'
 
+    [[ -n "$CONTENT_KEY" ]] || die "set MBVM_CONTENT_KEY to the backend's content signing public key (base64; GET /api/agent/signing-keys)"
     info "Running setup.sh from $REPO_DIR"
     vm_scp "$REPO_DIR/setup.sh" /tmp/setup.sh
     if ! vm_ssh "MB_ASSUME_YES=1 MB_REBOOT=never MB_HOSTNAME=musallahboard-vm \
             MB_ADMIN_USER=$ADMIN_USER MB_TIMEZONE='$TIMEZONE' \
-            MB_ADMIN_SSH_KEY='$(cat "$KEY.pub")' bash /tmp/setup.sh"; then
+            MB_ADMIN_SSH_KEY='$(cat "$KEY.pub")' MB_CONTENT_KEY='$CONTENT_KEY' bash /tmp/setup.sh"; then
         vm_ssh 'sudo poweroff' >/dev/null 2>&1 || true
         wait_for_exit 60 || kill "$(cat "$PIDFILE")" 2>/dev/null || true
         die "setup.sh failed (its output is above). The VM was not saved; fix it and run: vm/mbvm rebuild"

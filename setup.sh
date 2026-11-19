@@ -2,8 +2,9 @@
 # =====================================================
 # MusallahBoard — Raspberry Pi One-Line Installer
 # =====================================================
-# Provisions a fresh Raspberry Pi OS (Debian/trixie, arm64) into a fully
-# configured MusallahBoard kiosk, ready for enrollment.
+# Provisions a fresh Raspberry Pi OS (Debian/trixie, arm64) into a
+# MusallahBoard kiosk. It needs internet once, here; the board never does
+# again.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/lensbridge/agent/main/setup.sh | bash
@@ -11,21 +12,22 @@
 # Or with pre-supplied answers (no prompts):
 #   curl -fsSL ... | MB_HOSTNAME=lobby MB_ADMIN_USER=admin \
 #       MB_TIMEZONE=America/Toronto \
-#       MB_ADMIN_SSH_KEY="ssh-ed25519 AAAA..." bash
+#       MB_ADMIN_SSH_KEY="ssh-ed25519 AAAA..." \
+#       MB_CONTENT_KEY="<base64 content signing public key>" bash
 #
-# After setup completes, enroll the device:
-#   sudo musallahboard-agent enroll --token=<token> --backend=<url>
+# The content signing public key is LensBridge's: the board only accepts
+# content and setup files signed by it. The console shows it (and the backend
+# publishes it at /api/agent/signing-keys).
 #
-# The kiosk shows a "waiting for enrollment" splash until then; once enrolled
-# it shows the board served by the local agent, with no reboot. Every board
-# renders from its own disk and syncs content whenever it has internet
-# (docs/architecture.md).
+# After setup the board shows "This board is not set up yet". Plug in the
+# setup USB stick exported from the LensBridge console (Devices, the board,
+# Setup file or USB kit): the board takes its identity and its content from
+# it, and, if its setup file names a backend, connects when it has internet.
 #
-# Boards without internet: once the board is set up and enrolled, and while
-# it still has internet, run
+# The ethernet service port, where a laptop or phone plugged in can upload
+# signed update packages, is switched on with
 #   bash setup.sh --service-port [--rtc]
-# to provision the ethernet service port, where a laptop or phone plugged in
-# can upload signed update packages. USB sticks work on every board.
+# USB sticks work on every board.
 #
 # Re-running this script is safe.
 # =====================================================
@@ -69,7 +71,7 @@ NTP_SYNC_TIMEOUT_SEC="${NTP_SYNC_TIMEOUT_SEC:-90}"
 # Every prompt can be answered in advance via environment variable. When piped
 # (stdin is the script itself), prompts cannot work — defaults are used.
 #
-#   MB_HOSTNAME  MB_ADMIN_USER  MB_TIMEZONE  MB_ADMIN_SSH_KEY
+#   MB_HOSTNAME  MB_ADMIN_USER  MB_TIMEZONE  MB_ADMIN_SSH_KEY  MB_CONTENT_KEY
 #   MB_ASSUME_YES=1   take the default for anything unset, confirm nothing
 #   MB_REBOOT=auto|never|ask
 MB_ASSUME_YES="${MB_ASSUME_YES:-0}"
@@ -113,11 +115,12 @@ Usage: bash setup.sh [options]
   --admin-user=NAME      SSH/sudo account
   --timezone=TZ          e.g. America/Toronto
   --admin-ssh-key=KEY    authorized public key for the admin account
+  --content-key=B64      LensBridge's content signing public key (base64)
   --reboot=auto|never|ask
   --yes, -y              answer every prompt with its default
   -h, --help
 
-Service port (after a normal setup and enrollment, while still online):
+Service port (after a normal setup, while still online):
   --service-port         provision the ethernet service port, where a laptop
                          or phone plugged in can upload update packages, and
                          turn it on; skips the normal setup
@@ -134,6 +137,7 @@ for arg in "$@"; do
         --admin-user=*)    export MB_ADMIN_USER="${arg#*=}" ;;
         --timezone=*)      export MB_TIMEZONE="${arg#*=}" ;;
         --admin-ssh-key=*) export MB_ADMIN_SSH_KEY="${arg#*=}" ;;
+        --content-key=*)   export MB_CONTENT_KEY="${arg#*=}" ;;
         --reboot=*)        export MB_REBOOT="${arg#*=}" ;;
         --yes|-y)          export MB_ASSUME_YES=1 ;;
         --service-port)    SERVICE_PORT=1 ;;
@@ -185,6 +189,12 @@ _confirm() {
     _interactive || return 0
     read -rp "$_prompt" -n 1 _reply < /dev/tty; echo
     [[ $_reply =~ ^[Yy]$ ]]
+}
+
+# valid_content_key: base64 (standard alphabet) of exactly 32 bytes, the format
+# `musallahboard-agent trust add` takes. The agent checks it again.
+valid_content_key() {
+    [[ "$1" =~ ^[A-Za-z0-9+/]{43}=$ ]] && [[ "$(printf '%s' "$1" | base64 -d 2>/dev/null | wc -c)" -eq 32 ]]
 }
 
 # ── Pre-flight checks ─────────────────────────────────────────────────────────
@@ -260,12 +270,27 @@ prompt_config() {
         error "That does not look like an SSH public key (it should start with ssh-ed25519, ssh-rsa or ecdsa-)."
 
     echo
+    CONTENT_KEY="${MB_CONTENT_KEY-}"
+    if [[ -n "$CONTENT_KEY" ]]; then
+        info "Content signing key supplied"
+    elif _interactive; then
+        echo "Paste LensBridge's content signing public key (base64, from the console):"
+        read -rp "> " CONTENT_KEY < /dev/tty
+    fi
+    CONTENT_KEY="$(tr -d '[:space:]' <<< "$CONTENT_KEY")"
+    [[ -n "$CONTENT_KEY" ]] || \
+        error "The content signing public key is required: without it the board accepts no content or setup file. Set MB_CONTENT_KEY."
+    valid_content_key "$CONTENT_KEY" || \
+        error "That is not a content signing public key: it must be the base64 of 32 bytes (44 characters ending in =)."
+
+    echo
     info "Summary"
     printf "  %-18s %s\n" "Hostname:"   "$HOSTNAME"
     printf "  %-18s %s\n" "Admin user:" "$ADMIN_USER  (SSH key auth, passwordless sudo)"
     printf "  %-18s %s\n" "Kiosk user:" "$KIOSK_USER  (auto-login, browser only, no sudo/SSH/shell)"
     printf "  %-18s %s\n" "Kiosk URL:"  "$KIOSK_URL  (served by the agent)"
     printf "  %-18s %s\n" "Timezone:"   "$TIMEZONE"
+    printf "  %-18s %s\n" "Content key:" "$CONTENT_KEY"
     echo
     if ! _confirm "Continue? (y/n): "; then
         exit 0
@@ -588,7 +613,8 @@ install_state_dirs() {
     info "$INBOX_DIR ($SERVICE_USER 0770), $LIB_DIR (root 0755)"
 
     # Root-owned, world-readable, never overwritten: it holds the content keys
-    # pinned at enrollment and any release keys an admin added.
+    # pinned here, by `trust fetch` or at enrollment, and any release keys an
+    # admin added.
     if sudo test -e "$TRUST_PATH"; then
         info "Keeping existing $TRUST_PATH"
     else
@@ -598,6 +624,14 @@ install_state_dirs() {
         sudo mv -f "$TRUST_PATH.tmp" "$TRUST_PATH"
         info "Created $TRUST_PATH (root 0644, no keys yet)"
     fi
+}
+
+# ── Content signing key ───────────────────────────────────────────────────────
+# Pinned through the agent's own root-only trust path, which checks the key
+# and the file again and leaves an already trusted key alone.
+pin_content_key() {
+    section "Content signing key"
+    sudo "$BINARY_DEST" trust add content "$CONTENT_KEY" "lensbridge (setup.sh)"
 }
 
 # ── Apply appliance policy ────────────────────────────────────────────────────
@@ -626,25 +660,25 @@ print_summary() {
     cat << EOF
 
   +----------------------------------------------------------+
-  |  Setup complete - device READY FOR ENROLLMENT            |
+  |  Setup complete                                          |
   +----------------------------------------------------------+
 
   Hostname   : $HOSTNAME
   Admin SSH  : ssh $ADMIN_USER@<ip>
   Kiosk URL  : $KIOSK_URL (served by the agent)
 
-  FINAL STEP - enroll this device (once, with a token from the admin UI):
+  FINAL STEP - plug in this board's setup USB stick, exported from the
+  LensBridge console (Devices, the board, Setup file or USB kit). The board
+  takes its identity, content, board app and agent from it; it needs no
+  internet. Until then the screen says "This board is not set up yet" and
+  shows the board's address (the <ip> to SSH to).
 
-    sudo musallahboard-agent enroll \\
-         --token=<one-time-token> --backend=<backend-url>
+  If its setup file names a backend, the board connects to LensBridge by
+  itself whenever it has internet. (Maintainers can still enroll with a
+  token: sudo musallahboard-agent enroll --token=<token> --backend=<url>)
 
-  Until then the kiosk shows the local "waiting" splash, which prints this
-  device's IP address on screen once it has one - that is the <ip> to SSH to.
-  On enrollment the kiosk switches to the board served by the agent, which
-  starts syncing content and downloads the board app within a few minutes.
-
-  A board that will not have internet: after enrolling, turn on the ethernet
-  service port (laptop and phone updates at http://10.77.0.1/):
+  Laptop and phone updates over the ethernet service port
+  (http://10.77.0.1/):
       sudo musallahboard-agent service-port on
   To fit a DS3231 clock module as well, re-run this setup with --rtc:
       curl -fsSL $SETUP_URL | bash -s -- --service-port --rtc
@@ -678,7 +712,7 @@ EOF
 
 # ══ Service port (setup.sh --service-port) ════════════════════════════════════
 # Everything below runs only with --service-port, on a board that has already
-# been set up and enrolled. See docs/architecture.md, sections 9.5 and 13.
+# been set up. See docs/architecture.md, sections 9.5 and 13.
 # Every step is idempotent: re-running it is safe, and is how you add --rtc
 # later.
 
@@ -691,9 +725,6 @@ service_port_preflight() {
         error "nmcli not found. The service port needs NetworkManager (the Raspberry Pi OS default)."
     [[ -x "$BINARY_DEST" ]] || \
         error "$BINARY_DEST is not installed. Run the normal setup (without --service-port) first."
-    sudo test -s "$CONFIG_DIR/agent.toml" || \
-        error "This board is not enrolled yet. Enroll it online first:
-       sudo musallahboard-agent enroll --token=<token> --backend=<url>"
 }
 
 service_port_install_packages() {
@@ -922,6 +953,7 @@ main() {
 
     install_agent_binary
     install_state_dirs
+    pin_content_key
     install_system_files
     apply_appliance_policy
 

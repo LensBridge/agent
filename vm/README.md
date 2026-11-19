@@ -131,6 +131,7 @@ All are environment variables:
 | `MBVM_MEMORY`, `MBVM_CPUS` | `2048`, `2` | |
 | `MBVM_RESOLUTION` | `1920x1080` | The board is designed for 1080p. The window scales to fit |
 | `MBVM_TIMEZONE` | `America/Toronto` | Passed to `setup.sh` |
+| `MBVM_CONTENT_KEY` | (required for `create`/`rebuild`) | The backend's content signing public key, which `setup.sh` pins |
 | `MBVM_DISPLAY` | cocoa or gtk | A raw QEMU `-display` value, such as `vnc=127.0.0.1:1` |
 | `MBVM_QEMU_ARGS` | | Extra QEMU arguments |
 | `MBVM_IMAGE_URL` | Debian 13 generic cloud image | |
