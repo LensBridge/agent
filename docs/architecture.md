@@ -352,6 +352,7 @@ Loopback only. `GET`/`HEAD` only; anything else is `405`. All JSON errors are
 | `/api/musallah/payload` | Today's payload from the current content bundle, with three top-level keys set by the agent: `lastDay` (the bundle's), `expired` (`true` once today is past `lastDay`, when the last day's payload is what is served) and, online, the weather overlay. No content: `503 {"message":"no content installed"}`. `Cache-Control: no-store`. |
 | `/api/local/status` | Status object below. `no-store`. |
 | `/api/local/events` | Server-Sent Events, below. |
+| `/api/local/where` | `{"where":"<hostname> · <IPv4s>"}`, the setup screen's address line. The setup screen refetches it every 10 s, so a later DHCP lease or cable shows up. `Cache-Control: no-store`. |
 | `/api/*` (other) | `404` JSON, never the SPA. |
 | `/media/<sha256>.<ext>` | From the media store, if the name is valid and the file exists. `Content-Type` from the current bundle's manifest when listed there, else by extension. `Cache-Control: public, max-age=31536000, immutable`. |
 | `/_mb/updating` | The update screen (`update-anim/index.html`, embedded in the agent). `no-store`. |

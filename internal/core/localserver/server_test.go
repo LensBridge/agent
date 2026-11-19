@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"github.com/LensBridge/agent/internal/core/netinfo"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -235,5 +236,26 @@ func TestUnprovisionedBoardShowsSetupScreen(t *testing.T) {
 	s.ServeHTTP(rec, httptest.NewRequest("GET", "/api/local/status", nil))
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"deviceId":""`) {
 		t.Fatalf("status: %d %s", rec.Code, rec.Body.String())
+	}
+	// The address line is refetched, so a later DHCP lease or cable shows up.
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest("GET", "/api/local/where", nil))
+	var w struct{ Where string }
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &w) != nil || w.Where == "" {
+		t.Fatalf("where: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestWhere(t *testing.T) {
+	for _, tc := range []struct {
+		n    netinfo.Info
+		want string
+	}{
+		{netinfo.Info{Hostname: "mb-1"}, "mb-1"},
+		{netinfo.Info{Hostname: "mb-1", IPv4: []string{"10.0.0.5", "192.168.1.9"}}, "mb-1 · 10.0.0.5, 192.168.1.9"},
+	} {
+		if got := where(tc.n); got != tc.want {
+			t.Errorf("where(%+v) = %q, want %q", tc.n, got, tc.want)
+		}
 	}
 }

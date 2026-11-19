@@ -125,6 +125,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.Status())
 	case p == "/api/local/events":
 		s.d.Hub.ServeHTTP(w, r)
+	case p == "/api/local/where":
+		// The setup screen's address line, refetched while the board waits
+		// for its setup stick, so a DHCP lease or a cable plugged in later
+		// shows up without a reload.
+		w.Header().Set("Cache-Control", cacheNoStore)
+		writeJSON(w, http.StatusOK, map[string]string{"where": where(netinfo.Collect(r.Context()))})
 	case strings.HasPrefix(p, "/api/"):
 		writeJSONError(w, http.StatusNotFound, "not found")
 	case strings.HasPrefix(p, "/media/"):
@@ -377,11 +383,16 @@ func (s *Server) noAppPage() string {
 // shows the banners an import raises ("Reading USB stick", and the outcome),
 // and reloads once the board is set up.
 func setupPage(n netinfo.Info) string {
-	where := n.Hostname
+	return strings.Replace(setupHTML, "{{where}}", html.EscapeString(where(n)), 1)
+}
+
+// where is the setup screen's address line: hostname and IPv4 addresses.
+func where(n netinfo.Info) string {
+	w := n.Hostname
 	if len(n.IPv4) > 0 {
-		where += " · " + strings.Join(n.IPv4, ", ")
+		w += " · " + strings.Join(n.IPv4, ", ")
 	}
-	return strings.Replace(setupHTML, "{{where}}", html.EscapeString(where), 1)
+	return w
 }
 
 const setupHTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -392,7 +403,7 @@ h1{font-weight:300;font-size:5vmin;margin:0 0 2.5vmin}p{font-size:2.8vmin;line-h
 #note{margin-top:5vmin;font-size:2.6vmin;min-height:8vmin}#note b{display:block;font-size:3vmin}
 small{position:fixed;bottom:2vmin;left:0;right:0;font-size:1.6vmin;opacity:.45}</style>
 </head><body><main><div><h1>This board is not set up yet</h1>
-<p>Plug in its setup USB stick.</p><div id="note"></div></div></main><small>{{where}}</small>
+<p>Plug in its setup USB stick.</p><div id="note"></div></div></main><small id="where">{{where}}</small>
 <script>
 function show(n){var e=document.getElementById('note');e.textContent='';if(!n)return;
 var b=document.createElement('b');b.textContent=n.headline;e.appendChild(b);
@@ -401,6 +412,8 @@ if(n.seconds>0)setTimeout(function(){show(null)},n.seconds*1000)}
 try{new EventSource('/api/local/events').addEventListener('notice',function(ev){show(JSON.parse(ev.data))})}catch(e){}
 setInterval(function(){fetch('/api/local/status',{cache:'no-store'}).then(function(r){return r.json()})
 .then(function(s){if(s&&s.deviceId)location.reload()}).catch(function(){})},3000)
+setInterval(function(){fetch('/api/local/where',{cache:'no-store'}).then(function(r){return r.json()})
+.then(function(w){if(w&&typeof w.where==='string')document.getElementById('where').textContent=w.where}).catch(function(){})},10000)
 </script></body></html>`
 
 // aliveGIF is a transparent 1x1 GIF.
