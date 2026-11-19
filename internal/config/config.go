@@ -9,14 +9,19 @@
 //
 // Optional keys (docs/architecture.md, section 11): service_port, usb_import,
 // content_sync, content_days, auto_update, app_channel_url, agent_channel_url,
-// update_time.
+// update_time, insecure_dev.
+//
+// backend_url must be https:// and websocket_url wss:// on the same host,
+// unless insecure_dev = true (CheckTransport).
 //
 // Identity is proved by signing a server-issued challenge with the Ed25519 key
 // at KeyPath.
 package config
 
 import (
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,7 +61,16 @@ type Config struct {
 	AppChannelSet   *string `toml:"app_channel_url,omitempty"`
 	AgentChannelSet *string `toml:"agent_channel_url,omitempty"`
 	UpdateTimeSet   *string `toml:"update_time,omitempty"`
+
+	// InsecureDevSet is the explicit development opt-in to plaintext
+	// http:// and ws:// backends (enroll --insecure-dev). Written to
+	// agent.toml so that what the daemon accepts is visible there.
+	InsecureDevSet *bool `toml:"insecure_dev,omitempty"`
 }
+
+// InsecureDev reports whether this board may talk to its backend without TLS.
+// Development boards only.
+func (c *Config) InsecureDev() bool { return boolOr(c.InsecureDevSet, false) }
 
 func boolOr(p *bool, def bool) bool {
 	if p == nil {
@@ -113,6 +127,93 @@ func (c *Config) UpdateTime() (hour, minute int) {
 		}
 	}
 	return DefaultUpdateHour, 0
+}
+
+// ErrInsecureTransport marks a backend or WebSocket URL that is refused
+// because it is not TLS (or not where the backend is) and insecure_dev is off.
+var ErrInsecureTransport = errors.New("insecure backend transport")
+
+// CheckBackendURL checks a backend base URL: https:// with a host, no
+// credentials, query or fragment. http:// is accepted only with insecureDev.
+//
+// Over plain http the enrollment reply, which pins the content signing keys
+// and the WebSocket URL, can be rewritten by anyone on the LAN; so can every
+// later sync. TLS is what makes the pinned keys mean anything.
+func CheckBackendURL(raw string, insecureDev bool) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("backend URL %q: %w", raw, err)
+	}
+	switch {
+	case u.Scheme == "https":
+	case u.Scheme == "http" && insecureDev:
+	case u.Scheme == "http":
+		return fmt.Errorf("%w: backend URL %s is plain http; use https:// (development boards only: enroll with --insecure-dev, which sets insecure_dev = true)", ErrInsecureTransport, raw)
+	default:
+		return fmt.Errorf("backend URL %q must start with https://", raw)
+	}
+	if u.Hostname() == "" {
+		return fmt.Errorf("backend URL %q has no host", raw)
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("backend URL %q must be a plain base URL (no credentials, query or fragment)", raw)
+	}
+	return nil
+}
+
+// CheckWebSocketURL checks the WebSocket URL the backend handed out at
+// enrollment against the backend URL it was enrolled with: wss:// (ws:// only
+// with insecureDev), and on the same host.
+//
+// Same host, not same origin: the port may differ. TLS binds the server's
+// identity to the host name, not the port, and one host serving the API and
+// the socket on different ports is the same operator. A different host is
+// refused: the device signs auth challenges for whoever answers there and
+// takes reboot, screenshot and log commands from it, so it has to be the
+// backend the board enrolled with. There is no override for split-host
+// deployments; put the socket behind the backend's host instead.
+func CheckWebSocketURL(raw, backendURL string, insecureDev bool) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("websocket URL %q: %w", raw, err)
+	}
+	switch {
+	case u.Scheme == "wss":
+	case u.Scheme == "ws" && insecureDev:
+	case u.Scheme == "ws":
+		return fmt.Errorf("%w: websocket URL %s is plain ws; the backend must hand out wss:// (development boards only: insecure_dev = true)", ErrInsecureTransport, raw)
+	default:
+		return fmt.Errorf("websocket URL %q must start with wss://", raw)
+	}
+	be, err := url.Parse(strings.TrimSpace(backendURL))
+	if err != nil {
+		return fmt.Errorf("backend URL %q: %w", backendURL, err)
+	}
+	if u.Hostname() == "" || !sameHost(u.Hostname(), be.Hostname()) {
+		return fmt.Errorf("%w: websocket URL %s is not on the backend's host %s", ErrInsecureTransport, raw, be.Hostname())
+	}
+	if u.User != nil {
+		return fmt.Errorf("websocket URL %q must not carry credentials", raw)
+	}
+	return nil
+}
+
+func sameHost(a, b string) bool {
+	return strings.EqualFold(strings.TrimSuffix(a, "."), strings.TrimSuffix(b, "."))
+}
+
+// CheckTransport applies CheckBackendURL and CheckWebSocketURL to this
+// config. The daemon calls it before it builds anything that talks to the
+// backend (content sync, the refresh channel, release checks, the command
+// WebSocket) and talks to none of them when it fails.
+//
+// Load does not call it: a board with an insecure config still shows the
+// content it has (local first), and the local CLI tools still work on it.
+func (c *Config) CheckTransport() error {
+	if err := CheckBackendURL(c.BackendURL, c.InsecureDev()); err != nil {
+		return err
+	}
+	return CheckWebSocketURL(c.WebSocketURL, c.BackendURL, c.InsecureDev())
 }
 
 func Load(path string) (*Config, error) {

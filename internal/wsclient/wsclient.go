@@ -131,7 +131,16 @@ func (c *Client) SetBoardReport(f func() any) { c.boardReport = f }
 
 // Run blocks until ctx is cancelled, repeatedly attempting to maintain a live
 // authenticated session. Errors are logged and trigger a backoff-and-retry.
+//
+// A config whose WebSocket URL is not wss:// on the backend's host (and
+// insecure_dev is off) is never dialled: Run records why and returns. The
+// daemon does not start a client for such a config; this is the backstop.
 func (c *Client) Run(ctx context.Context) {
+	if err := c.cfg.CheckTransport(); err != nil {
+		c.setState(false, err)
+		c.logger.Error("not connecting to the backend WebSocket", "err", err, "url", c.cfg.WebSocketURL)
+		return
+	}
 	backoff := minBackoff
 	for {
 		if ctx.Err() != nil {

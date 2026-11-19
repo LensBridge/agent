@@ -53,7 +53,15 @@ sudo musallahboard-agent enroll --token=<token> --backend=<backend URL>
 # Easiest: copy the whole command from the admin portal when you issue the token.
 ```
 
+The backend URL must be `https://`, and the WebSocket address the backend hands back must be `wss://` on the same host; the agent refuses anything else, because the enrollment reply pins the keys the board trusts content from. (A development backend on plain http needs `--insecure-dev`; see [Development boards](#development-boards-on-plain-http).)
+
 The device will then be enrolled and the board will load automatically once its first content and board app packages have synced. The device is now ready to be used as a kiosk!
+
+### Development boards on plain http
+
+For a backend running on your own machine without TLS, add `--insecure-dev` to the enroll command. It is saved in `/etc/musallahboard/agent.toml` as `insecure_dev = true`, and the agent logs a warning at every start while it is on: anyone on that board's network can impersonate the backend. Never use it on a deployed board.
+
+A board enrolled over http before https was required, without `insecure_dev = true`, keeps showing the content it has but no longer talks to the backend (no sync, no update checks, no remote commands). `musallahboard-agent status`, `systemctl status musallahboard-agent` and the journal say why. Re-enroll it over https with `--force`, or, if it is a development board, add `insecure_dev = true` to its `agent.toml` and `sudo systemctl restart musallahboard-agent`.
 
 ## Building
 
@@ -81,7 +89,7 @@ agent release (or a build of this checkout):
 
 ```bash
 vm/mbvm create
-vm/mbvm enroll --token=<token> --backend=http://localhost:8080
+vm/mbvm enroll --token=<token> --backend=http://localhost:8080 --insecure-dev
 vm/mbvm reset --agent=0.2.1
 ```
 

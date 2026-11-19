@@ -30,7 +30,9 @@
 #               Defaults to the directory containing this script.
 #   --token     One-time enrollment token. If omitted, enrollment
 #               is skipped (run `musallahboard-agent enroll` later).
-#   --backend   Backend base URL (e.g. http://localhost:8080).
+#   --backend   Backend base URL. Must be https (e.g. https://lensbridge.example).
+#               For a plain-http development backend, skip --token here and
+#               enroll on the board with `musallahboard-agent enroll --insecure-dev`.
 #               Required when --token is provided.
 #   --kiosk     Install the cage kiosk unit + launcher. The display account is
 #               always `musallahkiosk` and is created here if absent — it is

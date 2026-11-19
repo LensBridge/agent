@@ -38,6 +38,11 @@ type Params struct {
 	// in; optional, defaults to trust.DefaultPath.
 	TrustPath    string
 	AgentVersion string
+	// InsecureDev allows a plain http:// backend and a ws:// WebSocket URL,
+	// for development boards only. It is saved as insecure_dev = true.
+	InsecureDev bool
+	// HTTPClient is optional; tests pass their TLS server's client.
+	HTTPClient *http.Client
 }
 
 // Run performs first-boot enrollment. Idempotent only if the same token is
@@ -47,6 +52,16 @@ func Run(ctx context.Context, logger *slog.Logger, p Params) error {
 	keyPath := p.KeyPath
 	if keyPath == "" {
 		keyPath = config.DefaultKeyPath
+	}
+
+	// Before anything goes on the wire: the reply pins the content keys and
+	// the WebSocket URL, so it must come over TLS.
+	if err := config.CheckBackendURL(p.BackendURL, p.InsecureDev); err != nil {
+		return err
+	}
+	if p.InsecureDev {
+		logger.Warn("INSECURE DEVELOPMENT ENROLLMENT: this board will accept a plaintext backend (insecure_dev = true in its config); anyone on the network can impersonate the backend. Never use this on a deployed board.",
+			"backend", p.BackendURL)
 	}
 
 	pub, priv, err := keystore.Generate()
@@ -60,9 +75,13 @@ func Run(ctx context.Context, logger *slog.Logger, p Params) error {
 	// Client and request/response types are generated from the backend's
 	// openapi.yaml (see internal/api/oapi-codegen.yaml). A field renamed on the
 	// server now breaks this build instead of silently decoding to a zero value.
+	httpClient := p.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
 	client, err := api.NewClientWithResponses(
 		strings.TrimRight(p.BackendURL, "/"),
-		api.WithHTTPClient(&http.Client{Timeout: 30 * time.Second}),
+		api.WithHTTPClient(httpClient),
 	)
 	if err != nil {
 		return fmt.Errorf("build client: %w", err)
@@ -104,6 +123,11 @@ func Run(ctx context.Context, logger *slog.Logger, p Params) error {
 	// client connects directly without a Host: port. Patch it back in if the
 	// backend URL carried an explicit port that the returned WS URL is missing.
 	websocketURL := restorePort(*enrolled.WebsocketUrl, p.BackendURL)
+	if err := config.CheckWebSocketURL(websocketURL, p.BackendURL, p.InsecureDev); err != nil {
+		// Nothing is saved: the board stays unenrolled. The backend has
+		// consumed the token, so a retry needs a new one once it is fixed.
+		return fmt.Errorf("the backend's reply cannot be used: %w", err)
+	}
 
 	// Persist the private key BEFORE the config: if we crash between the two,
 	// re-running enroll is harmless (token is consumed, but no orphan config
@@ -118,6 +142,10 @@ func Run(ctx context.Context, logger *slog.Logger, p Params) error {
 		BackendURL:   strings.TrimRight(p.BackendURL, "/"),
 		WebSocketURL: websocketURL,
 		KeyPath:      keyPath,
+	}
+	if p.InsecureDev {
+		on := true
+		cfg.InsecureDevSet = &on
 	}
 	if err := config.Save(p.ConfigPath, cfg); err != nil {
 		return fmt.Errorf("save config: %w", err)

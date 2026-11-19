@@ -117,6 +117,25 @@ type AgentInfo struct {
 // CreatedTime is createdAt, parsed.
 func (m *Manifest) CreatedTime() time.Time { return m.createdAt }
 
+// MaxCreatedAhead is how far past a trusted clock a package's createdAt may
+// be. Build machines' and the backend's clocks disagree with the board's by
+// seconds, not by days.
+const MaxCreatedAhead = 24 * time.Hour
+
+// CheckCreatedAt refuses a createdAt more than MaxCreatedAhead past now, which
+// must be a trusted (NTP-synchronised) time. Such a package was signed by a
+// machine whose clock was wrong; taking its createdAt as a lower bound on the
+// time would pin the board in the future (docs/architecture.md, section 10).
+// Without a trusted time there is nothing to check against, and createdAt is
+// the best evidence the board has.
+func (m *Manifest) CheckCreatedAt(now time.Time) error {
+	if ahead := m.createdAt.Sub(now); ahead > MaxCreatedAhead {
+		return fmt.Errorf("createdAt %s is %s past the board's NTP-synchronised clock (%s); the machine that signed it has a wrong clock",
+			m.createdAt.UTC().Format(time.RFC3339), ahead.Round(time.Second), now.UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
 // File returns the listed file at path.
 func (m *Manifest) File(path string) (File, bool) {
 	f, ok := m.byPath[path]

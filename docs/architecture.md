@@ -40,7 +40,9 @@ The v1 offline design was bolted onto an online-only board. The audit found:
    self-updater and the USB import helper.
 6. **Atomic and recoverable.** Every install is stage, fsync, rename, symlink
    swap. A power cut at any point leaves the previous state serving. A new
-   agent that does not come up healthy is rolled back automatically.
+   agent is on probation for its first minutes and is rolled back
+   automatically if it fails it; an interrupted agent update is finished
+   from its journal at the next boot.
 
 ## 3. Components
 
@@ -122,7 +124,7 @@ Common fields, all required unless noted:
 | `format` | `"mbu"` |
 | `formatVersion` | `2`. Anything else is rejected. |
 | `type` | `"content"`, `"app"` or `"agent"` |
-| `createdAt` | RFC 3339 UTC, second precision. Used as a signed lower bound for the clock (section 10). |
+| `createdAt` | RFC 3339 UTC, second precision. Used as a signed lower bound for the clock (section 10). With an NTP-synchronised clock, a package whose `createdAt` is more than a day ahead of it is refused. |
 | `files` | Array as above. `sha256` lowercase hex of the file bytes; `bytes` its exact size. Paths unique and valid per the entry-name rules. |
 
 Per type:
@@ -247,6 +249,8 @@ packer (`scripts/package-mbu.mjs`) producing the same format.
 |---|---|---|
 | `/usr/bin/musallahboard-agent` | root 0755 | the agent |
 | `/usr/lib/musallahboard/agent.prev` | root 0755 | previous agent, for rollback |
+| `/usr/lib/musallahboard/update-in-progress.json` | root 0644 | journal of an agent update not yet finished (section 12) |
+| `/usr/lib/musallahboard/update-strikes.json` | root 0644 | per agent version, updates rolled back only for not reconnecting (section 12) |
 | `/etc/musallahboard/agent.toml` | daemon 0600 | config (section 11) |
 | `/etc/musallahboard/agent.key` | daemon 0600 | device identity key (unchanged) |
 | `/etc/musallahboard/trust.json` | root 0644 | trust roots |
@@ -385,7 +389,10 @@ Per package:
    - agent: write the verified package to `agent/staged/package.mbu` and create
      `agent/staged/ready`. The root updater does the rest (section 12).
 4. **Clock**: every verified package raises `clockFloor` to its `createdAt`
-   (section 10).
+   (section 10). With NTP synchronised, a `createdAt` more than a day ahead
+   of the clock is refused before anything is recorded ("An update is dated
+   in the future: the computer that made it has a wrong clock"), and one
+   less than a day ahead raises the floor only to NTP time.
 
 A batch processes `agent` packages first, then `app`, then `content`. When an
 agent package is staged, the rest of the batch stays in the inbox and is
@@ -612,21 +619,44 @@ installs.
 
 ## 10. Clock
 
-Correct time decides which day's content is shown and the prayer times.
+Correct time decides which day's content is shown and the prayer times, and
+the backend refuses a board's signed requests when its clock is more than 5
+minutes off.
 
-- `clockFloor` in `state.json` is the maximum of every verified package's
-  `createdAt` (also kept as `signedClockFloor`) and the wall clock the daemon
-  persists every 10 minutes. The persisted wall clock may not raise the floor
-  more than 400 days past `signedClockFloor`, so a clock once set far into the
-  future cannot lock the board there.
-- At daemon start and every 10 minutes: if the clock is more than 60 s behind
-  `clockFloor`, set it to `clockFloor` (the agent has `CAP_SYS_TIME`) and write
-  the RTC when one is present. A signed `createdAt` in the future of the board
-  is proof its clock is behind.
+- **NTP is the authority.** When systemd-timesyncd has synchronised the
+  clock (`/run/systemd/timesync/synchronized`), the agent never moves the
+  clock, ignores uploaders' clocks, and refuses packages signed more than a
+  day in its future (section 8).
+- `clockFloor` in `state.json` is a lower bound on the time: the maximum of
+  every verified package's `createdAt` (also kept as `signedClockFloor`) and
+  the trusted time the daemon persists every 10 minutes. The persisted time
+  may not raise the floor more than 400 days past `signedClockFloor`.
+- **What is persisted.** With NTP: NTP time, once two checks 10 minutes
+  apart agree with the monotonic clock (a clock stepped by hand between
+  timesyncd's polls is not taken for NTP time). Without NTP: the last
+  trusted time (the floor at daemon start, a newer signed `createdAt`, or NTP
+  time earlier this boot) carried forward by the monotonic clock. The wall
+  clock itself is never written to the floor without NTP: a manual `date`, a
+  wrong RTC or an uploader's time cannot raise it.
+- **A floor ahead of NTP time is wrong** (an earlier agent let an uploader,
+  a manual date or a wrong RTC raise it, or a backend signed from the
+  future). With NTP, once two checks agree, `clockFloor` and
+  `signedClockFloor` are lowered to NTP time and the journal says so
+  (`clock: the clock floor was ahead of NTP-synchronised time`). A board in
+  that state recovers by itself within about 10 minutes of NTP
+  synchronising.
+- **Without NTP**, at daemon start and every 10 minutes: if the clock is
+  more than 60 s behind `clockFloor`, set it to `clockFloor` (the agent has
+  `CAP_SYS_TIME`) and write the RTC when one is present. This is what keeps
+  a board with no RTC and no network from coming up in the past after a
+  power cut.
 - An upload's `X-MB-Client-Time` (the uploader's clock when it started
-  sending; the board measures the offset when the request arrives) is applied only after at least one package in
-  that request verified, only when it differs by more than 5 s, and only within
-  `[clockFloor, clockFloor + 90 days]`. The response reports the drift.
+  sending; the board measures the offset when the request arrives) is
+  applied only when the clock is not NTP-synchronised, only after at least
+  one package in that request verified, only when it differs by more than
+  5 s, and only within `[clockFloor, clockFloor + 90 days]`. It sets the
+  clock and the RTC but not the floor, so a later uploader with a right
+  clock, or NTP, undoes a wrong one. The response reports the drift.
 - **Trust.** The floor keeps the clock from going backwards; it cannot say
   the clock is right. `clock` in `/api/local/status` does: `source` is `ntp`
   (systemd-timesyncd has synchronised it), `rtc` (a hardware clock is
@@ -636,13 +666,34 @@ Correct time decides which day's content is shown and the prayer times.
   `unverified`, and then the board shows "The clock may be wrong: connect the
   board to the internet, or send an update from a laptop", the upload page
   says the clock is not confirmed, and `status` suggests an RTC.
+- **Trade-offs.** Without NTP, the floor resists rollback as before: nothing
+  moves the clock below it, and an uploader moves it at most 90 days ahead.
+  The floor now only counts time the board was running since its last
+  trusted time, so an uploader's correction and time spent powered off are
+  not in it, and a later uploader (with a verified package) can set the
+  clock back as far as the floor. Whoever can answer the board's NTP
+  queries (unauthenticated NTP: on the LAN, or on the path to the NTP
+  servers) decides the time, as they always could through timesyncd; the
+  floor no longer fights them, and they can lower it to their time. Set
+  back more than a day, the board also refuses new packages as dated in the
+  future until the spoofing stops. Signed content still cannot be replayed
+  (sequence and versions are monotonic and do not depend on the clock).
 - A DS3231 RTC is still recommended (`setup.sh --rtc`), and online boards keep
   `systemd-timesyncd`.
 
 ## 11. Configuration (`/etc/musallahboard/agent.toml`)
 
 Existing keys (`device_id`, `backend_url`, `websocket_url`, `key_path`) are
-unchanged. New keys, all optional:
+unchanged, with one rule (`config.CheckTransport`): `backend_url` must be
+`https://` and `websocket_url` `wss://` on the same host as `backend_url` (the
+port may differ: TLS binds the host name, not the port; there is no override
+for a socket on another host). `enroll` checks the backend URL before it sends
+the token and the returned WebSocket URL before it saves anything, and the
+daemon checks both at every start. A config that fails is still read, so the
+board keeps showing what it has and the local CLI keeps working, but nothing
+that talks to the backend is started (content sync, refresh channel, release
+checks, the command WebSocket); the reason goes to the log, `systemctl status`
+and the `sync`/backend errors in `/api/local/status`. New keys, all optional:
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -653,6 +704,7 @@ unchanged. New keys, all optional:
 | `auto_update` | `true` | Follow the release channels. |
 | `app_channel_url`, `agent_channel_url` | section 9.4 | Channel pointers. Empty disables that channel. |
 | `update_time` | `"23:00"` | When software from the channels installs, `HH:MM` in the board's time zone (section 9.4). |
+| `insecure_dev` | `false` | Development boards only: allow `http://` and `ws://` (the same-host rule still applies). Set by `enroll --insecure-dev`; the daemon logs a warning at every start while it is on. |
 
 An offline board needs no configuration change: sync attempts fail fast with no
 route and cost nothing, and the moment it gets a network it starts syncing.
@@ -664,27 +716,75 @@ route and cost nothing, and the moment it gets a network it starts syncing.
 2. `musallahboard-agent-update.path` (`PathExists=` on `ready`) starts
    `musallahboard-agent-update.service` (root, oneshot):
    `musallahboard-agent selfupdate apply`.
-3. As root, the updater: removes `ready`; copies `package.mbu` into a
+3. As root, the updater: removes `ready`; finishes any unfinished update
+   first (below) and stops there; copies `package.mbu` into a
    root-only temporary directory (so the daemon cannot swap it mid-check);
-   verifies it from scratch against root-trusted keys only; checks arch and
-   that the version is newer than its own; extracts the binary to
+   verifies it from scratch against root-trusted keys only; checks arch,
+   that the version is newer than its own and that it is not in
+   `agentVersionsRejected`; extracts the binary to
    `/usr/bin/.musallahboard-agent.new`; runs `.new version` and requires the
    expected version; copies the current binary to
-   `/usr/lib/musallahboard/agent.prev`; renames the new binary into place;
-   restarts `musallahboard-agent.service`.
-4. Health check: within 120 s, `GET http://127.0.0.1:8080/api/local/status`
-   must report the new `agentVersion`. Otherwise the updater restores
-   `agent.prev`, restarts the service, and adds the version to
-   `agentVersionsRejected`, so a broken release cannot loop.
-5. The outcome is written to `agent/last-update.json`, and only then, after a
-   rollback, is the previous agent restarted, so it can read it.
+   `/usr/lib/musallahboard/agent.prev`; asks the running agent whether it is
+   connected to LensBridge; writes the journal; renames the new binary into
+   place; restarts `musallahboard-agent.service`.
+4. Probation. The new agent must report its `agentVersion` on
+   `GET http://127.0.0.1:8080/api/local/status` within 2 minutes; then
+   systemd must not restart it (same `MainPID` and `NRestarts`, still
+   `active`) for 4 minutes; and if the board was connected before the update
+   (`backend.connected`, or `sync.lastSuccessAt` with no `lastError`), it
+   must connect again within 3 minutes. A board that was offline is not
+   asked to be online. If it passes, the outcome is written and the
+   enrollment splash refreshed (`splash install`).
+5. If it fails, the updater restores `agent.prev`, records the outcome in
+   `agent/last-update.json`, and only then restarts the previous agent, so it
+   can read it. Not coming up, a restart or crash loop, or a probation cut
+   short 3 times adds the version to `agentVersionsRejected`, so a broken
+   release cannot loop. Not reconnecting only counts a strike
+   (`update-strikes.json`), because the backend or the network may be what
+   failed; the second strike rejects the version. If `agent.prev` cannot be
+   restored the outcome is `rollback-failed` and the new agent keeps running.
+
+**The update journal.** `/usr/lib/musallahboard/update-in-progress.json` is
+root-owned, outside the daemon's reach, and written (temp file, fsync,
+rename, fsync of the directory) before the binary is replaced and at every
+change of phase. It names both versions and the SHA-256 of the previous and
+the new binary. The path unit watches it as well as `ready`, and the updater
+also puts `ready` back while an update is open (boards whose path unit
+predates the journal watch only `ready`), so an update cut short by a power
+cut, a reboot or the updater being stopped is finished by the next run, at
+boot at the latest. That run is the binary installed then, so the record's
+format only ever gains fields. What it does:
+
+| Journal phase | Installed binary | The next run |
+|---|---|---|
+| none | | nothing to finish; handles a staged package, if any |
+| `swapping` | previous | the swap never happened: removes the extracted binary, outcome `refused` ("interrupted"), nothing else changes |
+| `swapping` or `probation` | new | starts the probation again from scratch, without restarting the agent; after 3 cut-short probations, rolls back and rejects |
+| `swapping` or `probation` | anything else | someone installed another agent: left alone, outcome `refused` |
+| `committing` | | writes the `ok` outcome again (same timestamp), refreshes the splash, removes the journal |
+| `rolling-back` | | repeats the rollback: restores `agent.prev` if it is not in place, rejects or strikes (idempotent), writes the outcome, removes the journal, restarts the agent |
+| unreadable | | puts `agent.prev` back if it differs, outcome `rolled-back` |
+
+The journal is removed only after the outcome is written, and whenever the
+updater ends other than by being stopped, so the path unit cannot loop on
+it. SIGTERM (shutdown, or the unit's 15 minute start timeout) stops a
+probation and leaves the journal; a rollback that has begun always finishes.
+Boards set up before the journal existed run the updater under a 5 minute
+timeout; a typical update (seconds, then the 4 minute probation) fits, and
+one that does not is resumed as above.
+
+Not covered: a new agent that starts crashing after its probation is
+restarted by systemd for ever (with a growing delay) and is not rolled
+back. Safe mode (`internal/safemode`) only reports such a board, as
+`safeMode` in its heartbeats; it does not change what the agent does.
 
 Telling the people at the board (`internal/agentupdate`): the agent that
 staged the package leaves the screen on "Restarting MusallahBoard" and its
 batch's notice in `agent/pending-notice.json`. Then:
 
 - **success**: the new agent shows that notice ("Update complete · Agent
-  0.3.0 · Board app 2.1.0") at startup;
+  0.3.0 · Board app 2.1.0") at startup, which is before its probation ends:
+  a rollback afterwards replaces it with the rollback notice below;
 - **rollback**: the previous agent, restarted, finds an unseen `rolled-back`
   outcome and shows "Update not installed · Agent 0.3.0 did not start
   correctly, so the board went back to 0.2.1", with the batch's other lines;
@@ -728,8 +828,31 @@ connecting a board to a network permanently.
 - The agent's unit never gives up restarting (`StartLimitIntervalSec=0`); a
   crash loop backs off from 5 s to 2 minutes (`RestartSteps`,
   `RestartMaxDelaySec`, systemd 254 and later).
+- systemd's watchdog (`WatchdogSec=60s`) restarts an agent that is alive but
+  stuck. The agent pings only while a heartbeat is fresh: before enrollment
+  its poll loop bumps it, once enrolled a probe of its own
+  `/api/local/status` every 10 s (the local server and the locks of the sync,
+  backend, update and clock state). A heartbeat older than 60 s withholds
+  the ping, so a stuck agent is restarted within about 2 minutes. The probe
+  never waits on the network, so an offline board is not restarted for it;
+  a stall in the network loops themselves is not detected.
 - The daemon still watches for Chromium's error page and navigates back to the
   board, as a backstop.
+- Every 30 s it also probes the page over CDP: `Inspector.enable` (which
+  Chromium answers with `Inspector.targetCrashed` when the tab's renderer is
+  gone, "Aw, Snap!") and a trivial `Runtime.evaluate` with a 5 s limit. A
+  crashed page (one probe) or one that has not answered three probes in a row
+  is reloaded; if it is still dead at the next threshold the kiosk unit is
+  restarted (`sudo -n systemctl restart`, as the `kiosk.restart` command).
+  Restarts are at least 5 minutes apart, doubling to an hour, and the backoff
+  starts over only after an hour of a healthy page. A reload is tried at most
+  once until the page answers again or the kiosk restarts. Nothing is done
+  while the update screen is up, nor for a page that answers without the
+  board's `getStatus()` hook (splash, update screen, an old board app), a page
+  mid-navigation, or a browser that is not up yet.
+- The heartbeat's `kioskAlive` comes from the same probe: false when the
+  browser is reachable but the page crashed or does not answer; the unit's
+  state is used only when the browser cannot be reached.
 
 ## 15. Frontend (MusallahBoard)
 
@@ -763,13 +886,14 @@ per-day payloads from installed content, and weather comes through the agent.
 | Malicious code (SPA or agent) | Only the release key signs software; the backend never holds it. |
 | Backend compromise | Limited to content on screens; cannot push code. Content key rotation via `previous-public-keys` and `trust` CLI. |
 | Replay of old packages | Monotonic sequence/version in `state.json`. |
-| Bad agent release | Health-checked self-update with automatic rollback and a rejected-version list. |
+| Bad agent release | Self-update with a crash-safe journal and a probation (stays up; reconnects if it was connected), automatic rollback and a rejected-version list. |
 | Daemon compromise escalating to root | Daemon is unprivileged (only `CAP_SYS_TIME`, `CAP_NET_BIND_SERVICE`); the root updater re-verifies from a private copy with root-owned keys. |
 | Zip-slip, zip bombs, disk exhaustion | Strict entry names, declared sizes enforced while reading, global caps, one import at a time. |
 | Hostile USB stick | Allow-listed filesystems, read-only `nosuid,nodev,noexec` mount, only `*.mbu` regular files copied, no network in the helper, signature checks as for any source. |
 | Rogue DHCP on a building network | Service port only after a DHCP client attempt fails; off by default; `service-port off` before connecting. |
-| Clock tampering | Clock only moves forward to signed times automatically; uploader time only with a verified package and within 90 days of the floor. |
+| Clock tampering | With NTP, nothing but NTP moves the clock, and a floor ahead of NTP time is lowered. Without NTP, the clock only moves forward to the floor automatically; uploader time only with a verified package and within 90 days past the floor, and never into the floor. Packages signed more than a day ahead of an NTP clock are refused. |
 | DNS rebinding against the upload server | `Host` allow-list. |
+| Enrollment or backend impersonated on the LAN | `https://` backend and `wss://` socket on the backend's host, enforced at enrollment and at every daemon start; plaintext only with the explicit `insecure_dev` opt-in (section 11). |
 
 ## 17. Out of scope
 
