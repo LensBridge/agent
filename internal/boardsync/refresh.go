@@ -18,10 +18,9 @@ import (
 // the socket would otherwise be redialled every second.
 const refreshStable = 30 * time.Second
 
-// refreshLoop holds the backend's refresh channel open. The backend sends a
-// message whenever something on the board's content changes; each one
-// schedules a content sync. The upgrade is device-signed (refreshHeader), so
-// nobody who merely knows the device id can take the board's place on it.
+// refreshLoop holds the backend's refresh channel open, the same socket the
+// hosted board listens on. The backend sends a message whenever something on
+// the board's content changes; each one schedules a content sync.
 func (s *Syncer) refreshLoop(ctx context.Context) {
 	wsURL, err := refreshURL(s.d.Cfg.BackendURL, s.d.Cfg.DeviceID)
 	if err != nil {
@@ -53,13 +52,9 @@ func (s *Syncer) refreshOnce(ctx context.Context, wsURL string) error {
 	// meant to stay open for hours and is bounded by dialCtx instead.
 	wsClient := *s.client
 	wsClient.Timeout = 0
-	header, err := s.refreshHeader(wsURL)
-	if err != nil {
-		return err
-	}
 	conn, _, err := websocket.Dial(dialCtx, wsURL, &websocket.DialOptions{
 		HTTPClient: &wsClient,
-		HTTPHeader: header,
+		HTTPHeader: http.Header{"User-Agent": []string{"musallahboard-agent/" + s.d.AgentVersion}},
 	})
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
@@ -76,38 +71,6 @@ func (s *Syncer) refreshOnce(ctx context.Context, wsURL string) error {
 			s.Trigger()
 		}
 	}
-}
-
-// refreshHeader is the upgrade request's headers: the User-Agent and the
-// device signature (docs/architecture.md, section 9.2) over GET, the path and
-// an empty body. It is signed afresh for every dial, since the backend allows
-// only a few minutes of clock difference and refuses a timestamp it has
-// already seen on this channel.
-//
-// The deviceId query parameter stays: the signature does not cover the query,
-// so the backend takes the device from X-MB-Device-Id and only checks that the
-// two agree, and a backend that predates signed upgrades still finds the
-// board by it.
-func (s *Syncer) refreshHeader(wsURL string) (http.Header, error) {
-	u, err := url.Parse(wsURL)
-	if err != nil {
-		return nil, err
-	}
-	// The path is what is signed; the scheme only has to be one
-	// http.NewRequest accepts. websocket.Dial makes the same swap.
-	switch u.Scheme {
-	case "wss":
-		u.Scheme = "https"
-	case "ws":
-		u.Scheme = "http"
-	}
-	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "musallahboard-agent/"+s.d.AgentVersion)
-	signRequest(req, nil, s.d.Cfg.DeviceID, s.d.Key, s.now())
-	return req.Header, nil
 }
 
 // refreshURL derives ws(s)://<backend>/api/refresh-musallahboard?deviceId=<id>

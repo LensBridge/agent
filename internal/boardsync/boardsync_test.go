@@ -277,9 +277,6 @@ func TestRefreshTriggersDebouncedSync(t *testing.T) {
 			if r.URL.Query().Get("deviceId") != testDevice {
 				t.Errorf("refresh deviceId = %q", r.URL.Query().Get("deviceId"))
 			}
-			if err := verifyDeviceAuth(r, nil); err != "" {
-				t.Errorf("refresh upgrade: %s", err)
-			}
 			c, err := websocket.Accept(w, r, nil)
 			if err != nil {
 				return
@@ -321,82 +318,6 @@ func TestRefreshTriggersDebouncedSync(t *testing.T) {
 	// One at start, one for the burst of refresh messages.
 	if n := hits.Load(); n != 2 {
 		t.Fatalf("%d content syncs, want 2", n)
-	}
-}
-
-// verifyDeviceAuth checks r's device signature the way the backend does
-// (DeviceRequestAuthenticator), and returns what is wrong, or "".
-func verifyDeviceAuth(r *http.Request, body []byte) string {
-	if got := r.Header.Get(devauth.HeaderDeviceID); got != testDevice {
-		return "device header " + strconv.Quote(got)
-	}
-	ts, err := strconv.ParseInt(r.Header.Get(devauth.HeaderTimestamp), 10, 64)
-	if err != nil {
-		return "timestamp: " + err.Error()
-	}
-	if d := time.Since(time.UnixMilli(ts)); d < -5*time.Minute || d > 5*time.Minute {
-		return "timestamp " + strconv.FormatInt(ts, 10) + " is not now"
-	}
-	sig, err := base64.StdEncoding.DecodeString(r.Header.Get(devauth.HeaderSignature))
-	if err != nil {
-		return "signature: " + err.Error()
-	}
-	msg := devauth.Message(r.Method, r.URL.Path, testDevice, ts, body)
-	if !ed25519.Verify(deviceKey.Public().(ed25519.PublicKey), msg, sig) {
-		return "signature does not verify"
-	}
-	return ""
-}
-
-// The refresh upgrade is a device-signed GET over the path alone. Ed25519 is
-// deterministic, so a fixed key, device and time give a fixed signature. The
-// backend's BoardStreamHandshakeInterceptorTest verifies this exact value with
-// the real DeviceRequestAuthenticator: if either side changes how it builds
-// the signed message, one of the two tests fails.
-func TestRefreshHeaderSignedGolden(t *testing.T) {
-	e := newEnv(t, "https://api.example/")
-	e.syncer.d.Key = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, 32))
-	e.syncer.now = func() time.Time { return time.UnixMilli(1790258531123) }
-	wsURL, err := refreshURL(e.cfg.BackendURL, testDevice)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h, err := e.syncer.refreshHeader(wsURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := h.Get(devauth.HeaderDeviceID); got != testDevice {
-		t.Errorf("device header = %q", got)
-	}
-	if got := h.Get(devauth.HeaderTimestamp); got != "1790258531123" {
-		t.Errorf("timestamp header = %q", got)
-	}
-	if got := h.Get("User-Agent"); got != "musallahboard-agent/0.3.0" {
-		t.Errorf("User-Agent = %q", got)
-	}
-	sig, _ := base64.StdEncoding.DecodeString(h.Get(devauth.HeaderSignature))
-	msg := devauth.Message("GET", "/api/refresh-musallahboard", testDevice, 1790258531123, nil)
-	if !ed25519.Verify(e.syncer.d.Key.Public().(ed25519.PublicKey), msg, sig) {
-		t.Fatal("signature does not verify over GET, the path without its query, and an empty body")
-	}
-	const golden = "TGTiOMTSt8N/7ad06yMvmWo9a68Yz01LNGYnDOPGfedeiPTPjC9hqtKa/yLAOa7rXlDa5UfKTpmI28tdSME4Dg=="
-	if got := h.Get(devauth.HeaderSignature); got != golden {
-		t.Errorf("signature = %s, want %s", got, golden)
-	}
-}
-
-// Each dial signs afresh: the backend refuses a timestamp it has already
-// accepted on this channel, so a reconnect must never resend old headers.
-func TestRefreshHeaderFreshPerDial(t *testing.T) {
-	e := newEnv(t, "https://api.example")
-	now := time.UnixMilli(1790258531000)
-	e.syncer.now = func() time.Time { now = now.Add(time.Second); return now }
-	wsURL, _ := refreshURL(e.cfg.BackendURL, testDevice)
-	a, _ := e.syncer.refreshHeader(wsURL)
-	b, _ := e.syncer.refreshHeader(wsURL)
-	if a.Get(devauth.HeaderTimestamp) == b.Get(devauth.HeaderTimestamp) ||
-		a.Get(devauth.HeaderSignature) == b.Get(devauth.HeaderSignature) {
-		t.Fatal("two dials carried the same timestamp or signature")
 	}
 }
 

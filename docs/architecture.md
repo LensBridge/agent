@@ -446,13 +446,7 @@ The daemon, when `content_sync` is on and the board is enrolled:
 
 - syncs at startup, every 30 minutes, and 10 s after any message on the
   backend's refresh channel (`wss://<backend>/api/refresh-musallahboard?deviceId=<id>`,
-  debounced). The upgrade request is device-signed (9.2: `GET`, the path
-  without the query, empty body), signed afresh for every dial. The backend
-  takes the device from `X-MB-Device-Id`, refuses a `deviceId` query that
-  disagrees, and refuses a timestamp it has already accepted on this channel.
-  Unsigned upgrades from older agents are accepted only while the backend's
-  `musallahboard.board-stream.require-signature` is `false`, and never take
-  over from a signed connection,
+  debounced),
 - with `POST /api/agent/content-bundle`, device-authenticated (9.2), body
   `{"days": <content_days, default 7>, "haveMedia": ["<sha256>", ...]}`,
 - and imports the returned package with source `sync`.
