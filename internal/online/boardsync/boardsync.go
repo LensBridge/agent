@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -36,8 +37,12 @@ import (
 // Timings from the contract. They are fields on the Syncer (set from these in
 // New) so tests can shrink them.
 const (
-	ContentInterval   = 30 * time.Minute
+	ContentInterval = 30 * time.Minute
+	// TriggerDelay and TriggerJitter: a requested sync (the backend's
+	// content_changed frame, config.refresh) runs TriggerDelay plus up to
+	// TriggerJitter later, so a fleet told at once does not sync at once.
 	TriggerDelay      = 10 * time.Second
+	TriggerJitter     = 20 * time.Second
 	ContentMinBackoff = time.Minute
 	ContentMaxBackoff = 30 * time.Minute
 	WeatherInterval   = 30 * time.Minute
@@ -82,6 +87,7 @@ type Syncer struct {
 	now     func() time.Time
 
 	contentInterval, triggerDelay, minBackoff, maxBackoff time.Duration
+	triggerJitter                                         time.Duration
 	weatherInterval                                       time.Duration
 
 	mu        sync.Mutex
@@ -108,6 +114,7 @@ func New(d Deps) *Syncer {
 		now:             time.Now,
 		contentInterval: ContentInterval,
 		triggerDelay:    TriggerDelay,
+		triggerJitter:   TriggerJitter,
 		minBackoff:      ContentMinBackoff,
 		maxBackoff:      ContentMaxBackoff,
 		weatherInterval: WeatherInterval,
@@ -131,9 +138,9 @@ func (s *Syncer) Run(ctx context.Context) {
 	wg.Wait()
 }
 
-// Trigger asks for a content sync in TriggerDelay. Calls within that window
-// fold into one sync: an admin editing five posters should cost one
-// download.
+// Trigger asks for a content sync in TriggerDelay plus up to TriggerJitter.
+// Calls before it runs fold into one sync: an admin editing five posters
+// should cost one download.
 func (s *Syncer) Trigger() {
 	select {
 	case s.trigger <- struct{}{}:
@@ -176,9 +183,13 @@ func (s *Syncer) contentLoop(ctx context.Context) {
 			// Bring the next sync forward to at most triggerDelay away, but
 			// never push an already-closer one back: a steady stream of
 			// triggers must not postpone the sync forever.
-			if until := deadline.Sub(s.now()); until > s.triggerDelay {
-				deadline = s.now().Add(s.triggerDelay)
-				resetTimer(timer, s.triggerDelay)
+			d := s.triggerDelay
+			if s.triggerJitter > 0 {
+				d += time.Duration(rand.Int63n(int64(s.triggerJitter)))
+			}
+			if until := deadline.Sub(s.now()); until > d {
+				deadline = s.now().Add(d)
+				resetTimer(timer, d)
 			}
 			continue
 		case <-timer.C:

@@ -2,6 +2,7 @@ package wsclient
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 
 	"github.com/LensBridge/agent/internal/core/config"
 )
@@ -45,5 +48,43 @@ func TestRunRefusesInsecureWebSocketURL(t *testing.T) {
 				t.Errorf("CheckTransport = %v", cfg.CheckTransport())
 			}
 		})
+	}
+}
+
+// A content_changed frame from the backend asks for a content sync.
+func TestContentChangedFrame(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		ctx := r.Context()
+		c.Write(ctx, websocket.MessageText, []byte(`{"type":"hello","seq":1,"sessionId":"s","challenge":"c"}`))
+		c.Read(ctx) // auth
+		c.Write(ctx, websocket.MessageText, []byte(`{"type":"auth_ok","seq":2,"sessionId":"s","deviceId":"d"}`))
+		c.Write(ctx, websocket.MessageText, []byte(`{"type":"content_changed"}`))
+		c.Write(ctx, websocket.MessageText, []byte(`{"type":"content_changed"}`))
+		for {
+			if _, _, err := c.Read(ctx); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+	on := true
+	host := strings.TrimPrefix(srv.URL, "http://")
+	cfg := &config.Config{DeviceID: "d", BackendURL: srv.URL, WebSocketURL: "ws://" + host + "/ws", InsecureDevSet: &on}
+	c := New(cfg, ed25519.NewKeyFromSeed(make([]byte, 32)), slog.New(slog.DiscardHandler), "test")
+	var changed atomic.Int32
+	c.SetContentChanged(func() { changed.Add(1) })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go c.Run(ctx)
+	for changed.Load() < 2 && ctx.Err() == nil {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if changed.Load() != 2 {
+		t.Fatalf("content_changed handled %d times", changed.Load())
 	}
 }

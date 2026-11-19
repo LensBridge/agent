@@ -68,9 +68,10 @@ type Client struct {
 	logger       *slog.Logger
 	agentVersion string
 
-	onCommand   CommandHandler
-	prober      PageProber
-	boardReport func() any
+	onCommand        CommandHandler
+	onContentChanged func()
+	prober           PageProber
+	boardReport      func() any
 
 	stateMu sync.Mutex
 	state   ConnState
@@ -116,6 +117,12 @@ func New(cfg *config.Config, priv ed25519.PrivateKey, logger *slog.Logger, agent
 // SetCommandHandler registers the callback fired for every `command` frame.
 // Must be called before Run; after Run starts, the field is read-only.
 func (c *Client) SetCommandHandler(h CommandHandler) { c.onCommand = h }
+
+// SetContentChanged registers what a content_changed frame does (the
+// backend sends one when the board's content may have changed): normally
+// the content syncer's Trigger, which syncs soon and folds repeats. Must be
+// called before Run.
+func (c *Client) SetContentChanged(f func()) { c.onContentChanged = f }
 
 // SetPageProber supplies the browser probe used to fill kioskAlive and
 // displayedFrameKey. Optional — without one, heartbeats fall back to the
@@ -336,6 +343,11 @@ func (c *Client) readLoop(ctx context.Context, sess *session) error {
 			}
 			// Handlers run in a goroutine so a slow command doesn't block heartbeats.
 			go c.onCommand(ctx, sessionSender{s: sess}, cmd)
+		case "content_changed":
+			c.logger.Info("backend says the content changed; syncing soon")
+			if c.onContentChanged != nil {
+				c.onContentChanged()
+			}
 		default:
 			c.logger.Debug("ignoring frame", "type", f.Type)
 		}

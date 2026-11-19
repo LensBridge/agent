@@ -282,6 +282,7 @@ func (l *Layer) serve(ctx context.Context, cfg *config.Config, priv []byte) {
 	ws := wsclient.New(cfg, priv, log, l.d.AgentVersion)
 	ws.SetPageProber(l.d.Kiosk)
 	ws.SetBoardReport(l.d.BoardReport)
+	ws.SetContentChanged(syncer.Trigger)
 	registry := commands.NewRegistry()
 	registry.Register(&commands.ChromeReload{CDP: l.d.Kiosk})
 	registry.Register(&commands.ChromeScreenshot{CDP: l.d.Kiosk})

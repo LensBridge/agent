@@ -254,7 +254,7 @@ func TestTriggerFoldsIntoOneSync(t *testing.T) {
 	}))
 	defer srv.Close()
 	e := newEnv(t, srv.URL)
-	e.syncer.triggerDelay = 50 * time.Millisecond
+	e.syncer.triggerDelay, e.syncer.triggerJitter = 50*time.Millisecond, 100*time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { e.syncer.Run(ctx); close(done) }()
@@ -262,15 +262,21 @@ func TestTriggerFoldsIntoOneSync(t *testing.T) {
 	for hits.Load() < 1 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	// Three triggers in quick succession fold into one sync.
-	for range 3 {
+	// Triggers in quick succession fold into one sync, and it waits at
+	// least the delay.
+	asked := time.Now()
+	for range 5 {
 		e.syncer.Trigger()
+		time.Sleep(5 * time.Millisecond)
 	}
 	for hits.Load() < 2 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(time.Millisecond)
+	}
+	if waited := time.Since(asked); waited < e.syncer.triggerDelay {
+		t.Fatalf("synced %s after the trigger, before the delay", waited)
 	}
 	// Then long enough for any extra, unfolded sync to show up.
-	time.Sleep(10 * e.syncer.triggerDelay)
+	time.Sleep(4 * (e.syncer.triggerDelay + e.syncer.triggerJitter))
 	cancel()
 	<-done
 	// One at start, one for the burst of triggers.
