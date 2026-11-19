@@ -4,7 +4,7 @@ Documentation=https://github.com/LensBridge/agent/blob/main/docs/architecture.md
 # Started by udev (/etc/udev/rules.d/90-musallahboard-usb.rules) for a USB
 # block device that carries a filesystem; %I is its kernel name, e.g. sda1.
 # The helper re-checks the name and the filesystem type, mounts it read-only
-# with nosuid,nodev,noexec at /run/musallahboard/usb/%I, copies at most 16
+# with nosuid,nodev,noexec at /run/musallahboard/usb/%I, copies at most 64
 # *.mbu regular files into the inbox, unmounts, and then waits for the
 # daemon's results so they land in this unit's journal
 # (docs/architecture.md section 9.6). `usb_import = false` in agent.toml makes
@@ -17,8 +17,8 @@ Documentation=https://github.com/LensBridge/agent/blob/main/docs/architecture.md
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/musallahboard-agent usb-import %I
-# Copying up to 16 x 512 MiB from a slow stick, then up to 15 min waiting for
-# the daemon.
+# Copying up to 4 GiB from a slow stick, then up to 15 min waiting for the
+# daemon.
 TimeoutStartSec=20min
 
 # The mount point. systemd creates it before start and removes it after.

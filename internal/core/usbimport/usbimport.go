@@ -38,8 +38,13 @@ import (
 )
 
 const (
-	// MaxFiles is the most packages taken from one stick.
-	MaxFiles = 16
+	// MaxFiles is the most packages taken from one stick. A USB kit from
+	// LensBridge for 20 boards holds 42: a setup file and a content package
+	// per board, the board app and the agent. Every board copies them all
+	// and ignores what is not for it.
+	MaxFiles = 64
+	// MaxTotalBytes bounds what is copied from one stick onto the SD card.
+	MaxTotalBytes = 4 << 30
 	// DefaultMountRoot holds one mount point per device.
 	DefaultMountRoot = "/run/musallahboard/usb"
 	// WaitTimeout bounds how long the helper waits for the daemon. An agent
@@ -228,7 +233,7 @@ type Candidate struct {
 // Scan lists the packages to take from the stick mounted at root: regular
 // files (never symlinks) named *.mbu in any case, at the top level and in a
 // top-level folder named MusallahBoard in any case, at most MaxFiles, each at
-// most mbu.MaxPackageBytes. notes explains anything skipped.
+// most mbu.MaxPackageBytes, together at most MaxTotalBytes. notes explains anything skipped.
 func Scan(root string) (files []Candidate, notes []string) {
 	dirs := []string{root}
 	if entries, err := os.ReadDir(root); err == nil {
@@ -277,7 +282,17 @@ func Scan(root string) (files []Candidate, notes []string) {
 		}
 		all = all[:MaxFiles]
 	}
-	return all, notes
+	var total int64
+	kept := all[:0]
+	for _, c := range all {
+		if total+c.Size > MaxTotalBytes {
+			notes = append(notes, fmt.Sprintf("skipping %s: at most %d GiB is taken from one stick", rel(root, c.Path), MaxTotalBytes>>30))
+			continue
+		}
+		total += c.Size
+		kept = append(kept, c)
+	}
+	return kept, notes
 }
 
 func rel(root, p string) string {

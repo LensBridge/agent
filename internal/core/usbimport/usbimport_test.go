@@ -79,6 +79,18 @@ func TestScanLimits(t *testing.T) {
 		t.Fatalf("notes = %q", notes)
 	}
 
+	// The stick's total is bounded too (sparse files: nothing is written).
+	root = t.TempDir()
+	for i := range 9 {
+		f, _ := os.Create(filepath.Join(root, fmt.Sprintf("c%d.mbu", i)))
+		f.Truncate(500 << 20)
+		f.Close()
+	}
+	files, notes = Scan(root)
+	if len(files) != 8 || len(notes) != 1 || !strings.Contains(notes[0], "GiB") {
+		t.Fatalf("total cap: %d files, notes=%q", len(files), notes)
+	}
+
 	// A file over the package limit is skipped without reading it (sparse).
 	root = t.TempDir()
 	big := filepath.Join(root, "big.mbu")
