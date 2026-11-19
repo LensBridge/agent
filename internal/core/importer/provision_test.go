@@ -286,7 +286,9 @@ func TestBackendSampleSetupFile(t *testing.T) {
 
 	// The same file signed by a key the board does not trust is refused.
 	other := New(Deps{Layout: store.Layout{Root: t.TempDir()}, Config: config.InMemory(config.Config{}),
-		Ring: func() (*trust.Ring, error) { return trust.NewRing([]ed25519.PublicKey{contentKey.Public().(ed25519.PublicKey)}, nil), nil }})
+		Ring: func() (*trust.Ring, error) {
+			return trust.NewRing([]ed25519.PublicKey{contentKey.Public().(ed25519.PublicKey)}, nil), nil
+		}})
 	if r := one(t, other.Import(context.Background(), SourceUSB, []string{"testdata/sample-provision.mbu"})); r.Action != ActionRejected {
 		t.Fatalf("untrusted key: %+v", r)
 	}

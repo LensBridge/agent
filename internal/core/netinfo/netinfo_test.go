@@ -49,4 +49,3 @@ func TestRoutableIPv4DropsLinkLocal(t *testing.T) {
 		})
 	}
 }
-
