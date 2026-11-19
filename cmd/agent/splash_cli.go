@@ -31,11 +31,13 @@ func runSplash(args []string) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		fail("%v", err)
 	}
-	if err := fsutil.WriteAtomic(path, packaging.WaitingHTML, 0o644); err != nil {
+	waiting, _ := packaging.Read("waiting.html")
+	startingHTML, _ := packaging.Read("starting.html")
+	if err := fsutil.WriteAtomic(path, waiting, 0o644); err != nil {
 		fail("could not write %s: %v", path, err)
 	}
 	starting := filepath.Join(filepath.Dir(path), "starting.html")
-	if err := fsutil.WriteAtomic(starting, packaging.StartingHTML, 0o644); err != nil {
+	if err := fsutil.WriteAtomic(starting, startingHTML, 0o644); err != nil {
 		fail("could not write %s: %v", starting, err)
 	}
 }

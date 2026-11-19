@@ -1,0 +1,11 @@
+[Unit]
+Description=Set the system clock from the RTC (MusallahBoard)
+Documentation=https://github.com/LensBridge/agent
+# Started by 85-musallahboard-rtc.rules when rtc0 appears.
+DefaultDependencies=no
+Before=time-set.target
+Wants=time-set.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/hwclock --rtc=/dev/rtc0 --hctosys --utc

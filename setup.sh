@@ -84,14 +84,10 @@ BINARY_DEST=/usr/bin/musallahboard-agent
 # Where this script is published (for the instructions it prints).
 SETUP_URL=https://raw.githubusercontent.com/lensbridge/agent/main/setup.sh
 CONFIG_DIR=/etc/musallahboard
-UNIT_DIR=/lib/systemd/system
-SUDOERS_DEST=/etc/sudoers.d/musallahboard-agent
-KIOSK_SHARE_DIR=/usr/share/musallahboard
 STATE_DIR=/var/lib/musallahboard
 INBOX_DIR=/var/lib/musallahboard/inbox
 LIB_DIR=/usr/lib/musallahboard
 TRUST_PATH=/etc/musallahboard/trust.json
-UDEV_DIR=/etc/udev/rules.d
 # The kiosk always loads the agent's local server (docs/architecture.md, 14).
 KIOSK_URL="http://127.0.0.1:8080/"
 
@@ -564,251 +560,17 @@ install_agent_binary() {
     info "Installed $BINARY_DEST ($("$BINARY_DEST" version 2>/dev/null || echo 'version unknown'))"
 }
 
-# ── Install sudoers allow-list ────────────────────────────────────────────────
-install_sudoers() {
-    section "Sudoers"
-
-    sudo tee "$SUDOERS_DEST" > /dev/null << 'EOF'
-# musallahboard-agent — privileged commands allow-list
-musallahdaemon ALL=(root) NOPASSWD: /bin/systemctl restart musallahboard-kiosk.service
-musallahdaemon ALL=(root) NOPASSWD: /bin/systemctl reboot
-EOF
-    sudo chmod 0440 "$SUDOERS_DEST"
-    sudo chown root:root "$SUDOERS_DEST"
-
-    # Validate syntax
-    if ! sudo visudo -c -f "$SUDOERS_DEST"; then
-        sudo rm -f "$SUDOERS_DEST"
-        error "Sudoers file failed validation"
-    fi
-    info "Installed $SUDOERS_DEST"
-}
-
-# ── Install systemd units ─────────────────────────────────────────────────────
-install_systemd_units() {
-    section "Systemd units"
-
-    # KEEP IN SYNC with packaging/*.service, *.path and packaging/udev/. This
-    # script is curl|bash'd and has no checkout to copy from, so the units are
-    # inlined here without their comments; the packaged files explain them.
-
-    # Agent service. CAP_SYS_TIME sets the clock (and, with the RTC rule, the
-    # RTC); CAP_NET_BIND_SERVICE is for the upload server on port 80.
-    sudo tee "$UNIT_DIR/musallahboard-agent.service" > /dev/null << 'EOF'
-[Unit]
-Description=MusallahBoard device agent
-Documentation=https://github.com/LensBridge/agent
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=0
-
-[Service]
-Type=notify
-User=musallahdaemon
-Group=musallahdaemon
-ExecStart=/usr/bin/musallahboard-agent run
-Restart=always
-RestartSec=5
-RestartSteps=6
-RestartMaxDelaySec=120
-WatchdogSec=60s
-AmbientCapabilities=CAP_SYS_TIME CAP_NET_BIND_SERVICE
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-StateDirectory=musallahboard
-StateDirectoryMode=0750
-LogsDirectory=musallahboard
-LogsDirectoryMode=0750
-ReadWritePaths=/etc/musallahboard /var/lib/musallahboard /var/log/musallahboard
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-LockPersonality=yes
-RestrictRealtime=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # Kiosk service
-    sudo tee "$UNIT_DIR/musallahboard-kiosk.service" > /dev/null << 'EOF'
-[Unit]
-Description=MusallahBoard kiosk (cage + Chromium)
-Documentation=https://github.com/LensBridge/agent
-After=systemd-user-sessions.service
-After=musallahboard-agent.service
-Wants=musallahboard-agent.service
-After=getty@tty1.service
-Conflicts=getty@tty1.service
-
-[Service]
-Type=simple
-User=musallahkiosk
-PAMName=login
-TTYPath=/dev/tty1
-TTYReset=yes
-TTYVHangup=yes
-TTYVTDisallocate=yes
-StandardInput=tty-fail
-StandardOutput=journal
-StandardError=journal
-UtmpIdentifier=tty1
-UtmpMode=user
-EnvironmentFile=-/etc/musallahboard/kiosk.env
-ExecStart=/usr/bin/start-kiosk.sh
-ExecStopPost=-/usr/bin/pkill -9 -u musallahkiosk -f "google-chrome|chromium"
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # Kiosk URL watcher (path unit)
-    sudo tee "$UNIT_DIR/musallahboard-kiosk-watch.path" > /dev/null << 'EOF'
-[Unit]
-Description=Watch the composed kiosk URL and reload the kiosk on change
-Documentation=https://github.com/LensBridge/agent
-
-[Path]
-PathModified=/etc/musallahboard/kiosk-url
-Unit=musallahboard-kiosk-reload.service
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # Kiosk reload service
-    sudo tee "$UNIT_DIR/musallahboard-kiosk-reload.service" > /dev/null << 'EOF'
-[Unit]
-Description=Reload the MusallahBoard kiosk after the composed URL changed
-Documentation=https://github.com/LensBridge/agent
-After=musallahboard-kiosk.service
-
-[Service]
-Type=oneshot
-ExecStart=/bin/systemctl --no-block try-restart musallahboard-kiosk.service
-EOF
-
-    # Root self-updater: the daemon stages a verified agent package and
-    # creates staged/ready; this re-verifies it as root, swaps the binary,
-    # keeps the new agent on probation and rolls back if it fails. The update
-    # journal in $LIB_DIR also starts it, to finish an interrupted update.
-    sudo tee "$UNIT_DIR/musallahboard-agent-update.path" > /dev/null << 'EOF'
-[Unit]
-Description=Watch for a staged MusallahBoard agent update
-Documentation=https://github.com/LensBridge/agent/blob/main/docs/architecture.md
-
-[Path]
-PathExists=/var/lib/musallahboard/agent/staged/ready
-PathExists=/usr/lib/musallahboard/update-in-progress.json
-Unit=musallahboard-agent-update.service
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    sudo tee "$UNIT_DIR/musallahboard-agent-update.service" > /dev/null << 'EOF'
-[Unit]
-Description=Apply a staged MusallahBoard agent update
-Documentation=https://github.com/LensBridge/agent/blob/main/docs/architecture.md
-After=musallahboard-agent.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/musallahboard-agent selfupdate apply
-TimeoutStartSec=15min
-ProtectSystem=strict
-ReadWritePaths=/usr/bin -/usr/lib/musallahboard /var/lib/musallahboard -/usr/share/musallahboard
-IPAddressDeny=any
-IPAddressAllow=localhost
-ProtectHome=yes
-PrivateTmp=yes
-NoNewPrivileges=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectHostname=yes
-RestrictSUIDSGID=yes
-RestrictRealtime=yes
-RestrictNamespaces=yes
-LockPersonality=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
-UMask=0022
-EOF
-
-    # USB import helper, started by udev for each USB filesystem. Root (it
-    # mounts), no network, read-only system except the inbox.
-    sudo tee "$UNIT_DIR/musallahboard-usb-import@.service" > /dev/null << 'EOF'
-[Unit]
-Description=Import MusallahBoard packages from USB stick %I
-Documentation=https://github.com/LensBridge/agent/blob/main/docs/architecture.md
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/musallahboard-agent usb-import %I
-TimeoutStartSec=20min
-RuntimeDirectory=musallahboard/usb/%I
-RuntimeDirectoryMode=0700
-PrivateNetwork=yes
-ProtectSystem=strict
-ReadWritePaths=/var/lib/musallahboard/inbox
-ProtectHome=yes
-PrivateTmp=yes
-NoNewPrivileges=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-ProtectHostname=yes
-RestrictSUIDSGID=yes
-RestrictRealtime=yes
-RestrictNamespaces=yes
-LockPersonality=yes
-RestrictAddressFamilies=AF_UNIX
-CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER
-UMask=0022
-EOF
-
-    info "Installed systemd units"
-}
-
-# ── Install udev rules ────────────────────────────────────────────────────────
-install_udev_rules() {
-    section "udev rules"
-
-    # KEEP IN SYNC with packaging/udev/.
-    sudo mkdir -p "$UDEV_DIR"
-    sudo tee "$UDEV_DIR/90-musallahboard-usb.rules" > /dev/null << 'EOF'
-# MusallahBoard: import signed update packages (*.mbu) from a USB stick.
-ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z]*", ENV{ID_BUS}=="usb", ENV{ID_FS_USAGE}=="filesystem", ENV{ID_FS_TYPE}=="vfat|exfat|ext4|ntfs|ntfs3", TAG+="systemd", ENV{SYSTEMD_WANTS}+="musallahboard-usb-import@%k.service"
-EOF
-    sudo tee "$UDEV_DIR/90-musallahboard-rtc.rules" > /dev/null << 'EOF'
-# MusallahBoard: let the agent (group musallahdaemon) write the RTC with hwclock.
-SUBSYSTEM=="rtc", KERNEL=="rtc0", GROUP="musallahdaemon", MODE="0660"
-EOF
-    sudo chmod 0644 "$UDEV_DIR/90-musallahboard-usb.rules" "$UDEV_DIR/90-musallahboard-rtc.rules"
-
-    sudo udevadm control --reload || true
-    # Apply the rtc0 permissions now. Not the block subsystem: that would
-    # start an import from a stick that happens to be plugged in.
-    sudo udevadm trigger --subsystem-match=rtc --action=change || true
-
-    # KEEP IN SYNC with packaging/modules-load.d/. The USB helper's sandbox
-    # (ProtectKernelModules=yes) cannot load filesystem drivers, so exFAT and
-    # NTFS sticks need them loaded at boot, and now.
-    sudo mkdir -p /etc/modules-load.d
-    printf '%s\n' \
-        "# MusallahBoard: filesystem drivers for USB update sticks (see setup.sh)." \
-        exfat ntfs3 | sudo tee /etc/modules-load.d/musallahboard.conf > /dev/null
-    sudo chmod 0644 /etc/modules-load.d/musallahboard.conf
-    sudo modprobe exfat 2>/dev/null || warn "Could not load exfat now; exFAT sticks work after a reboot"
-    sudo modprobe ntfs3 2>/dev/null || warn "Could not load ntfs3 now; NTFS sticks work after a reboot"
-    info "USB sticks start musallahboard-usb-import@<dev>.service; rtc0 is writable by $SERVICE_USER"
+# ── System files ──────────────────────────────────────────────────────────────
+# The systemd units, udev rules, sudoers allow-list, modules-load list, kiosk
+# launcher and the kiosk's local page are embedded in the agent binary
+# (packaging/ in the repository), so this script has no copies of them to
+# keep in sync. install-system writes them, removes files earlier versions
+# installed, reloads systemd and udev, and enables the units.
+install_system_files() {
+    section "System files"
+    sudo "$BINARY_DEST" install-system
+    sudo systemctl start musallahboard-agent-update.path
+    info "Units, udev rules, sudoers and kiosk launcher installed from the agent binary"
 }
 
 # ── State directories and trust store ─────────────────────────────────────────
@@ -836,110 +598,6 @@ install_state_dirs() {
         sudo mv -f "$TRUST_PATH.tmp" "$TRUST_PATH"
         info "Created $TRUST_PATH (root 0644, no keys yet)"
     fi
-}
-
-# ── Install kiosk launcher script ─────────────────────────────────────────────
-install_kiosk_launcher() {
-    section "Kiosk launcher"
-
-    sudo tee /usr/bin/start-kiosk.sh > /dev/null << 'LAUNCHER'
-#!/bin/bash
-set -euo pipefail
-
-KIOSK_URL_FILE="/etc/musallahboard/kiosk-url"
-SPLASH="file:///usr/share/musallahboard/waiting.html"
-STARTING="file:///usr/share/musallahboard/starting.html"
-
-URL=""
-if [[ -r "$KIOSK_URL_FILE" ]]; then
-    URL="$(tr -d '[:space:]' < "$KIOSK_URL_FILE")"
-fi
-if [[ -z "$URL" ]]; then
-    URL="$SPLASH"
-elif [[ -r "${STARTING#file://}" ]]; then
-    # Through the local "starting" page, which waits for the agent to answer
-    # instead of leaving Chromium on its "refused to connect" page.
-    URL="${STARTING}#${URL}"
-fi
-
-pick_browser() {
-    local cand
-    for cand in google-chrome-stable google-chrome chromium chromium-browser; do
-        local path
-        path="$(command -v "$cand" 2>/dev/null)" || continue
-        case "$(readlink -f "$path")" in
-            /snap/*) continue ;;
-        esac
-        if head -c4 "$path" | grep -q $'\x7fELF' || file -b "$path" 2>/dev/null | grep -qi 'ELF'; then
-            echo "$path"; return 0
-        fi
-        if ! grep -qi 'snap' "$path" 2>/dev/null; then
-            echo "$path"; return 0
-        fi
-    done
-    return 1
-}
-
-BROWSER="$(pick_browser)" || {
-    echo "start-kiosk: no non-snap browser found" >&2
-    exit 1
-}
-
-PROFILE_DIR="${HOME:-/home/$(id -un)}/.musallahboard-kiosk"
-mkdir -p "$PROFILE_DIR"
-
-exec cage -d -- "$BROWSER" \
-    --ozone-platform=wayland \
-    --disable-dev-shm-usage \
-    --kiosk \
-    --noerrdialogs \
-    --disable-infobars \
-    --disable-session-crashed-bubble \
-    --disable-restore-session-state \
-    --no-first-run \
-    --start-fullscreen \
-    --disable-translate \
-    --disable-features=TranslateUI \
-    --disable-pinch \
-    --overscroll-history-navigation=0 \
-    --check-for-update-interval=31536000 \
-    --enable-features=OverlayScrollbar \
-    --password-store=basic \
-    --user-data-dir="$PROFILE_DIR" \
-    --remote-debugging-port=9222 \
-    --remote-debugging-address=127.0.0.1 \
-    "$URL"
-LAUNCHER
-
-    sudo chmod 0755 /usr/bin/start-kiosk.sh
-    info "Installed /usr/bin/start-kiosk.sh"
-}
-
-# ── Install splash page ───────────────────────────────────────────────────────
-install_splash_page() {
-    section "Splash page"
-    # The page is embedded in the agent binary (packaging/waiting.html), so a
-    # curl|bash setup gets the same bytes as a packaged install, and a
-    # self-update refreshes it. The binary is installed before this runs.
-    sudo "$BINARY_DEST" splash install "$KIOSK_SHARE_DIR/waiting.html"
-    info "Installed $KIOSK_SHARE_DIR/waiting.html"
-}
-
-# ── Enable services ───────────────────────────────────────────────────────────
-enable_services() {
-    section "Enable services"
-
-    sudo systemctl daemon-reload
-    sudo systemctl enable musallahboard-agent.service
-    sudo systemctl enable musallahboard-kiosk.service
-    sudo systemctl enable musallahboard-kiosk-watch.path
-    sudo systemctl enable musallahboard-agent-update.path
-
-    # Start the watchers now: one catches enrollment, the other a staged update
-    sudo systemctl start musallahboard-kiosk-watch.path
-    sudo systemctl start musallahboard-agent-update.path
-
-    info "Services enabled"
 }
 
 # ── Apply appliance policy ────────────────────────────────────────────────────
@@ -1166,29 +824,10 @@ service_port_rtc() {
         info "fake-hwclock not installed"
     fi
 
-    # The ds3231 driver is a module, so the kernel's own boot-time read of the
-    # RTC is over by the time it loads, and udev cannot set the clock itself
-    # (systemd-udevd runs without CAP_SYS_TIME). Instead udev starts a oneshot
-    # unit when rtc0 appears, and that unit reads the RTC. Writing it back is
-    # the agent's job (90-musallahboard-rtc.rules gives it access).
-    sudo tee /etc/udev/rules.d/85-musallahboard-rtc.rules > /dev/null << 'EOF'
-# MusallahBoard: set the system clock from the RTC when it appears.
-ACTION=="add", SUBSYSTEM=="rtc", KERNEL=="rtc0", TAG+="systemd", ENV{SYSTEMD_WANTS}+="musallahboard-rtc.service"
-EOF
-    sudo tee "$UNIT_DIR/musallahboard-rtc.service" > /dev/null << 'EOF'
-[Unit]
-Description=Set the system clock from the RTC (MusallahBoard)
-Documentation=https://github.com/LensBridge/agent
-DefaultDependencies=no
-Before=time-set.target
-Wants=time-set.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/sbin/hwclock --rtc=/dev/rtc0 --hctosys --utc
-EOF
-    sudo systemctl daemon-reload
-    sudo udevadm control --reload
+    # musallahboard-rtc.service reads the RTC when udev sees rtc0 (the
+    # ds3231 driver is a module, so the kernel's own boot-time read is over by
+    # then). Writing it back is the agent's job.
+    sudo "$BINARY_DEST" install-system --rtc
     info "RTC read at boot via musallahboard-rtc.service"
     warn "Reboot once with the RTC fitted. The agent saves the time to it whenever it corrects the clock,"
     warn "for example on the next upload from a laptop (mbpush or http://10.77.0.1/)."
@@ -1282,13 +921,8 @@ main() {
     setup_pi_extras
 
     install_agent_binary
-    install_sudoers
     install_state_dirs
-    install_systemd_units
-    install_udev_rules
-    install_kiosk_launcher
-    install_splash_page
-    enable_services
+    install_system_files
     apply_appliance_policy
 
     print_summary

@@ -51,6 +51,8 @@ func main() {
 		runUSBImport(os.Args[2:])
 	case "splash":
 		runSplash(os.Args[2:])
+	case "install-system":
+		runInstallSystem(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Printf("musallahboard-agent %s\n", version.Version)
 	case "-h", "--help", "help":
@@ -76,6 +78,7 @@ Administration (need sudo):
   musallahboard-agent update now                   Check for a new app or agent and install it now
   musallahboard-agent service-port on|off          eth0 service port + upload server at http://10.77.0.1/
   musallahboard-agent trust show|add|remove|fetch  Keys this board accepts packages from
+  musallahboard-agent install-system [--rtc]       Write the agent's systemd units, udev rules and sudoers file
 
 Run by systemd (root):
   musallahboard-agent selfupdate apply             Install a staged agent update, with rollback
