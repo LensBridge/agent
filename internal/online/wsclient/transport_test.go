@@ -63,8 +63,8 @@ func TestContentChangedFrame(t *testing.T) {
 		c.Write(ctx, websocket.MessageText, []byte(`{"type":"hello","seq":1,"sessionId":"s","challenge":"c"}`))
 		c.Read(ctx) // auth
 		c.Write(ctx, websocket.MessageText, []byte(`{"type":"auth_ok","seq":2,"sessionId":"s","deviceId":"d"}`))
-		c.Write(ctx, websocket.MessageText, []byte(`{"type":"content_changed"}`))
-		c.Write(ctx, websocket.MessageText, []byte(`{"type":"content_changed"}`))
+		c.Write(ctx, websocket.MessageText, []byte(`{"type":"content_changed","seq":3,"sessionId":"s"}`))
+		c.Write(ctx, websocket.MessageText, []byte(`{"type":"content_changed","seq":3,"sessionId":"s"}`))
 		for {
 			if _, _, err := c.Read(ctx); err != nil {
 				return

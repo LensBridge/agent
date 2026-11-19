@@ -254,3 +254,40 @@ func TestProvisionFileMustMatchManifest(t *testing.T) {
 		t.Fatal("provisioned")
 	}
 }
+
+// A setup file made by the backend (LensBridgeBackend's packager, its test
+// content key: seed bytes 0x01..0x20) goes through the real verification and
+// provisioning path. If this fails, the two sides disagree on the format.
+func TestBackendSampleSetupFile(t *testing.T) {
+	pub, _ := base64.StdEncoding.DecodeString("ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=")
+	if trust.KeyID(pub) != "65b60673d6ed884b" {
+		t.Fatalf("key id = %s", trust.KeyID(pub))
+	}
+	path := filepath.Join(t.TempDir(), "agent.toml")
+	live, _ := config.Open(path)
+	ring := trust.NewRing([]ed25519.PublicKey{pub}, nil)
+	im := New(Deps{Layout: store.Layout{Root: t.TempDir()}, Config: live,
+		Ring:       func() (*trust.Ring, error) { return ring, nil },
+		TrustedNow: func() (time.Time, bool) { return time.Time{}, false }})
+	r := one(t, im.Import(context.Background(), SourceUSB, []string{"testdata/sample-provision.mbu"}))
+	if r.Action != ActionInstalled || r.Message != "Set up as North Musallah" {
+		t.Fatalf("result = %+v", r)
+	}
+	c, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := config.Config{DeviceID: "00000000-0000-0000-0000-000000000001", DisplayName: "North Musallah",
+		ProvisionSequence: 1795089600250, BackendURL: "https://api.example.org",
+		ClaimSecret: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE"}
+	if *c != want {
+		t.Fatalf("agent.toml = %+v\nwant %+v", *c, want)
+	}
+
+	// The same file signed by a key the board does not trust is refused.
+	other := New(Deps{Layout: store.Layout{Root: t.TempDir()}, Config: config.InMemory(config.Config{}),
+		Ring: func() (*trust.Ring, error) { return trust.NewRing([]ed25519.PublicKey{contentKey.Public().(ed25519.PublicKey)}, nil), nil }})
+	if r := one(t, other.Import(context.Background(), SourceUSB, []string{"testdata/sample-provision.mbu"})); r.Action != ActionRejected {
+		t.Fatalf("untrusted key: %+v", r)
+	}
+}
