@@ -143,7 +143,7 @@ make mbpack && build/mbpack keygen    # prints a private seed, a public key and 
 - The **private seed** goes in the repository secret `MB_RELEASE_SIGNING_KEY` (and the frontend repo's, for app packages). Keep an offline copy; never commit it.
 - The **public key** goes in the repository variable `MB_RELEASE_PUBLIC_KEYS` (comma-separated, to allow a second key during a rotation). CI compiles it into the agent (`RELEASE_KEYS`), so every board trusts it without any configuration.
 
-Pushing a tag (`0.3.0`) runs `.github/workflows/release.yml`: tests, builds, signs `musallahboard-agent-<version>-<arch>.mbu`, and publishes them with `agent-channel-<arch>.json`, the release tarballs and the `mbpush` binaries. Locally: `MB_RELEASE_SIGNING_KEY=<seed> make package-mbu VERSION=0.3.0 RELEASE_KEYS=<public key>`.
+Pushing a tag (`0.3.0`) runs `.github/workflows/release.yml`: tests, builds, signs `musallahboard-agent-<version>-<arch>.mbu`, and publishes them with `agent-channel-<arch>.json`, the raw agent binaries setup.sh installs, and the `mbpush` binaries. Locally: `MB_RELEASE_SIGNING_KEY=<seed> make package-mbu VERSION=0.3.0 RELEASE_KEYS=<public key>`.
 
 ### Trust management
 

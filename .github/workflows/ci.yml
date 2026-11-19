@@ -58,6 +58,6 @@ jobs:
       - name: Shell syntax
         working-directory: agent
         run: |
-          for f in setup.sh uninstall.sh packaging/*.sh packaging/lib/*.sh; do
+          for f in setup.sh uninstall.sh packaging/*.sh vm/mbvm; do
             bash -n "$f"
           done
