@@ -145,6 +145,7 @@ systemctl reload NetworkManager 2>/dev/null || true
 info "System configurations removed"
 
 # ── Unmask wayvnc ─────────────────────────────────────────────────────────────
+# Boards set up before Raspberry Pi Connect was dropped have it masked.
 section "Restoring masked services"
 
 systemctl unmask wayvnc.service 2>/dev/null || true
@@ -177,7 +178,7 @@ cat << 'EOF'
     - Watchdog, logind, WiFi power-save configs
 
   NOT removed (do manually if needed):
-    - Packages (cage, chromium, rpi-connect, ufw, etc.)
+    - Packages (cage, chromium, ufw, etc.)
     - Admin user and SSH key
     - Hostname and timezone
     - UFW rules other than the service port's

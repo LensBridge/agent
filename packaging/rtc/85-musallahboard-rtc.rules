@@ -1,0 +1,8 @@
+# MusallahBoard: set the system clock from the RTC when it appears
+# (installed by `musallahboard-agent install-system --rtc`, which
+# `setup.sh --service-port --rtc` runs). The ds3231 driver is a module, so the
+# kernel's own boot-time read of the RTC is over by the time it loads, and
+# udev cannot set the clock itself (systemd-udevd runs without CAP_SYS_TIME),
+# so it starts a oneshot unit that does. Writing the RTC back is the agent's
+# job (90-musallahboard-rtc.rules gives it access).
+ACTION=="add", SUBSYSTEM=="rtc", KERNEL=="rtc0", TAG+="systemd", ENV{SYSTEMD_WANTS}+="musallahboard-rtc.service"

@@ -8,9 +8,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/LensBridge/agent/internal/config"
-	"github.com/LensBridge/agent/internal/notice"
-	"github.com/LensBridge/agent/internal/usbimport"
+	"github.com/LensBridge/agent/internal/core/config"
+	"github.com/LensBridge/agent/internal/core/notice"
+	"github.com/LensBridge/agent/internal/core/usbimport"
 )
 
 // runUSBImport is `usb-import <kernel name>` (docs/architecture.md, section
@@ -23,13 +23,13 @@ func runUSBImport(args []string) {
 	}
 	requireRoot("usb-import")
 
+	// An unprovisioned board (no agent.toml) takes sticks too: its setup
+	// file comes on one. An unreadable config does not stop a stick either;
+	// the daemon decides what to install.
 	cfg, err := config.Load(defaultConfigPath)
 	if err != nil {
-		// Not enrolled (or config unreadable): there is no daemon importing
-		// yet, so there is nothing to hand the stick to. Not an error for
-		// the unit; the stick is simply ignored.
-		fmt.Printf("USB import: ignoring %s: this board is not set up yet (%v)\n", args[0], err)
-		return
+		fmt.Printf("USB import: the agent config is unreadable (%v); reading %s anyway\n", err, args[0])
+		cfg = &config.Config{}
 	}
 	if !cfg.USBImport() {
 		fmt.Printf("USB import: ignoring %s: usb_import is off in the agent config\n", args[0])

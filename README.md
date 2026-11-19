@@ -1,6 +1,6 @@
 # MusallahBoard Agent
 
-Go daemon-orchestrator for kiosk devices. Manages Chromium, telemetry, remote commands, and crash recovery.
+The device agent for MusallahBoard kiosk Pis. It serves the board from the Pi's own disk, installs signed update packages from USB sticks, laptops and the network, keeps the clock and the kiosk healthy, and, optionally, connects the board to LensBridge for telemetry and remote commands. A board works fully without a network.
 
 ## Overview
 
@@ -10,10 +10,10 @@ Go daemon-orchestrator for kiosk devices. Manages Chromium, telemetry, remote co
 While working on MusallahBoard, it was quickly discovered that a basic websocket to a chromium instance would not suffice for a production kiosk. Thus, this agent was created
 to manage the kiosk lifecycle, including:
 
-1. Device Enrollment and Identity
-2. Deep(er) Chromium and Wayland Control
-3. Telemetry and Health Monitoring
-4. Remote Command Execution, beyond what the browser can do (reboot, restart kiosk service, tail logs, etc.)
+1. The board's identity, from a signed setup file
+2. Signed content, board app and agent updates, by USB stick or network
+3. Deep(er) Chromium and Wayland control
+4. Optionally: telemetry and remote commands (reboot, restart the kiosk, tail logs, etc.)
 
 By running a daemon as a systemd service, we offload all complexity from the React frontend and keep the kiosk page as simple as possible. This allows the frontend to
 be a memory-efficient React SPA rather than a full Electron app (Under 1Gb total memory usage, incl. OS) while the agent handles heavy lifting in the background.
@@ -30,38 +30,33 @@ be a memory-efficient React SPA rather than a full Electron app (Under 1Gb total
 > [!WARNING]
 > This is your final warning to NOT install the agent on a device that will not act as a 24/7 kiosk! The agent, and related infrastructure, is NOT designed to run on a personal computer!
 
-Installing the agent and setting up related MusallahBoard infrastructure is as simple as 
+### 1. Install
+
+On a fresh Raspberry Pi OS Lite (trixie, arm64), as a user with sudo (not as root), while the Pi has internet:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lensbridge/agent/main/setup.sh | bash
 ```
 
-Or clone the repo and run the script manually:
+It asks for a hostname, an admin username and that admin's SSH public key (the board has no password login; SSH is the maintainer's way in), the time zone, and **LensBridge's content signing public key** (base64, shown in the console; the backend also publishes it at `/api/agent/signing-keys`). The board accepts content and setup files signed by that key only. For an unattended install pass the answers in front of `bash`: `MB_ADMIN_USER=... MB_ADMIN_SSH_KEY="ssh-ed25519 ..." MB_CONTENT_KEY="<base64>"`. Re-running it is safe. Then reboot.
 
-```bash
-git clone https://github.com/LensBridge/agent.git
-cd agent
-./setup.sh        # as a user with sudo, not as root
-```
+The board now shows **"This board is not set up yet. Plug in its setup USB stick."**, with its address for SSH.
 
-Follow the prompts to set the device up (you need an admin username and your SSH public key; the board has no password login), then reboot. For unattended installs, pass them as `MB_ADMIN_USER=... MB_ADMIN_SSH_KEY="ssh-ed25519 ..."` in front of `bash`. Upon reboot, the device will be at a splash screen waiting for enrollment. Once the device has a network connection, that splash also prints its IP address on screen — use it to SSH in without hunting through DHCP leases.
+### 2. Plug in the setup stick
 
-To enroll the device, run:
+In the LensBridge console, add the board (Devices, Add board), then export its setup file or a USB kit (one stick for several boards: setup files, content, the board app and the agent). Copy the files to a USB stick, at its top level or in a `MusallahBoard/` folder, and plug it in. The board takes its identity from its setup file and then everything else on the stick that is for it, and shows "You can remove the USB stick". It needs no network, now or later.
+
+If the setup file was exported for an online board, the board also connects to LensBridge whenever it has internet: it binds its own device key to the board in the console (a one-time claim) and from then on syncs content and takes remote commands. A maintainer can instead enroll with a token from the console:
 
 ```bash
 sudo musallahboard-agent enroll --token=<token> --backend=<backend URL>
-# Easiest: copy the whole command from the admin portal when you issue the token.
 ```
 
-The backend URL must be `https://`, and the WebSocket address the backend hands back must be `wss://` on the same host; the agent refuses anything else, because the enrollment reply pins the keys the board trusts content from. (A development backend on plain http needs `--insecure-dev`; see [Development boards](#development-boards-on-plain-http).)
-
-The device will then be enrolled and the board will load automatically once its first content and board app packages have synced. The device is now ready to be used as a kiosk!
+The backend URL must be `https://`, and the WebSocket address it hands back must be `wss://` on the same host; the agent refuses anything else.
 
 ### Development boards on plain http
 
-For a backend running on your own machine without TLS, add `--insecure-dev` to the enroll command. It is saved in `/etc/musallahboard/agent.toml` as `insecure_dev = true`, and the agent logs a warning at every start while it is on: anyone on that board's network can impersonate the backend. Never use it on a deployed board.
-
-A board enrolled over http before https was required, without `insecure_dev = true`, keeps showing the content it has but no longer talks to the backend (no sync, no update checks, no remote commands). `musallahboard-agent status`, `systemctl status musallahboard-agent` and the journal say why. Re-enroll it over https with `--force`, or, if it is a development board, add `insecure_dev = true` to its `agent.toml` and `sudo systemctl restart musallahboard-agent`.
+For a backend running on your own machine without TLS, add `--insecure-dev` to the enroll command. It is saved in `/etc/musallahboard/agent.toml` as `insecure_dev = true`, and the agent logs a warning at every start while it is on: anyone on that board's network can impersonate the backend. Never use it on a deployed board. A board whose config is not safe to use keeps showing the content it has but does not talk to the backend; `musallahboard-agent status` and the journal say why.
 
 ## Building
 
@@ -88,49 +83,22 @@ provisioned by `setup.sh`, persists between runs, and can be reset to any
 agent release (or a build of this checkout):
 
 ```bash
-vm/mbvm create
-vm/mbvm enroll --token=<token> --backend=http://localhost:8080 --insecure-dev
+MBVM_CONTENT_KEY=<base64> vm/mbvm create
+vm/mbvm usb setup-xxxxxxxx.mbu content-xxxxxxxx.mbu
 vm/mbvm reset --agent=0.2.1
 ```
 
 See [vm/README.md](vm/README.md).
 
-## How a board gets updates (v2)
+## How a board gets updates
 
-Every board renders from its own disk: the kiosk always loads the agent's local server at `http://127.0.0.1:8080/`. Content (payloads and posters), the board app and the agent itself all arrive as signed `.mbu` packages, which the board checks against keys it has pinned before installing anything. The network only changes how fresh the board is. [docs/architecture.md](docs/architecture.md) is the full design and the contract with the backend, the frontend and the Android app.
+Every board renders from its own disk: the kiosk always loads the agent's local server at `http://127.0.0.1:8080/`. Its identity (setup file), content (payloads and posters), the board app and the agent itself all arrive as signed `.mbu` packages, which the board checks against keys it has pinned before installing anything. The network only changes how fresh the board is. [docs/architecture.md](docs/architecture.md) is the full design and the contract with the backend, the board app and the Android app.
 
-### Online boards
-
-Nothing to do. An enrolled board syncs its content from LensBridge every 30 minutes (and straight after an admin changes something), and follows the release channels on GitHub for new board app and agent versions. A new agent is installed by a small root updater that checks it again and rolls it back automatically if it does not start. If the internet drops, the board keeps showing the 7 days of content it already has.
-
-### Boards without internet
-
-Set the board up and enroll it online as usual, then turn on the ethernet service port:
-
-```bash
-sudo musallahboard-agent service-port on
-```
-
-If a DS3231 clock module is fitted, also re-run the setup once with `--rtc`, while the board has internet:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/lensbridge/agent/main/setup.sh | bash -s -- --service-port --rtc
-```
-
-The service port turns the ethernet port into a service port: a laptop or phone plugged straight into it gets an address from the board. Turn it off before plugging the board into a real network: `sudo musallahboard-agent service-port off`.
-
-To update the board, get the packages first, while you have internet:
-
-- content: LensBridge admin, Devices, the board, Download offline bundle (`musallahboard-content-<id>-<date>.mbu`, 14 days)
-- board app and agent: `mbpush fetch` (saves the latest `musallahboard-app-*.mbu` and `musallahboard-agent-*-arm64.mbu`)
-
-Then use any of:
-
-1. **USB stick.** Copy the `.mbu` files to the stick (its root, or a `MusallahBoard/` folder) and plug it into the board. The screen shows progress, and says "You can remove the USB stick" as soon as it has copied what it needs, usually within seconds. One stick can carry content for several boards: each board takes only its own.
-2. **Laptop.** Plug into the board's ethernet port and open `http://10.77.0.1/` in a browser, or run `mbpush <file.mbu>...`. `mbpush status` shows what is installed and how far the board's clock is off; an upload also sets the clock from the laptop's. For a board reachable only over SSH: `mbpush --ssh admin@host <file.mbu>...`.
-3. **Android app.** Downloads the packages while it has signal, then uploads them over a USB ethernet adapter.
-
-On the board itself: `sudo musallahboard-agent import <file.mbu>...` and `sudo musallahboard-agent status`.
+- **USB stick.** Copy `.mbu` files from the console (setup file, content, or a whole USB kit) to a stick and plug it in. One stick can carry packages for many boards: each takes only its own, and only what is newer. Content covers up to 92 days.
+- **Release channels.** Any board with internet follows the GitHub release channels for new board app and agent versions (no enrollment needed) and installs them overnight. A new agent is installed by a small root updater that checks it again and rolls it back if it does not stay up.
+- **Online boards** (claimed or enrolled) also sync their content from LensBridge every 30 minutes and soon after an admin changes something.
+- **Laptop or phone** on the ethernet service port (`sudo musallahboard-agent service-port on`): open `http://10.77.0.1/`, or `mbpush <file.mbu>...`. An upload also sets the board's clock from the laptop's. Turn it off before plugging the board into a real network. A DS3231 clock module: `bash setup.sh --service-port --rtc`.
+- **On the board:** `sudo musallahboard-agent import <file.mbu>...` and `musallahboard-agent status`.
 
 ### Release signing
 
@@ -143,11 +111,11 @@ make mbpack && build/mbpack keygen    # prints a private seed, a public key and 
 - The **private seed** goes in the repository secret `MB_RELEASE_SIGNING_KEY` (and the frontend repo's, for app packages). Keep an offline copy; never commit it.
 - The **public key** goes in the repository variable `MB_RELEASE_PUBLIC_KEYS` (comma-separated, to allow a second key during a rotation). CI compiles it into the agent (`RELEASE_KEYS`), so every board trusts it without any configuration.
 
-Pushing a tag (`0.3.0`) runs `.github/workflows/release.yml`: tests, builds, signs `musallahboard-agent-<version>-<arch>.mbu`, and publishes them with `agent-channel-<arch>.json`, the release tarballs and the `mbpush` binaries. Locally: `MB_RELEASE_SIGNING_KEY=<seed> make package-mbu VERSION=0.3.0 RELEASE_KEYS=<public key>`.
+Pushing a tag (`0.3.0`) runs `.github/workflows/release.yml`: tests, builds, signs `musallahboard-agent-<version>-<arch>.mbu`, and publishes them with `agent-channel-<arch>.json`, the raw agent binaries setup.sh installs, and the `mbpush` binaries. Locally: `MB_RELEASE_SIGNING_KEY=<seed> make package-mbu VERSION=0.3.0 RELEASE_KEYS=<public key>`.
 
 ### Trust management
 
-Keys live in `/etc/musallahboard/trust.json` (root-owned). Content keys are pinned at enrollment; `sudo musallahboard-agent trust fetch` re-reads them from the backend (for example after a key rotation). Release keys are compiled in and can be extended there.
+Keys live in `/etc/musallahboard/trust.json` (root-owned). The content key is pinned by `setup.sh`; `sudo musallahboard-agent trust fetch` re-reads the backend's (for example after a key rotation). Release keys are compiled in and can be extended there.
 
 ```bash
 sudo musallahboard-agent trust show

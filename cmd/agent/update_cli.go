@@ -8,10 +8,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/LensBridge/agent/internal/fsutil"
-	"github.com/LensBridge/agent/internal/importer"
-	"github.com/LensBridge/agent/internal/store"
-	"github.com/LensBridge/agent/internal/updates"
+	"github.com/LensBridge/agent/internal/core/fsutil"
+	"github.com/LensBridge/agent/internal/core/importer"
+	"github.com/LensBridge/agent/internal/core/store"
+	"github.com/LensBridge/agent/internal/core/updates"
 )
 
 // updateWait is how long `update now` waits: a download on a slow link, then

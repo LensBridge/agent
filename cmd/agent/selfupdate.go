@@ -8,7 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/LensBridge/agent/internal/selfupdate"
+	"github.com/LensBridge/agent/internal/core/selfupdate"
 	"github.com/LensBridge/agent/internal/version"
 )
 

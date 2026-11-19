@@ -2,8 +2,9 @@
 # =====================================================
 # MusallahBoard — Raspberry Pi One-Line Installer
 # =====================================================
-# Provisions a fresh Raspberry Pi OS (Debian/trixie, arm64) into a fully
-# configured MusallahBoard kiosk, ready for enrollment.
+# Provisions a fresh Raspberry Pi OS (Debian/trixie, arm64) into a
+# MusallahBoard kiosk. It needs internet once, here; the board never does
+# again.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/lensbridge/agent/main/setup.sh | bash
@@ -11,21 +12,22 @@
 # Or with pre-supplied answers (no prompts):
 #   curl -fsSL ... | MB_HOSTNAME=lobby MB_ADMIN_USER=admin \
 #       MB_TIMEZONE=America/Toronto \
-#       MB_ADMIN_SSH_KEY="ssh-ed25519 AAAA..." bash
+#       MB_ADMIN_SSH_KEY="ssh-ed25519 AAAA..." \
+#       MB_CONTENT_KEY="<base64 content signing public key>" bash
 #
-# After setup completes, enroll the device:
-#   sudo musallahboard-agent enroll --token=<token> --backend=<url>
+# The content signing public key is LensBridge's: the board only accepts
+# content and setup files signed by it. The console shows it (and the backend
+# publishes it at /api/agent/signing-keys).
 #
-# The kiosk shows a "waiting for enrollment" splash until then; once enrolled
-# it shows the board served by the local agent, with no reboot. Every board
-# renders from its own disk and syncs content whenever it has internet
-# (docs/architecture.md).
+# After setup the board shows "This board is not set up yet". Plug in the
+# setup USB stick exported from the LensBridge console (Devices, the board,
+# Setup file or USB kit): the board takes its identity and its content from
+# it, and, if its setup file names a backend, connects when it has internet.
 #
-# Boards without internet: once the board is set up and enrolled, and while
-# it still has internet, run
+# The ethernet service port, where a laptop or phone plugged in can upload
+# signed update packages, is switched on with
 #   bash setup.sh --service-port [--rtc]
-# to provision the ethernet service port, where a laptop or phone plugged in
-# can upload signed update packages. USB sticks work on every board.
+# USB sticks work on every board.
 #
 # Re-running this script is safe.
 # =====================================================
@@ -69,7 +71,7 @@ NTP_SYNC_TIMEOUT_SEC="${NTP_SYNC_TIMEOUT_SEC:-90}"
 # Every prompt can be answered in advance via environment variable. When piped
 # (stdin is the script itself), prompts cannot work — defaults are used.
 #
-#   MB_HOSTNAME  MB_ADMIN_USER  MB_TIMEZONE  MB_ADMIN_SSH_KEY
+#   MB_HOSTNAME  MB_ADMIN_USER  MB_TIMEZONE  MB_ADMIN_SSH_KEY  MB_CONTENT_KEY
 #   MB_ASSUME_YES=1   take the default for anything unset, confirm nothing
 #   MB_REBOOT=auto|never|ask
 MB_ASSUME_YES="${MB_ASSUME_YES:-0}"
@@ -84,14 +86,10 @@ BINARY_DEST=/usr/bin/musallahboard-agent
 # Where this script is published (for the instructions it prints).
 SETUP_URL=https://raw.githubusercontent.com/lensbridge/agent/main/setup.sh
 CONFIG_DIR=/etc/musallahboard
-UNIT_DIR=/lib/systemd/system
-SUDOERS_DEST=/etc/sudoers.d/musallahboard-agent
-KIOSK_SHARE_DIR=/usr/share/musallahboard
 STATE_DIR=/var/lib/musallahboard
 INBOX_DIR=/var/lib/musallahboard/inbox
 LIB_DIR=/usr/lib/musallahboard
 TRUST_PATH=/etc/musallahboard/trust.json
-UDEV_DIR=/etc/udev/rules.d
 # The kiosk always loads the agent's local server (docs/architecture.md, 14).
 KIOSK_URL="http://127.0.0.1:8080/"
 
@@ -117,11 +115,12 @@ Usage: bash setup.sh [options]
   --admin-user=NAME      SSH/sudo account
   --timezone=TZ          e.g. America/Toronto
   --admin-ssh-key=KEY    authorized public key for the admin account
+  --content-key=B64      LensBridge's content signing public key (base64)
   --reboot=auto|never|ask
   --yes, -y              answer every prompt with its default
   -h, --help
 
-Service port (after a normal setup and enrollment, while still online):
+Service port (after a normal setup, while still online):
   --service-port         provision the ethernet service port, where a laptop
                          or phone plugged in can upload update packages, and
                          turn it on; skips the normal setup
@@ -138,6 +137,7 @@ for arg in "$@"; do
         --admin-user=*)    export MB_ADMIN_USER="${arg#*=}" ;;
         --timezone=*)      export MB_TIMEZONE="${arg#*=}" ;;
         --admin-ssh-key=*) export MB_ADMIN_SSH_KEY="${arg#*=}" ;;
+        --content-key=*)   export MB_CONTENT_KEY="${arg#*=}" ;;
         --reboot=*)        export MB_REBOOT="${arg#*=}" ;;
         --yes|-y)          export MB_ASSUME_YES=1 ;;
         --service-port)    SERVICE_PORT=1 ;;
@@ -189,6 +189,12 @@ _confirm() {
     _interactive || return 0
     read -rp "$_prompt" -n 1 _reply < /dev/tty; echo
     [[ $_reply =~ ^[Yy]$ ]]
+}
+
+# valid_content_key: base64 (standard alphabet) of exactly 32 bytes, the format
+# `musallahboard-agent trust add` takes. The agent checks it again.
+valid_content_key() {
+    [[ "$1" =~ ^[A-Za-z0-9+/]{43}=$ ]] && [[ "$(printf '%s' "$1" | base64 -d 2>/dev/null | wc -c)" -eq 32 ]]
 }
 
 # ── Pre-flight checks ─────────────────────────────────────────────────────────
@@ -264,12 +270,27 @@ prompt_config() {
         error "That does not look like an SSH public key (it should start with ssh-ed25519, ssh-rsa or ecdsa-)."
 
     echo
+    CONTENT_KEY="${MB_CONTENT_KEY-}"
+    if [[ -n "$CONTENT_KEY" ]]; then
+        info "Content signing key supplied"
+    elif _interactive; then
+        echo "Paste LensBridge's content signing public key (base64, from the console):"
+        read -rp "> " CONTENT_KEY < /dev/tty
+    fi
+    CONTENT_KEY="$(tr -d '[:space:]' <<< "$CONTENT_KEY")"
+    [[ -n "$CONTENT_KEY" ]] || \
+        error "The content signing public key is required: without it the board accepts no content or setup file. Set MB_CONTENT_KEY."
+    valid_content_key "$CONTENT_KEY" || \
+        error "That is not a content signing public key: it must be the base64 of 32 bytes (44 characters ending in =)."
+
+    echo
     info "Summary"
     printf "  %-18s %s\n" "Hostname:"   "$HOSTNAME"
     printf "  %-18s %s\n" "Admin user:" "$ADMIN_USER  (SSH key auth, passwordless sudo)"
     printf "  %-18s %s\n" "Kiosk user:" "$KIOSK_USER  (auto-login, browser only, no sudo/SSH/shell)"
     printf "  %-18s %s\n" "Kiosk URL:"  "$KIOSK_URL  (served by the agent)"
     printf "  %-18s %s\n" "Timezone:"   "$TIMEZONE"
+    printf "  %-18s %s\n" "Content key:" "$CONTENT_KEY"
     echo
     if ! _confirm "Continue? (y/n): "; then
         exit 0
@@ -286,15 +307,13 @@ install_packages() {
 
     # cage: single-app Wayland kiosk compositor
     # chromium: deb browser (not snap)
-    # rpi-connect: Raspberry Pi Connect for remote access
     local pkgs=(cage chromium ufw unattended-upgrades apt-listchanges curl)
-    # rpi-connect is only in the Raspberry Pi OS archive.
-    [[ "$IS_VM" == "1" ]] || pkgs+=(rpi-connect)
     sudo apt-get install -y "${pkgs[@]}"
 
-    # Purge services that add unnecessary network attack surface
+    # Purge services that add unnecessary network attack surface. Raspberry
+    # Pi Connect was installed by earlier versions of this script.
     info "Purging unnecessary network services..."
-    sudo apt-get purge -y rpcbind nfs-common 2>/dev/null || true
+    sudo apt-get purge -y rpcbind nfs-common rpi-connect rpi-connect-lite 2>/dev/null || true
     sudo apt-mark hold rpcbind nfs-common 2>/dev/null || true
 }
 
@@ -537,7 +556,7 @@ setup_ufw() {
 # ── Pi-specific extras ────────────────────────────────────────────────────────
 setup_pi_extras() {
     if [[ "$IS_VM" == "1" ]]; then
-        info "Virtual machine: no hardware watchdog or Raspberry Pi Connect"
+        info "Virtual machine: no hardware watchdog"
         return
     fi
     section "Hardware watchdog"
@@ -548,13 +567,6 @@ RuntimeWatchdogSec=15
 RebootWatchdogSec=2min
 EOF
     info "Watchdog: systemd pings /dev/watchdog0 every 15s; reboots if it misses"
-
-    section "Raspberry Pi Connect"
-    sudo loginctl enable-linger "$ADMIN_USER"
-    sudo systemctl stop wayvnc.service 2>/dev/null || true
-    sudo systemctl mask wayvnc.service 2>/dev/null || true
-    info "Linger enabled for $ADMIN_USER; system wayvnc.service masked"
-    warn "Post-install: ssh in as $ADMIN_USER and run 'rpi-connect signin'"
 }
 
 # ── Download and install agent binary ─────────────────────────────────────────
@@ -573,251 +585,17 @@ install_agent_binary() {
     info "Installed $BINARY_DEST ($("$BINARY_DEST" version 2>/dev/null || echo 'version unknown'))"
 }
 
-# ── Install sudoers allow-list ────────────────────────────────────────────────
-install_sudoers() {
-    section "Sudoers"
-
-    sudo tee "$SUDOERS_DEST" > /dev/null << 'EOF'
-# musallahboard-agent — privileged commands allow-list
-musallahdaemon ALL=(root) NOPASSWD: /bin/systemctl restart musallahboard-kiosk.service
-musallahdaemon ALL=(root) NOPASSWD: /bin/systemctl reboot
-EOF
-    sudo chmod 0440 "$SUDOERS_DEST"
-    sudo chown root:root "$SUDOERS_DEST"
-
-    # Validate syntax
-    if ! sudo visudo -c -f "$SUDOERS_DEST"; then
-        sudo rm -f "$SUDOERS_DEST"
-        error "Sudoers file failed validation"
-    fi
-    info "Installed $SUDOERS_DEST"
-}
-
-# ── Install systemd units ─────────────────────────────────────────────────────
-install_systemd_units() {
-    section "Systemd units"
-
-    # KEEP IN SYNC with packaging/*.service, *.path and packaging/udev/. This
-    # script is curl|bash'd and has no checkout to copy from, so the units are
-    # inlined here without their comments; the packaged files explain them.
-
-    # Agent service. CAP_SYS_TIME sets the clock (and, with the RTC rule, the
-    # RTC); CAP_NET_BIND_SERVICE is for the upload server on port 80.
-    sudo tee "$UNIT_DIR/musallahboard-agent.service" > /dev/null << 'EOF'
-[Unit]
-Description=MusallahBoard device agent
-Documentation=https://github.com/LensBridge/agent
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=0
-
-[Service]
-Type=notify
-User=musallahdaemon
-Group=musallahdaemon
-ExecStart=/usr/bin/musallahboard-agent run
-Restart=always
-RestartSec=5
-RestartSteps=6
-RestartMaxDelaySec=120
-WatchdogSec=60s
-AmbientCapabilities=CAP_SYS_TIME CAP_NET_BIND_SERVICE
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-StateDirectory=musallahboard
-StateDirectoryMode=0750
-LogsDirectory=musallahboard
-LogsDirectoryMode=0750
-ReadWritePaths=/etc/musallahboard /var/lib/musallahboard /var/log/musallahboard
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-LockPersonality=yes
-RestrictRealtime=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # Kiosk service
-    sudo tee "$UNIT_DIR/musallahboard-kiosk.service" > /dev/null << 'EOF'
-[Unit]
-Description=MusallahBoard kiosk (cage + Chromium)
-Documentation=https://github.com/LensBridge/agent
-After=systemd-user-sessions.service
-After=musallahboard-agent.service
-Wants=musallahboard-agent.service
-After=getty@tty1.service
-Conflicts=getty@tty1.service
-
-[Service]
-Type=simple
-User=musallahkiosk
-PAMName=login
-TTYPath=/dev/tty1
-TTYReset=yes
-TTYVHangup=yes
-TTYVTDisallocate=yes
-StandardInput=tty-fail
-StandardOutput=journal
-StandardError=journal
-UtmpIdentifier=tty1
-UtmpMode=user
-EnvironmentFile=-/etc/musallahboard/kiosk.env
-ExecStart=/usr/bin/start-kiosk.sh
-ExecStopPost=-/usr/bin/pkill -9 -u musallahkiosk -f "google-chrome|chromium"
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # Kiosk URL watcher (path unit)
-    sudo tee "$UNIT_DIR/musallahboard-kiosk-watch.path" > /dev/null << 'EOF'
-[Unit]
-Description=Watch the composed kiosk URL and reload the kiosk on change
-Documentation=https://github.com/LensBridge/agent
-
-[Path]
-PathModified=/etc/musallahboard/kiosk-url
-Unit=musallahboard-kiosk-reload.service
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # Kiosk reload service
-    sudo tee "$UNIT_DIR/musallahboard-kiosk-reload.service" > /dev/null << 'EOF'
-[Unit]
-Description=Reload the MusallahBoard kiosk after the composed URL changed
-Documentation=https://github.com/LensBridge/agent
-After=musallahboard-kiosk.service
-
-[Service]
-Type=oneshot
-ExecStart=/bin/systemctl --no-block try-restart musallahboard-kiosk.service
-EOF
-
-    # Root self-updater: the daemon stages a verified agent package and
-    # creates staged/ready; this re-verifies it as root, swaps the binary,
-    # keeps the new agent on probation and rolls back if it fails. The update
-    # journal in $LIB_DIR also starts it, to finish an interrupted update.
-    sudo tee "$UNIT_DIR/musallahboard-agent-update.path" > /dev/null << 'EOF'
-[Unit]
-Description=Watch for a staged MusallahBoard agent update
-Documentation=https://github.com/LensBridge/agent/blob/main/docs/architecture.md
-
-[Path]
-PathExists=/var/lib/musallahboard/agent/staged/ready
-PathExists=/usr/lib/musallahboard/update-in-progress.json
-Unit=musallahboard-agent-update.service
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    sudo tee "$UNIT_DIR/musallahboard-agent-update.service" > /dev/null << 'EOF'
-[Unit]
-Description=Apply a staged MusallahBoard agent update
-Documentation=https://github.com/LensBridge/agent/blob/main/docs/architecture.md
-After=musallahboard-agent.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/musallahboard-agent selfupdate apply
-TimeoutStartSec=15min
-ProtectSystem=strict
-ReadWritePaths=/usr/bin -/usr/lib/musallahboard /var/lib/musallahboard -/usr/share/musallahboard
-IPAddressDeny=any
-IPAddressAllow=localhost
-ProtectHome=yes
-PrivateTmp=yes
-NoNewPrivileges=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectHostname=yes
-RestrictSUIDSGID=yes
-RestrictRealtime=yes
-RestrictNamespaces=yes
-LockPersonality=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
-UMask=0022
-EOF
-
-    # USB import helper, started by udev for each USB filesystem. Root (it
-    # mounts), no network, read-only system except the inbox.
-    sudo tee "$UNIT_DIR/musallahboard-usb-import@.service" > /dev/null << 'EOF'
-[Unit]
-Description=Import MusallahBoard packages from USB stick %I
-Documentation=https://github.com/LensBridge/agent/blob/main/docs/architecture.md
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/musallahboard-agent usb-import %I
-TimeoutStartSec=20min
-RuntimeDirectory=musallahboard/usb/%I
-RuntimeDirectoryMode=0700
-PrivateNetwork=yes
-ProtectSystem=strict
-ReadWritePaths=/var/lib/musallahboard/inbox
-ProtectHome=yes
-PrivateTmp=yes
-NoNewPrivileges=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-ProtectHostname=yes
-RestrictSUIDSGID=yes
-RestrictRealtime=yes
-RestrictNamespaces=yes
-LockPersonality=yes
-RestrictAddressFamilies=AF_UNIX
-CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER
-UMask=0022
-EOF
-
-    info "Installed systemd units"
-}
-
-# ── Install udev rules ────────────────────────────────────────────────────────
-install_udev_rules() {
-    section "udev rules"
-
-    # KEEP IN SYNC with packaging/udev/.
-    sudo mkdir -p "$UDEV_DIR"
-    sudo tee "$UDEV_DIR/90-musallahboard-usb.rules" > /dev/null << 'EOF'
-# MusallahBoard: import signed update packages (*.mbu) from a USB stick.
-ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z]*", ENV{ID_BUS}=="usb", ENV{ID_FS_USAGE}=="filesystem", ENV{ID_FS_TYPE}=="vfat|exfat|ext4|ntfs|ntfs3", TAG+="systemd", ENV{SYSTEMD_WANTS}+="musallahboard-usb-import@%k.service"
-EOF
-    sudo tee "$UDEV_DIR/90-musallahboard-rtc.rules" > /dev/null << 'EOF'
-# MusallahBoard: let the agent (group musallahdaemon) write the RTC with hwclock.
-SUBSYSTEM=="rtc", KERNEL=="rtc0", GROUP="musallahdaemon", MODE="0660"
-EOF
-    sudo chmod 0644 "$UDEV_DIR/90-musallahboard-usb.rules" "$UDEV_DIR/90-musallahboard-rtc.rules"
-
-    sudo udevadm control --reload || true
-    # Apply the rtc0 permissions now. Not the block subsystem: that would
-    # start an import from a stick that happens to be plugged in.
-    sudo udevadm trigger --subsystem-match=rtc --action=change || true
-
-    # KEEP IN SYNC with packaging/modules-load.d/. The USB helper's sandbox
-    # (ProtectKernelModules=yes) cannot load filesystem drivers, so exFAT and
-    # NTFS sticks need them loaded at boot, and now.
-    sudo mkdir -p /etc/modules-load.d
-    printf '%s\n' \
-        "# MusallahBoard: filesystem drivers for USB update sticks (see setup.sh)." \
-        exfat ntfs3 | sudo tee /etc/modules-load.d/musallahboard.conf > /dev/null
-    sudo chmod 0644 /etc/modules-load.d/musallahboard.conf
-    sudo modprobe exfat 2>/dev/null || warn "Could not load exfat now; exFAT sticks work after a reboot"
-    sudo modprobe ntfs3 2>/dev/null || warn "Could not load ntfs3 now; NTFS sticks work after a reboot"
-    info "USB sticks start musallahboard-usb-import@<dev>.service; rtc0 is writable by $SERVICE_USER"
+# ── System files ──────────────────────────────────────────────────────────────
+# The systemd units, udev rules, sudoers allow-list, modules-load list, kiosk
+# launcher and the kiosk's local page are embedded in the agent binary
+# (packaging/ in the repository), so this script has no copies of them to
+# keep in sync. install-system writes them, removes files earlier versions
+# installed, reloads systemd and udev, and enables the units.
+install_system_files() {
+    section "System files"
+    sudo "$BINARY_DEST" install-system
+    sudo systemctl start musallahboard-agent-update.path
+    info "Units, udev rules, sudoers and kiosk launcher installed from the agent binary"
 }
 
 # ── State directories and trust store ─────────────────────────────────────────
@@ -835,7 +613,8 @@ install_state_dirs() {
     info "$INBOX_DIR ($SERVICE_USER 0770), $LIB_DIR (root 0755)"
 
     # Root-owned, world-readable, never overwritten: it holds the content keys
-    # pinned at enrollment and any release keys an admin added.
+    # pinned here, by `trust fetch` or at enrollment, and any release keys an
+    # admin added.
     if sudo test -e "$TRUST_PATH"; then
         info "Keeping existing $TRUST_PATH"
     else
@@ -847,108 +626,12 @@ install_state_dirs() {
     fi
 }
 
-# ── Install kiosk launcher script ─────────────────────────────────────────────
-install_kiosk_launcher() {
-    section "Kiosk launcher"
-
-    sudo tee /usr/bin/start-kiosk.sh > /dev/null << 'LAUNCHER'
-#!/bin/bash
-set -euo pipefail
-
-KIOSK_URL_FILE="/etc/musallahboard/kiosk-url"
-SPLASH="file:///usr/share/musallahboard/waiting.html"
-STARTING="file:///usr/share/musallahboard/starting.html"
-
-URL=""
-if [[ -r "$KIOSK_URL_FILE" ]]; then
-    URL="$(tr -d '[:space:]' < "$KIOSK_URL_FILE")"
-fi
-if [[ -z "$URL" ]]; then
-    URL="$SPLASH"
-elif [[ -r "${STARTING#file://}" ]]; then
-    # Through the local "starting" page, which waits for the agent to answer
-    # instead of leaving Chromium on its "refused to connect" page.
-    URL="${STARTING}#${URL}"
-fi
-
-pick_browser() {
-    local cand
-    for cand in google-chrome-stable google-chrome chromium chromium-browser; do
-        local path
-        path="$(command -v "$cand" 2>/dev/null)" || continue
-        case "$(readlink -f "$path")" in
-            /snap/*) continue ;;
-        esac
-        if head -c4 "$path" | grep -q $'\x7fELF' || file -b "$path" 2>/dev/null | grep -qi 'ELF'; then
-            echo "$path"; return 0
-        fi
-        if ! grep -qi 'snap' "$path" 2>/dev/null; then
-            echo "$path"; return 0
-        fi
-    done
-    return 1
-}
-
-BROWSER="$(pick_browser)" || {
-    echo "start-kiosk: no non-snap browser found" >&2
-    exit 1
-}
-
-PROFILE_DIR="${HOME:-/home/$(id -un)}/.musallahboard-kiosk"
-mkdir -p "$PROFILE_DIR"
-
-exec cage -d -- "$BROWSER" \
-    --ozone-platform=wayland \
-    --disable-dev-shm-usage \
-    --kiosk \
-    --noerrdialogs \
-    --disable-infobars \
-    --disable-session-crashed-bubble \
-    --disable-restore-session-state \
-    --no-first-run \
-    --start-fullscreen \
-    --disable-translate \
-    --disable-features=TranslateUI \
-    --disable-pinch \
-    --overscroll-history-navigation=0 \
-    --check-for-update-interval=31536000 \
-    --enable-features=OverlayScrollbar \
-    --password-store=basic \
-    --user-data-dir="$PROFILE_DIR" \
-    --remote-debugging-port=9222 \
-    --remote-debugging-address=127.0.0.1 \
-    "$URL"
-LAUNCHER
-
-    sudo chmod 0755 /usr/bin/start-kiosk.sh
-    info "Installed /usr/bin/start-kiosk.sh"
-}
-
-# ── Install splash page ───────────────────────────────────────────────────────
-install_splash_page() {
-    section "Splash page"
-    # The page is embedded in the agent binary (packaging/waiting.html), so a
-    # curl|bash setup gets the same bytes as a packaged install, and a
-    # self-update refreshes it. The binary is installed before this runs.
-    sudo "$BINARY_DEST" splash install "$KIOSK_SHARE_DIR/waiting.html"
-    info "Installed $KIOSK_SHARE_DIR/waiting.html"
-}
-
-# ── Enable services ───────────────────────────────────────────────────────────
-enable_services() {
-    section "Enable services"
-
-    sudo systemctl daemon-reload
-    sudo systemctl enable musallahboard-agent.service
-    sudo systemctl enable musallahboard-kiosk.service
-    sudo systemctl enable musallahboard-kiosk-watch.path
-    sudo systemctl enable musallahboard-agent-update.path
-
-    # Start the watchers now: one catches enrollment, the other a staged update
-    sudo systemctl start musallahboard-kiosk-watch.path
-    sudo systemctl start musallahboard-agent-update.path
-
-    info "Services enabled"
+# ── Content signing key ───────────────────────────────────────────────────────
+# Pinned through the agent's own root-only trust path, which checks the key
+# and the file again and leaves an already trusted key alone.
+pin_content_key() {
+    section "Content signing key"
+    sudo "$BINARY_DEST" trust add content "$CONTENT_KEY" "lensbridge (setup.sh)"
 }
 
 # ── Apply appliance policy ────────────────────────────────────────────────────
@@ -977,25 +660,25 @@ print_summary() {
     cat << EOF
 
   +----------------------------------------------------------+
-  |  Setup complete - device READY FOR ENROLLMENT            |
+  |  Setup complete                                          |
   +----------------------------------------------------------+
 
   Hostname   : $HOSTNAME
   Admin SSH  : ssh $ADMIN_USER@<ip>
   Kiosk URL  : $KIOSK_URL (served by the agent)
 
-  FINAL STEP - enroll this device (once, with a token from the admin UI):
+  FINAL STEP - plug in this board's setup USB stick, exported from the
+  LensBridge console (Devices, the board, Setup file or USB kit). The board
+  takes its identity, content, board app and agent from it; it needs no
+  internet. Until then the screen says "This board is not set up yet" and
+  shows the board's address (the <ip> to SSH to).
 
-    sudo musallahboard-agent enroll \\
-         --token=<one-time-token> --backend=<backend-url>
+  If its setup file names a backend, the board connects to LensBridge by
+  itself whenever it has internet. (Maintainers can still enroll with a
+  token: sudo musallahboard-agent enroll --token=<token> --backend=<url>)
 
-  Until then the kiosk shows the local "waiting" splash, which prints this
-  device's IP address on screen once it has one - that is the <ip> to SSH to.
-  On enrollment the kiosk switches to the board served by the agent, which
-  starts syncing content and downloads the board app within a few minutes.
-
-  A board that will not have internet: after enrolling, turn on the ethernet
-  service port (laptop and phone updates at http://10.77.0.1/):
+  Laptop and phone updates over the ethernet service port
+  (http://10.77.0.1/):
       sudo musallahboard-agent service-port on
   To fit a DS3231 clock module as well, re-run this setup with --rtc:
       curl -fsSL $SETUP_URL | bash -s -- --service-port --rtc
@@ -1029,7 +712,7 @@ EOF
 
 # ══ Service port (setup.sh --service-port) ════════════════════════════════════
 # Everything below runs only with --service-port, on a board that has already
-# been set up and enrolled. See docs/architecture.md, sections 9.5 and 13.
+# been set up. See docs/architecture.md, sections 9.5 and 13.
 # Every step is idempotent: re-running it is safe, and is how you add --rtc
 # later.
 
@@ -1042,9 +725,6 @@ service_port_preflight() {
         error "nmcli not found. The service port needs NetworkManager (the Raspberry Pi OS default)."
     [[ -x "$BINARY_DEST" ]] || \
         error "$BINARY_DEST is not installed. Run the normal setup (without --service-port) first."
-    sudo test -s "$CONFIG_DIR/agent.toml" || \
-        error "This board is not enrolled yet. Enroll it online first:
-       sudo musallahboard-agent enroll --token=<token> --backend=<url>"
 }
 
 service_port_install_packages() {
@@ -1175,29 +855,10 @@ service_port_rtc() {
         info "fake-hwclock not installed"
     fi
 
-    # The ds3231 driver is a module, so the kernel's own boot-time read of the
-    # RTC is over by the time it loads, and udev cannot set the clock itself
-    # (systemd-udevd runs without CAP_SYS_TIME). Instead udev starts a oneshot
-    # unit when rtc0 appears, and that unit reads the RTC. Writing it back is
-    # the agent's job (90-musallahboard-rtc.rules gives it access).
-    sudo tee /etc/udev/rules.d/85-musallahboard-rtc.rules > /dev/null << 'EOF'
-# MusallahBoard: set the system clock from the RTC when it appears.
-ACTION=="add", SUBSYSTEM=="rtc", KERNEL=="rtc0", TAG+="systemd", ENV{SYSTEMD_WANTS}+="musallahboard-rtc.service"
-EOF
-    sudo tee "$UNIT_DIR/musallahboard-rtc.service" > /dev/null << 'EOF'
-[Unit]
-Description=Set the system clock from the RTC (MusallahBoard)
-Documentation=https://github.com/LensBridge/agent
-DefaultDependencies=no
-Before=time-set.target
-Wants=time-set.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/sbin/hwclock --rtc=/dev/rtc0 --hctosys --utc
-EOF
-    sudo systemctl daemon-reload
-    sudo udevadm control --reload
+    # musallahboard-rtc.service reads the RTC when udev sees rtc0 (the
+    # ds3231 driver is a module, so the kernel's own boot-time read is over by
+    # then). Writing it back is the agent's job.
+    sudo "$BINARY_DEST" install-system --rtc
     info "RTC read at boot via musallahboard-rtc.service"
     warn "Reboot once with the RTC fitted. The agent saves the time to it whenever it corrects the clock,"
     warn "for example on the next upload from a laptop (mbpush or http://10.77.0.1/)."
@@ -1291,13 +952,9 @@ main() {
     setup_pi_extras
 
     install_agent_binary
-    install_sudoers
     install_state_dirs
-    install_systemd_units
-    install_udev_rules
-    install_kiosk_launcher
-    install_splash_page
-    enable_services
+    pin_content_key
+    install_system_files
     apply_appliance_policy
 
     print_summary
