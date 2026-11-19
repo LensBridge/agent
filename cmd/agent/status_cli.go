@@ -148,8 +148,6 @@ func kioskShowing() string {
 		return "MusallahBoard"
 	case strings.Contains(u, "starting.html"):
 		return "the starting page, waiting for the agent"
-	case strings.Contains(u, "waiting.html"):
-		return "the enrollment screen"
 	case strings.HasPrefix(u, "chrome-error:"):
 		return "A BROWSER ERROR PAGE (the agent recovers it within a minute)"
 	default:

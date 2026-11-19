@@ -35,7 +35,7 @@ func TestCheckKioskBoardAnswers(t *testing.T) {
 	}
 }
 
-// The enrollment splash (and any frontend older than getStatus) has no hook.
+// The setup screen (and any frontend older than getStatus) has no hook.
 // Chromium is still up, so the kiosk is alive — just not showing a frame.
 func TestCheckKioskSplashIsStillAlive(t *testing.T) {
 	p := &stubProber{err: kiosk.ErrEvalUndefined}

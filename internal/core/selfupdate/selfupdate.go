@@ -435,11 +435,6 @@ func (u *Updater) commit(ctx context.Context, rec *Txn) (Outcome, error) {
 		Message: fmt.Sprintf("Updated the agent from %s to %s", rec.From, rec.To)}
 	err := u.finish(&out)
 	u.crashpoint("committed")
-	// The enrollment splash ships inside the binary; bring it up to date with
-	// it. Best effort: the splash is only seen before enrollment.
-	if o, err := u.Run(context.WithoutCancel(ctx), u.Binary, "splash", "install"); err != nil {
-		u.Logf("could not refresh the enrollment splash: %v %s", err, firstLine(o))
-	}
 	if rerr := removeDurable(u.Txn); rerr != nil {
 		u.Logf("could not remove %s: %v", u.Txn, rerr)
 	}

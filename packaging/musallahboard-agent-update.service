@@ -26,14 +26,13 @@ TimeoutStartSec=15min
 
 # Hardening. It needs to write /usr/bin (the binary), /usr/lib/musallahboard
 # (agent.prev, the journal, update-strikes.json), /var/lib/musallahboard
-# (state.json, agent/last-update.json, agent/staged/ready) and
-# /usr/share/musallahboard (the kiosk pages `splash install` refreshes after
-# an update). It only reads /etc/musallahboard. Its only network use is the
+# (state.json, agent/last-update.json, agent/staged/ready). It only reads
+# /etc/musallahboard. Its only network use is the
 # loopback status check, and it talks to PID 1 over its private socket to
 # restart the agent and read its state, which a read-only /run does not
 # prevent.
 ProtectSystem=strict
-ReadWritePaths=/usr/bin -/usr/lib/musallahboard /var/lib/musallahboard -/usr/share/musallahboard
+ReadWritePaths=/usr/bin -/usr/lib/musallahboard /var/lib/musallahboard
 IPAddressDeny=any
 IPAddressAllow=localhost
 ProtectHome=yes

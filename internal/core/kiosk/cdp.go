@@ -255,7 +255,7 @@ type PageStatus struct {
 // the way ProbeEvaluate does, so the error says what state the kiosk is in:
 //   - nil: the board is up and answered.
 //   - ErrEvalUndefined: a page answered but has no hook — the local
-//     enrollment splash, the update screen, or a frontend build older than
+//     setup screen, the update screen, or a frontend build older than
 //     getStatus(). The page is alive; it just isn't the board.
 //   - ErrPageThrew, ErrPageNavigating: the page is alive.
 //   - ErrPageCrashed, ErrPageUnresponsive: the browser is up and the page is
@@ -380,7 +380,7 @@ func probeReadError(ctx context.Context, op string, err error) error {
 
 // ErrEvalUndefined means the expression resolved to `undefined`. Usually an
 // optional call short-circuiting because the page doesn't implement the hook
-// (an old frontend build, or the local enrollment splash rather than the
+// (an old frontend build, or the local setup screen rather than the
 // board). Callers decide whether that's fatal.
 var ErrEvalUndefined = errors.New("cdp: expression evaluated to undefined")
 

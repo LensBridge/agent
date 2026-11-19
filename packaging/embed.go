@@ -11,7 +11,7 @@ import (
 	"io/fs"
 )
 
-//go:embed *.service *.path start-kiosk.sh starting.html waiting.html udev sudoers.d modules-load.d rtc
+//go:embed *.service *.path start-kiosk.sh starting.html udev sudoers.d modules-load.d rtc
 var files embed.FS
 
 // File is one system file: its name in this directory, where it goes, and
@@ -33,8 +33,6 @@ var Units = []string{
 var System = []File{
 	{"musallahboard-agent.service", "/lib/systemd/system/musallahboard-agent.service", 0o644},
 	{"musallahboard-kiosk.service", "/lib/systemd/system/musallahboard-kiosk.service", 0o644},
-	{"musallahboard-kiosk-watch.path", "/lib/systemd/system/musallahboard-kiosk-watch.path", 0o644},
-	{"musallahboard-kiosk-reload.service", "/lib/systemd/system/musallahboard-kiosk-reload.service", 0o644},
 	{"musallahboard-agent-update.path", "/lib/systemd/system/musallahboard-agent-update.path", 0o644},
 	{"musallahboard-agent-update.service", "/lib/systemd/system/musallahboard-agent-update.service", 0o644},
 	{"musallahboard-usb-import@.service", "/lib/systemd/system/musallahboard-usb-import@.service", 0o644},
@@ -44,7 +42,6 @@ var System = []File{
 	{"modules-load.d/musallahboard.conf", "/etc/modules-load.d/musallahboard.conf", 0o644},
 	{"start-kiosk.sh", "/usr/bin/start-kiosk.sh", 0o755},
 	{"starting.html", "/usr/share/musallahboard/starting.html", 0o644},
-	{"waiting.html", "/usr/share/musallahboard/waiting.html", 0o644},
 }
 
 // RTC is what a board with a DS3231 clock module also gets (--rtc).
@@ -55,7 +52,16 @@ var RTC = []File{
 
 // Obsolete are files earlier versions installed and nothing uses any more;
 // install-system removes them (units are disabled first).
-var Obsolete = []string{}
+var Obsolete = []string{
+	// The kiosk loaded the URL in kiosk-url and was restarted when it
+	// changed; it always loads the local server now.
+	"/lib/systemd/system/musallahboard-kiosk-watch.path",
+	"/lib/systemd/system/musallahboard-kiosk-reload.service",
+	"/etc/musallahboard/kiosk-url",
+	// The enrollment splash; an unprovisioned board's screen is served by
+	// the local server now.
+	"/usr/share/musallahboard/waiting.html",
+}
 
 // Read returns the embedded file named name.
 func Read(name string) ([]byte, error) { return files.ReadFile(name) }

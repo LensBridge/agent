@@ -17,7 +17,6 @@ import (
 	"github.com/LensBridge/agent/internal/core/events"
 	"github.com/LensBridge/agent/internal/core/importer"
 	"github.com/LensBridge/agent/internal/core/kiosk"
-	"github.com/LensBridge/agent/internal/core/kioskurl"
 	"github.com/LensBridge/agent/internal/core/localserver"
 	"github.com/LensBridge/agent/internal/core/notice"
 	"github.com/LensBridge/agent/internal/core/selfupdate"
@@ -101,10 +100,6 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Live, wg *
 		}
 	})
 
-	// Only now can the kiosk find something at the URL it is given.
-	if err := kioskurl.WriteLocal(kioskurl.DefaultOutPath); err != nil {
-		logger.Warn("could not write kiosk url", "err", err)
-	}
 	_, _ = daemon.SdNotify(false, daemon.SdNotifyReady)
 	_, _ = daemon.SdNotify(false, "STATUS=serving the board on "+localserver.ListenAddr)
 

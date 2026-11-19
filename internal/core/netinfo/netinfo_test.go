@@ -18,7 +18,7 @@ func TestRoutableIPv4DropsLinkLocal(t *testing.T) {
 		},
 		{
 			// A 169.254.x address means DHCP never answered. Nothing on the LAN
-			// can reach it, so it must never reach the enrollment splash.
+			// can reach it, so it must never reach the setup screen.
 			name: "drops apipa",
 			in:   []string{"169.254.11.9", "192.168.1.42"},
 			want: []string{"192.168.1.42"},

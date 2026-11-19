@@ -63,7 +63,7 @@ func IPv4Addrs() []string {
 
 // routableIPv4 drops 169.254.0.0/16. A link-local address means DHCP never
 // answered: the interface is "up" and the box has an IP, but nothing on the
-// LAN can reach it. Printing one on the enrollment splash would send an
+// LAN can reach it. Printing one on the setup screen would send an
 // operator off to SSH into an address that cannot work.
 func routableIPv4(ips []string) []string {
 	var out []string

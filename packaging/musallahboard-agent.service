@@ -55,8 +55,8 @@ PrivateTmp=yes
 
 # systemd creates and chowns these to User= on every start, so the installer
 # does not have to. /etc/musallahboard is NOT listed here on purpose: these
-# directories appear only when the service first starts, and `enroll` has to
-# be able to write agent.toml/agent.key before that has ever happened. The
+# directories appear only when the service first starts, and `enroll` or
+# `service-port` may write agent.toml before that has ever happened. The
 # installer creates the config dir itself for that reason.
 StateDirectory=musallahboard
 StateDirectoryMode=0750
@@ -65,8 +65,9 @@ LogsDirectoryMode=0750
 
 # Redundant with the two directives above (systemd makes those writable even
 # under ProtectSystem=strict) but kept explicit for /etc/musallahboard, which
-# is not managed by a *Directory= directive. The daemon writes kiosk-url there
-# (write .tmp, rename), so the directory has to stay writable.
+# is not managed by a *Directory= directive. The daemon writes agent.toml there
+# when it applies a setup file or completes a claim, and agent.key when it
+# claims (write .tmp, rename), so the directory has to stay writable.
 #
 # Writable here means "not read-only mounted", nothing more: ordinary
 # permissions still apply. trust.json in the same directory is root:root 0644,

@@ -11,7 +11,7 @@ import (
 )
 
 // checkRootOwned refuses a trust store the daemon could have planted.
-// /etc/musallahboard is writable by the daemon (it writes kiosk-url), so it
+// /etc/musallahboard is writable by the daemon (it writes agent.toml), so it
 // could unlink trust.json and put its own file there; that file would be
 // owned by the daemon, not root. Hard links to someone else's file are
 // caught by the link count. Run unprivileged (tests, a dev box) there is no

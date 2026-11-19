@@ -124,7 +124,7 @@ func TestPageStatusBoardAnswers(t *testing.T) {
 	}
 }
 
-// The splash, the update screen and old board apps have no getStatus().
+// The setup screen, the update screen and old board apps have no getStatus().
 func TestPageStatusNoHook(t *testing.T) {
 	f := newFakeChrome(t, healthy(nil))
 	if _, err := f.client().PageStatus(probeCtx(t)); !errors.Is(err, ErrEvalUndefined) {

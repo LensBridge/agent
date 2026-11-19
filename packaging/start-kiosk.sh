@@ -8,10 +8,11 @@
 # at which point systemd (Restart=always) bounces us. This replaces the old
 # lightdm + labwc autologin stack: one systemd unit == the whole display.
 #
-# The agent writes the URL to KIOSK_URL_FILE once the device is enrolled:
-# its own local server, http://127.0.0.1:8080/. Until then the file is
-# absent and we show the local "waiting for enrollment" splash; the kiosk
-# .path watcher restarts us when the agent writes it.
+# The kiosk always shows the agent's local server, http://127.0.0.1:8080/,
+# provisioned or not (an unprovisioned board serves its "not set up yet"
+# screen there). It opens it through the local starting.html, which waits for
+# the agent to answer: loading the agent's URL while it is down would leave
+# Chromium on its own "refused to connect" page.
 #
 # Browser: we must NOT use a snap. Snap Chromium runs in its own snapd cgroup
 # scope, so it survives `systemctl restart`
@@ -21,22 +22,12 @@
 # leftover /usr/bin/chromium-browser snap stub.
 set -euo pipefail
 
-KIOSK_URL_FILE="/etc/musallahboard/kiosk-url"
-SPLASH="file:///usr/share/musallahboard/waiting.html"
+BOARD="http://127.0.0.1:8080/"
+STARTING="/usr/share/musallahboard/starting.html"
 
-STARTING="file:///usr/share/musallahboard/starting.html"
-
-URL=""
-if [[ -r "$KIOSK_URL_FILE" ]]; then
-    URL="$(tr -d '[:space:]' < "$KIOSK_URL_FILE")"
-fi
-if [[ -z "$URL" ]]; then
-    URL="$SPLASH"
-elif [[ -r "${STARTING#file://}" ]]; then
-    # Open the board through the local "starting" page, which waits for the
-    # agent to answer: loading the agent's URL while it is down would leave
-    # Chromium on its own "refused to connect" page.
-    URL="${STARTING}#${URL}"
+URL="$BOARD"
+if [[ -r "$STARTING" ]]; then
+    URL="file://${STARTING}#${BOARD}"
 fi
 
 # Resolve a real (non-snap) browser. A snap shim is a tiny shell script that

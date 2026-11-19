@@ -49,8 +49,6 @@ func main() {
 		runSelfUpdate(os.Args[2:])
 	case "usb-import":
 		runUSBImport(os.Args[2:])
-	case "splash":
-		runSplash(os.Args[2:])
 	case "install-system":
 		runInstallSystem(os.Args[2:])
 	case "version", "-v", "--version":
@@ -83,7 +81,6 @@ Administration (need sudo):
 Run by systemd (root):
   musallahboard-agent selfupdate apply             Install a staged agent update, with rollback
   musallahboard-agent usb-import <device>          Copy update packages from a USB stick
-  musallahboard-agent splash install [path]        Install the enrollment splash page
 
 Enroll flags:
   --token     One-time enrollment token from the admin portal

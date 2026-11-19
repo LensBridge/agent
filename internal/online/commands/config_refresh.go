@@ -7,13 +7,11 @@ import (
 	"fmt"
 
 	"github.com/LensBridge/agent/internal/core/kiosk"
-	"github.com/LensBridge/agent/internal/core/kioskurl"
 )
 
 // ConfigRefresh pulls fresh content and repaints the board in place, with no
-// reload, so the screen never flashes. It re-asserts the on-disk kiosk URL
-// (the local server), asks the content syncer for a sync, and asks the live
-// page to re-fetch its payload.
+// reload, so the screen never flashes. It asks the content syncer for a sync,
+// and the live page to re-fetch its payload.
 //
 // The page contract is `window.MusallahBoard.refresh()` (see the frontend's
 // src/App.jsx), which resolves to {ok, deviceId, at | error}. The page learns
@@ -51,10 +49,6 @@ func (h *ConfigRefresh) Execute(ctx context.Context, _ json.RawMessage, progress
 	if h.Before != nil {
 		h.Before()
 	}
-	if err := kioskurl.WriteLocal(kioskurl.DefaultOutPath); err != nil {
-		progress("warn", "kiosk url not rewritten: "+err.Error(), nil)
-	}
-
 	progress("evaluating", "window.MusallahBoard.refresh()", nil)
 
 	var res pageResult
@@ -64,7 +58,7 @@ func (h *ConfigRefresh) Execute(ctx context.Context, _ json.RawMessage, progress
 	// portal: the board sat on stale content while the dashboard said
 	// SUCCEEDED.
 	if errors.Is(err, kiosk.ErrEvalUndefined) {
-		return nil, fmt.Errorf("kiosk page returned nothing: it is not the board (splash or update screen?)")
+		return nil, fmt.Errorf("kiosk page returned nothing: it is not the board (setup screen or update screen?)")
 	}
 	if err != nil {
 		return nil, err

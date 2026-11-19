@@ -261,7 +261,7 @@ func TestApplyOK(t *testing.T) {
 	if took := h.now.Sub(start); took < ProbationPeriod {
 		t.Errorf("committed after %s, before the probation was over", took)
 	}
-	if h.count("systemctl restart "+AgentUnit) != 1 || h.count("musallahboard-agent splash install") != 1 {
+	if h.count("systemctl restart "+AgentUnit) != 1 {
 		t.Errorf("commands = %q", h.cmds)
 	}
 	if h.cmds[0] != ".musallahboard-agent.new version" {

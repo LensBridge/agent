@@ -153,7 +153,7 @@ func readDiskUsedPct() (float64, error) {
 //
 // The systemd unit is Restart=always, so `is-active` says "active" almost
 // unconditionally — including while Chromium is crash-looping, parked on the
-// enrollment splash, or showing a crashed tab ("Aw, Snap!"). Ask the browser
+// setup screen, or showing a crashed tab ("Aw, Snap!"). Ask the browser
 // instead, and fall back to the unit state only when there is no browser to
 // ask (no CDP port, browser still starting, or a build without
 // --remote-debugging-port).
@@ -175,7 +175,7 @@ func checkKiosk(ctx context.Context, prober PageProber) (alive bool, frameID str
 			errors.Is(err, kiosk.ErrPageThrew),
 			errors.Is(err, kiosk.ErrPageNavigating):
 			// A page answered (or is between documents) but isn't the board:
-			// the splash, the update screen, a frontend too old to expose
+			// the setup screen, the update screen, a frontend too old to expose
 			// getStatus(), or a reload in flight. The browser is up.
 			return true, ""
 		case errors.Is(err, kiosk.ErrPageCrashed), errors.Is(err, kiosk.ErrPageUnresponsive):
