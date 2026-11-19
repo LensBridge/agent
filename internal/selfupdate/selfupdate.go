@@ -390,7 +390,18 @@ func (u *Updater) startProbation(ctx context.Context, rec *Txn, resumed bool) (O
 	}
 	u.crashpoint("probation")
 
-	if !resumed {
+	restart := !resumed
+	if resumed {
+		// A run that stopped after the swap but before the restart, then
+		// resumed without a reboot, leaves the previous agent running. Only an
+		// agent that already reports the new version is left alone; one that
+		// is still starting is the installed (new) binary, so restarting it
+		// costs nothing.
+		if st, err := u.Status(ctx); err != nil || st.AgentVersion != rec.To {
+			restart = true
+		}
+	}
+	if restart {
 		u.Logf("restarting %s", AgentUnit)
 		if o, err := u.Run(ctx, "systemctl", "restart", AgentUnit); err != nil {
 			if ctx.Err() != nil {

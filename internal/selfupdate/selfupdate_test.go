@@ -746,3 +746,26 @@ func TestFetchStatus(t *testing.T) {
 		t.Error("connected backend not up")
 	}
 }
+
+// A run stopped after the swap and resumed without a reboot finds the
+// previous agent still running. It must start the new one, not wait for a
+// version that never comes and then reject a good release.
+func TestResumeWithoutRebootStartsTheNewAgent(t *testing.T) {
+	h := newHarness(t, true)
+	h.stage(t, "0.4.0", "arm64", releaseKey)
+	cutAt(t, h, "swapped")
+	if h.isNew() {
+		t.Fatal("harness: the new agent runs before any restart")
+	}
+	u := &Updater{Layout: h.u.Layout, TrustPath: h.u.TrustPath, Binary: h.u.Binary, NewBinary: h.u.NewBinary,
+		Prev: h.u.Prev, TempRoot: h.u.TempRoot, Arch: h.u.Arch, CurrentVersion: h.agent.version, Logf: t.Logf}
+	h.wire(u)
+	u.defaults()
+	out, err := u.Apply(context.Background())
+	if err != nil || out.Status != StatusOK {
+		t.Fatalf("outcome = %+v, err = %v", out, err)
+	}
+	if rejected(t, u, "0.4.0") {
+		t.Error("a good release was rejected")
+	}
+}
