@@ -60,6 +60,9 @@ const (
 	TypeContent Type = "content"
 	TypeApp     Type = "app"
 	TypeAgent   Type = "agent"
+	// TypeProvision is a setup file: a board's identity and, optionally, its
+	// backend (provision.go). Signed by a content key.
+	TypeProvision Type = "provision"
 )
 
 // File is one entry of the manifest's files list.
@@ -154,6 +157,8 @@ func (m *Manifest) Describe() string {
 		return "board app " + m.Version
 	case TypeAgent:
 		return "agent " + m.Version
+	case TypeProvision:
+		return "setup file for " + m.DeviceID
 	}
 	return string(m.Type)
 }
@@ -293,8 +298,10 @@ func ParseManifest(raw []byte) (*Manifest, error) {
 		err = m.checkApp()
 	case TypeAgent:
 		err = m.checkAgent()
+	case TypeProvision:
+		err = m.checkProvision()
 	default:
-		err = fmt.Errorf("mbu.json type %q is not content, app or agent", m.Type)
+		err = fmt.Errorf("mbu.json type %q is not content, app, agent or provision", m.Type)
 	}
 	if err != nil {
 		return nil, err

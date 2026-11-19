@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"github.com/LensBridge/agent/internal/core/config"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/LensBridge/agent/internal/core/config"
 	"github.com/LensBridge/agent/internal/core/mbu"
 	"github.com/LensBridge/agent/internal/core/notice"
 	"github.com/LensBridge/agent/internal/core/store"

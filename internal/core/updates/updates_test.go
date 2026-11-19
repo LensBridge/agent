@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"github.com/LensBridge/agent/internal/core/config"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/LensBridge/agent/internal/core/config"
 	"github.com/LensBridge/agent/internal/core/importer"
 	"github.com/LensBridge/agent/internal/core/mbu"
 	"github.com/LensBridge/agent/internal/core/state"

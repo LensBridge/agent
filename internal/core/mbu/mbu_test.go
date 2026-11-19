@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -289,4 +291,42 @@ func TestKeyIDVector(t *testing.T) {
 		t.Fatalf("key id %q", id)
 	}
 	t.Logf("seed 0x01..0x20 -> keyId %s", id)
+}
+
+func TestProvisionManifestRules(t *testing.T) {
+	base := `{"format":"mbu","formatVersion":2,"type":"provision","createdAt":"2026-11-19T12:00:00Z","sequence":5,"deviceId":"` + testDevice + `","files":[%s]}`
+	one := `{"path":"provision.json","sha256":"` + strings.Repeat("a", 64) + `","bytes":10}`
+	if _, err := ParseManifest([]byte(fmt.Sprintf(base, one))); err != nil {
+		t.Fatalf("valid provision manifest: %v", err)
+	}
+	two := one + `,{"path":"run.sh","sha256":"` + strings.Repeat("b", 64) + `","bytes":10}`
+	if _, err := ParseManifest([]byte(fmt.Sprintf(base, two))); err == nil {
+		t.Fatal("a provision package with another file was accepted")
+	}
+	if RoleFor(TypeProvision) != trust.RoleContent {
+		t.Fatal("setup files must be signed by a content key, never a release key")
+	}
+}
+
+func TestParseProvision(t *testing.T) {
+	m := &Manifest{DeviceID: testDevice, Sequence: 5}
+	secret := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
+	ok := func(s string) bool { _, err := ParseProvision([]byte(s), m); return err == nil }
+	id := `"deviceId":"` + testDevice + `","sequence":5`
+	for s, want := range map[string]bool{
+		`{"format":1,` + id + `,"displayName":"N"}`:                                                      true,
+		`{"format":1,` + id + `,"backendUrl":"https://api.example.org","claimSecret":"` + secret + `"}`:  true,
+		`{"format":1,` + id + `,"backendUrl":"https://api.example.org","claimSecret":"` + secret + `="}`: true,
+		`{"format":1,` + id + `,"backendUrl":"https://api.example.org"}`:                                 false,
+		`{"format":1,` + id + `,"claimSecret":"` + secret + `"}`:                                         false,
+		`{"format":1,` + id + `,"backendUrl":"ftp://x","claimSecret":"` + secret + `"}`:                  false,
+		`{"format":1,` + id + `,"backendUrl":"https://api.example.org","claimSecret":"short"}`:           false,
+		`{"format":2,` + id + `}`:                                                     false,
+		`{"format":1,"deviceId":"` + testDevice + `","sequence":6}`:                   false,
+		`{"format":1,"deviceId":"00000000-0000-0000-0000-000000000001","sequence":5}`: false,
+	} {
+		if got := ok(s); got != want {
+			t.Errorf("%s: ok = %v, want %v", s, got, want)
+		}
+	}
 }

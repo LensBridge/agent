@@ -28,9 +28,11 @@ type KeyRing interface {
 	Keys(role trust.Role) map[string]ed25519.PublicKey
 }
 
-// RoleFor is the key role that may sign packages of type t.
+// RoleFor is the key role that may sign packages of type t. Content keys sign
+// what the backend makes (content and setup files); everything else is
+// software and needs a release key.
 func RoleFor(t Type) trust.Role {
-	if t == TypeContent {
+	if t == TypeContent || t == TypeProvision {
 		return trust.RoleContent
 	}
 	return trust.RoleRelease

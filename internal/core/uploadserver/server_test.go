@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/json"
-	"github.com/LensBridge/agent/internal/core/config"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/LensBridge/agent/internal/core/config"
 	"github.com/LensBridge/agent/internal/core/importer"
 	"github.com/LensBridge/agent/internal/core/mbu"
 	"github.com/LensBridge/agent/internal/core/store"

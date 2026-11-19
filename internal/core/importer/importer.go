@@ -223,14 +223,18 @@ type item struct {
 	peek *mbu.Manifest // unverified; ordering and screen only
 }
 
+// rank orders a batch: a setup file first (it decides which board this is,
+// and so which content is for it), then the agent, the app and content.
 func rank(t mbu.Type) int {
 	switch t {
-	case mbu.TypeAgent:
+	case mbu.TypeProvision:
 		return 0
-	case mbu.TypeApp:
+	case mbu.TypeAgent:
 		return 1
+	case mbu.TypeApp:
+		return 2
 	}
-	return 2
+	return 3
 }
 
 // progressLine says where a batch someone brought came from.
@@ -273,6 +277,7 @@ func (im *Importer) run(ctx context.Context, src Source, files []string) Batch {
 		im.d.Screen.Caption(ctx, caption)
 	}
 
+	ambiguous := im.ambiguousSetup(items)
 	ring, ringErr := im.d.Ring()
 	for _, it := range items {
 		name := filepath.Base(it.path)
@@ -280,8 +285,14 @@ func (im *Importer) run(ctx context.Context, src Source, files []string) Batch {
 			b.Results = append(b.Results, im.requeue(it.path, name))
 			continue
 		}
-		if it.peek != nil && it.peek.Type == mbu.TypeContent && it.peek.DeviceID != "" && it.peek.DeviceID != im.deviceID() {
-			b.Results = append(b.Results, skippedForeign(name))
+		if ambiguous && peekType(it) == mbu.TypeProvision {
+			b.Results = append(b.Results, Result{File: name, Type: mbu.TypeProvision, Action: ActionRejected,
+				Message: "This USB stick sets up more than one board: use a stick with only this board's setup file",
+				Detail:  "setup files for several devices in one batch on an unprovisioned board"})
+			continue
+		}
+		if foreign(it.peek, im.deviceID()) {
+			b.Results = append(b.Results, skippedForeign(name, it.peek.Type))
 			continue
 		}
 		var r Result
@@ -353,8 +364,38 @@ func Summarize(b Batch) notice.Notice {
 	return notice.New(notice.Neutral, "No updates found")
 }
 
-func skippedForeign(name string) Result {
-	return Result{File: name, Type: mbu.TypeContent, Action: ActionSkipped, Message: "Content for another board"}
+func skippedForeign(name string, t mbu.Type) Result {
+	msg := "Content for another board"
+	if t == mbu.TypeProvision {
+		msg = "Setup file for another board"
+	}
+	return Result{File: name, Type: t, Action: ActionSkipped, Message: msg}
+}
+
+// foreign reports whether a package's (unverified) manifest says it is bound
+// to another board. Skipping on it is safe: a lie only makes the board ignore
+// a package. A setup file is foreign only to a board that has an identity.
+func foreign(m *mbu.Manifest, deviceID string) bool {
+	if m == nil || m.DeviceID == "" || m.DeviceID == deviceID {
+		return false
+	}
+	return m.Type == mbu.TypeContent || (m.Type == mbu.TypeProvision && deviceID != "")
+}
+
+// ambiguousSetup reports whether an unprovisioned board was handed setup
+// files for more than one device at once (a USB kit for several boards). It
+// takes none of them rather than whichever comes first.
+func (im *Importer) ambiguousSetup(items []item) bool {
+	if im.deviceID() != "" {
+		return false
+	}
+	ids := map[string]bool{}
+	for _, it := range items {
+		if it.peek != nil && it.peek.Type == mbu.TypeProvision {
+			ids[it.peek.DeviceID] = true
+		}
+	}
+	return len(ids) > 1
 }
 
 func peekType(it item) mbu.Type {
@@ -397,9 +438,12 @@ func (im *Importer) one(ctx context.Context, src Source, path, name string, ring
 	now := im.d.Now()
 
 	switch m.Type {
+	case mbu.TypeProvision:
+		return im.provision(pkg, res, show)
+
 	case mbu.TypeContent:
 		if m.DeviceID != im.deviceID() {
-			return skippedForeign(name)
+			return skippedForeign(name, m.Type)
 		}
 		switch {
 		case m.Sequence < st.ContentSequence:
@@ -505,6 +549,8 @@ func describe(m *mbu.Manifest) string {
 		return "board app " + m.Version
 	case mbu.TypeAgent:
 		return "agent " + m.Version
+	case mbu.TypeProvision:
+		return "this board's settings"
 	}
 	return "update"
 }

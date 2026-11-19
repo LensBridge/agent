@@ -5,8 +5,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
-	"github.com/LensBridge/agent/internal/core/clock"
-	"github.com/LensBridge/agent/internal/core/config"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/LensBridge/agent/internal/core/clock"
+	"github.com/LensBridge/agent/internal/core/config"
 	"github.com/LensBridge/agent/internal/core/importer"
 	"github.com/LensBridge/agent/internal/core/mbu"
 	"github.com/LensBridge/agent/internal/core/store"
