@@ -150,7 +150,7 @@ All are environment variables:
   board can go back to an older version, which a real board, updated only
   through signed packages, never does.
 - **VM detection.** `setup.sh` notices it is in a VM. It then accepts amd64
-  as well as arm64, and skips the Pi-only steps (Raspberry Pi Connect and the
-  hardware watchdog). The kiosk uses software rendering.
+  as well as arm64, and skips the Pi-only step (the hardware watchdog).
+  The kiosk uses software rendering.
 - **What a VM cannot do.** There is no ethernet service port, no RTC, and no
   real display hardware. Test those on a Pi.

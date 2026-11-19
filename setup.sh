@@ -286,15 +286,13 @@ install_packages() {
 
     # cage: single-app Wayland kiosk compositor
     # chromium: deb browser (not snap)
-    # rpi-connect: Raspberry Pi Connect for remote access
     local pkgs=(cage chromium ufw unattended-upgrades apt-listchanges curl)
-    # rpi-connect is only in the Raspberry Pi OS archive.
-    [[ "$IS_VM" == "1" ]] || pkgs+=(rpi-connect)
     sudo apt-get install -y "${pkgs[@]}"
 
-    # Purge services that add unnecessary network attack surface
+    # Purge services that add unnecessary network attack surface. Raspberry
+    # Pi Connect was installed by earlier versions of this script.
     info "Purging unnecessary network services..."
-    sudo apt-get purge -y rpcbind nfs-common 2>/dev/null || true
+    sudo apt-get purge -y rpcbind nfs-common rpi-connect rpi-connect-lite 2>/dev/null || true
     sudo apt-mark hold rpcbind nfs-common 2>/dev/null || true
 }
 
@@ -537,7 +535,7 @@ setup_ufw() {
 # ── Pi-specific extras ────────────────────────────────────────────────────────
 setup_pi_extras() {
     if [[ "$IS_VM" == "1" ]]; then
-        info "Virtual machine: no hardware watchdog or Raspberry Pi Connect"
+        info "Virtual machine: no hardware watchdog"
         return
     fi
     section "Hardware watchdog"
@@ -548,13 +546,6 @@ RuntimeWatchdogSec=15
 RebootWatchdogSec=2min
 EOF
     info "Watchdog: systemd pings /dev/watchdog0 every 15s; reboots if it misses"
-
-    section "Raspberry Pi Connect"
-    sudo loginctl enable-linger "$ADMIN_USER"
-    sudo systemctl stop wayvnc.service 2>/dev/null || true
-    sudo systemctl mask wayvnc.service 2>/dev/null || true
-    info "Linger enabled for $ADMIN_USER; system wayvnc.service masked"
-    warn "Post-install: ssh in as $ADMIN_USER and run 'rpi-connect signin'"
 }
 
 # ── Download and install agent binary ─────────────────────────────────────────
