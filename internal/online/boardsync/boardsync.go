@@ -1,7 +1,7 @@
-// Package boardsync keeps an online board's local state fresh from the
-// network (docs/architecture.md, sections 7 and 9): content from the
-// LensBridge backend, the live weather overlay, and new board app and agent
-// releases from the release channels.
+// Package boardsync keeps an enrolled board's content fresh from the
+// LensBridge backend (docs/architecture.md, sections 7 and 9): the content
+// package and the live weather overlay. (New board app and agent releases
+// come from the release channels, package updates, which need no backend.)
 //
 // Nothing here is trusted. Everything that changes the board arrives as a
 // signed package and goes through the same importer as a USB stick or an
@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -26,9 +25,12 @@ import (
 	"time"
 
 	"github.com/LensBridge/agent/internal/core/config"
+	"github.com/LensBridge/agent/internal/core/fsutil"
 	"github.com/LensBridge/agent/internal/core/importer"
 	"github.com/LensBridge/agent/internal/core/mbu"
+	"github.com/LensBridge/agent/internal/core/netinfo"
 	"github.com/LensBridge/agent/internal/core/store"
+	"github.com/LensBridge/agent/internal/online/devauth"
 )
 
 // Timings from the contract. They are fields on the Syncer (set from these in
@@ -40,14 +42,6 @@ const (
 	ContentMaxBackoff = 30 * time.Minute
 	WeatherInterval   = 30 * time.Minute
 	WeatherMaxAge     = 3 * time.Hour
-	ChannelFirstDelay = 2 * time.Minute
-	ChannelInterval   = 6 * time.Hour
-	// ChannelRetry is the first retry after a failed channel check. It
-	// doubles on each failure, up to ChannelInterval.
-	ChannelRetry = 5 * time.Minute
-	// ChannelTimeout bounds one fetch of a channel file, which is a few
-	// hundred bytes: a request that has had no answer by then is stuck.
-	ChannelTimeout = 30 * time.Second
 
 	// MaxHaveMedia caps the haveMedia list. A store bigger than this only
 	// costs a larger download; the backend includes whatever is not listed.
@@ -55,36 +49,20 @@ const (
 	// maxErrorBody bounds how much of an error response is read for its
 	// message.
 	maxErrorBody = 4 << 10
-	// maxChannelBytes bounds a channel pointer file.
-	maxChannelBytes = 1 << 20
 	// maxWeatherResponse bounds GET /api/agent/weather's answer.
 	maxWeatherResponse = 1 << 20
 )
 
 // Deps is what a Syncer needs.
 type Deps struct {
-	Cfg      *config.Config
-	Key      ed25519.PrivateKey
-	Layout   store.Layout
-	Importer *importer.Importer
-	// Updates holds software from the release channels until it installs.
-	Updates      Updates
+	Cfg          *config.Config
+	Key          ed25519.PrivateKey
+	Layout       store.Layout
+	Importer     *importer.Importer
 	AgentVersion string
 	Logger       *slog.Logger
 	// HTTP is optional; New builds one with sane timeouts.
 	HTTP *http.Client
-}
-
-// Updates is the update scheduler (package updates) as the release channels
-// see it.
-type Updates interface {
-	// Pending is the version of kind already waiting to install, or "".
-	Pending(kind mbu.Type) string
-	// Offer verifies a downloaded package and keeps it until its install
-	// window. The file must be on the same filesystem as the store.
-	Offer(file string) error
-	// CheckDone records how a channel check went, for the status.
-	CheckDone(err error)
 }
 
 // Status is the "sync" object of /api/local/status.
@@ -104,8 +82,7 @@ type Syncer struct {
 	now     func() time.Time
 
 	contentInterval, triggerDelay, minBackoff, maxBackoff time.Duration
-	weatherInterval, channelFirstDelay, channelInterval   time.Duration
-	channelRetry, channelTimeout                          time.Duration
+	weatherInterval                                       time.Duration
 
 	mu        sync.Mutex
 	status    Status
@@ -121,50 +98,19 @@ func New(d Deps) *Syncer {
 	}
 	client := d.HTTP
 	if client == nil {
-		client = NewHTTPClient()
+		client = netinfo.NewHTTPClient()
 	}
 	return &Syncer{
-		d:                 d,
-		log:               log.With("component", "sync"),
-		client:            client,
-		trigger:           make(chan struct{}, 1),
-		now:               time.Now,
-		contentInterval:   ContentInterval,
-		triggerDelay:      TriggerDelay,
-		minBackoff:        ContentMinBackoff,
-		maxBackoff:        ContentMaxBackoff,
-		weatherInterval:   WeatherInterval,
-		channelFirstDelay: ChannelFirstDelay,
-		channelInterval:   ChannelInterval,
-		channelRetry:      ChannelRetry,
-		channelTimeout:    ChannelTimeout,
-	}
-}
-
-// NewHTTPClient is the client every sync request uses: a bounded connect so
-// a board with no route gives up fast, and an overall limit long enough for
-// a large package on a slow link.
-//
-// HTTP/2 connections are health-checked with pings. Without them a
-// connection that died silently (a NAT or firewall dropping it, a Wi-Fi
-// roam) stays in the pool, and every request to that host waits on it until
-// ResponseHeaderTimeout ("http2: timeout awaiting response headers").
-func NewHTTPClient() *http.Client {
-	return &http.Client{
-		Timeout: 10 * time.Minute,
-		Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-			TLSHandshakeTimeout:   15 * time.Second,
-			ResponseHeaderTimeout: 2 * time.Minute,
-			IdleConnTimeout:       90 * time.Second,
-			MaxIdleConns:          4,
-			ForceAttemptHTTP2:     true,
-			HTTP2: &http.HTTP2Config{
-				SendPingTimeout: 30 * time.Second,
-				PingTimeout:     15 * time.Second,
-			},
-		},
+		d:               d,
+		log:             log.With("component", "sync"),
+		client:          client,
+		trigger:         make(chan struct{}, 1),
+		now:             time.Now,
+		contentInterval: ContentInterval,
+		triggerDelay:    TriggerDelay,
+		minBackoff:      ContentMinBackoff,
+		maxBackoff:      ContentMaxBackoff,
+		weatherInterval: WeatherInterval,
 	}
 }
 
@@ -181,11 +127,6 @@ func (s *Syncer) Run(ctx context.Context) {
 		run(s.weatherLoop)
 	} else {
 		s.log.Info("content sync is off (content_sync = false); the board only takes content from USB, uploads and the CLI")
-	}
-	if s.d.Cfg.AutoUpdate() {
-		run(s.channelLoop)
-	} else {
-		s.log.Info("release channels are off (auto_update = false)")
 	}
 	wg.Wait()
 }
@@ -324,7 +265,7 @@ func (s *Syncer) syncContent(ctx context.Context) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/vnd.musallahboard.mbu")
-	signRequest(req, body, s.d.Cfg.DeviceID, s.d.Key, s.now())
+	devauth.Sign(req, body, s.d.Cfg.DeviceID, s.d.Key, s.now())
 	resp, err := s.do(req)
 	if err != nil {
 		s.log.Debug("content sync request failed", "err", err)
@@ -341,11 +282,13 @@ func (s *Syncer) syncContent(ctx context.Context) error {
 	}
 	defer os.RemoveAll(dir)
 	file := filepath.Join(dir, "content.mbu")
-	if _, err := saveCapped(file, resp.Body, maxPackage, nil); err != nil {
-		if errors.Is(err, errTooLarge) {
-			return err
-		}
+	// One byte past the limit tells "exactly at the limit" from "too big".
+	n, err := fsutil.CopyFileSync(file, resp.Body, mbu.MaxPackageBytes+1, 0o640)
+	if err != nil {
 		return &syncError{short: "download from the backend was interrupted", detail: err}
+	}
+	if n > mbu.MaxPackageBytes {
+		return fmt.Errorf("the backend's package is larger than %d MiB, the most a package may be", mbu.MaxPackageBytes>>20)
 	}
 
 	b := s.d.Importer.Import(ctx, importer.SourceSync, []string{file})
@@ -468,7 +411,7 @@ func (s *Syncer) FetchWeather(ctx context.Context) error {
 		return err
 	}
 	req.Header.Set("Accept", "application/json")
-	signRequest(req, nil, s.d.Cfg.DeviceID, s.d.Key, s.now())
+	devauth.Sign(req, nil, s.d.Cfg.DeviceID, s.d.Key, s.now())
 	resp, err := s.do(req)
 	if err != nil {
 		return err

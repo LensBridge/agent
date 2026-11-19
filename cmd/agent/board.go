@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"net"
 	"os"
@@ -82,20 +81,18 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, wg
 		return "device key unreadable"
 	}
 	hour, minute := cfg.UpdateTime()
-	var syncer *boardsync.Syncer
+	// The release channels are public files: any board with a network
+	// follows them, enrolled or not.
 	sched := updates.New(updates.Deps{
 		Layout: layout, Importer: imp, Hour: hour, Minute: minute, AutoUpdate: cfg.AutoUpdate(), Logger: logger,
-		Changed: func(info updates.Info) { hub.UpdatesChanged(info) },
-		Check: func(ctx context.Context) error {
-			if syncer == nil {
-				return errors.New("this board cannot reach the release channels (" + offline() + ")")
-			}
-			return syncer.CheckChannels(ctx)
-		},
+		AppChannel: cfg.AppChannelURL(), AgentChannel: cfg.AgentChannelURL(runtime.GOARCH),
+		AgentVersion: version.Version,
+		Changed:      func(info updates.Info) { hub.UpdatesChanged(info) },
 	})
+	var syncer *boardsync.Syncer
 	if keyErr == nil && transportErr == nil {
 		syncer = boardsync.New(boardsync.Deps{
-			Cfg: cfg, Key: priv, Layout: layout, Importer: imp, Updates: sched,
+			Cfg: cfg, Key: priv, Layout: layout, Importer: imp,
 			AgentVersion: version.Version, Logger: logger,
 		})
 	}

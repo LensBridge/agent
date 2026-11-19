@@ -3,11 +3,13 @@ package updates
 import (
 	"bytes"
 	"context"
-	"errors"
 	"crypto/ed25519"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +21,10 @@ import (
 )
 
 var releaseKey = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{2}, 32))
+
+// The install window is in the system zone when there is no content; the
+// tests pin it to UTC once, before any test server reads the clock.
+func init() { time.Local = time.UTC }
 
 type env struct {
 	l   store.Layout
@@ -33,7 +39,6 @@ type env struct {
 // is the system's; tests pin it to UTC).
 func newEnv(t *testing.T) *env {
 	t.Helper()
-	time.Local = time.UTC
 	e := &env{l: store.Layout{Root: t.TempDir()}, now: time.Date(2026, 9, 25, 14, 0, 0, 0, time.UTC)}
 	ring := trust.NewRing(nil, []ed25519.PublicKey{releaseKey.Public().(ed25519.PublicKey)})
 	e.im = importer.New(importer.Deps{
@@ -46,12 +51,18 @@ func newEnv(t *testing.T) *env {
 	return e
 }
 
-func (e *env) newScheduler() *Scheduler {
-	return New(Deps{
-		Layout: e.l, Importer: e.im, Hour: 23,
+// newScheduler builds a scheduler for e; opts adjust its Deps (channels are
+// off unless one sets them).
+func (e *env) newScheduler(opts ...func(*Deps)) *Scheduler {
+	d := Deps{
+		Layout: e.l, Importer: e.im, Hour: 23, AgentVersion: "0.3.0",
 		Changed: func(i Info) { e.got = append(e.got, i) },
 		Now:     func() time.Time { return e.now },
-	})
+	}
+	for _, o := range opts {
+		o(&d)
+	}
+	return New(d)
 }
 
 func setApp(t *testing.T, l store.Layout, v string) {
@@ -238,7 +249,8 @@ func TestRestartKeepsWaitingUpdates(t *testing.T) {
 
 func TestCheckAndInstall(t *testing.T) {
 	e := newEnv(t)
-	e.s.d.Check = func(context.Context) error { return e.s.Offer(e.app(t, "2.1.0", 2)) }
+	cs := newChannelServer(t, "2.1.0", appPackageBytes(t, "2.1.0"))
+	e.s = e.newScheduler(func(d *Deps) { d.AppChannel = cs.URL + "/channel.json" })
 	out := e.s.CheckAndInstall(context.Background())
 	if out.CheckError != "" || len(out.Results) != 1 || out.Results[0].Action != importer.ActionInstalled {
 		t.Fatalf("outcome = %+v", out)
@@ -253,10 +265,14 @@ func TestInfoReportsTheLastCheck(t *testing.T) {
 	if i := e.s.Info(); i.LastCheckAt != nil || i.LastCheckError != "" {
 		t.Fatalf("before any check: %+v", i)
 	}
-	e.s.d.Check = func(context.Context) error { return errors.New("github.com: no route to host") }
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "down", http.StatusBadGateway)
+	}))
+	defer down.Close()
+	e.s = e.newScheduler(func(d *Deps) { d.AppChannel = down.URL + "/channel.json" })
 	e.s.CheckAndInstall(context.Background())
 	i := e.s.Info()
-	if i.LastCheckAt == nil || i.LastCheckError != "github.com: no route to host" {
+	if i.LastCheckAt == nil || !strings.Contains(i.LastCheckError, "channel returned 502") {
 		t.Fatalf("after a failed check: %+v", i)
 	}
 	e.s.CheckDone(nil)

@@ -1,6 +1,8 @@
-// Package updates holds board software (the app and the agent) that the
-// release channels found, and installs it in the board's quiet window rather
-// than the moment it arrives (docs/architecture.md, section 9.4). While
+// Package updates follows the release channels for board software (the app
+// and the agent), holds what they offer, and installs it in the board's quiet
+// window rather than the moment it arrives (docs/architecture.md, section
+// 9.4). The channels are public files on GitHub: a board needs a network to
+// follow them, but not enrollment or a device key. While
 // something waits, /api/local/status says what and when, and the board app
 // puts it on the ticker.
 //
@@ -17,6 +19,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -25,6 +28,7 @@ import (
 	"github.com/LensBridge/agent/internal/core/fsutil"
 	"github.com/LensBridge/agent/internal/core/importer"
 	"github.com/LensBridge/agent/internal/core/mbu"
+	"github.com/LensBridge/agent/internal/core/netinfo"
 	"github.com/LensBridge/agent/internal/core/store"
 )
 
@@ -84,14 +88,18 @@ type Outcome struct {
 type Deps struct {
 	Layout   store.Layout
 	Importer *importer.Importer
-	// Check asks the release channels for new software, which they hand to
-	// Offer. Nil when the board cannot reach them (no device key).
-	Check func(ctx context.Context) error
+	// AppChannel and AgentChannel are the release channel URLs
+	// (agent.toml); "" disables that channel.
+	AppChannel, AgentChannel string
+	// AgentVersion is the running agent's.
+	AgentVersion string
+	// HTTP is optional; New uses netinfo.NewHTTPClient.
+	HTTP *http.Client
 	// Changed is told whenever Info changes. May be nil.
 	Changed      func(Info)
 	Hour, Minute int
-	// AutoUpdate is reported in Info; the scheduler itself holds and
-	// installs whatever it is offered either way.
+	// AutoUpdate is whether the channels are checked in the background
+	// (auto_update). `update now` checks them either way.
 	AutoUpdate bool
 	Logger     *slog.Logger
 	Now        func() time.Time
@@ -99,9 +107,13 @@ type Deps struct {
 
 // Scheduler holds waiting updates and installs them.
 type Scheduler struct {
-	d    Deps
-	log  *slog.Logger
-	kick chan struct{}
+	d      Deps
+	log    *slog.Logger
+	kick   chan struct{}
+	client *http.Client
+
+	channelFirstDelay, channelInterval time.Duration
+	channelRetry, channelTimeout       time.Duration
 
 	// installMu is held while packages move in or out of the updates
 	// directory, so an Offer never replaces a file the importer is reading.
@@ -122,11 +134,19 @@ func New(d Deps) *Scheduler {
 	if d.Logger == nil {
 		d.Logger = slog.New(slog.DiscardHandler)
 	}
+	if d.HTTP == nil {
+		d.HTTP = netinfo.NewHTTPClient()
+	}
 	s := &Scheduler{
-		d:       d,
-		log:     d.Logger.With("component", "updates"),
-		kick:    make(chan struct{}, 1),
-		pending: map[mbu.Type]*mbu.Manifest{},
+		d:                 d,
+		log:               d.Logger.With("component", "updates"),
+		kick:              make(chan struct{}, 1),
+		client:            d.HTTP,
+		pending:           map[mbu.Type]*mbu.Manifest{},
+		channelFirstDelay: ChannelFirstDelay,
+		channelInterval:   ChannelInterval,
+		channelRetry:      ChannelRetry,
+		channelTimeout:    ChannelTimeout,
 	}
 	s.load()
 	return s
@@ -238,10 +258,17 @@ func (s *Scheduler) Info() Info {
 	return info
 }
 
-// Run installs waiting updates when their window opens, and serves the CLI's
-// install-now requests, until ctx ends.
+// Run follows the release channels (with auto_update), installs waiting
+// updates when their window opens, and serves the CLI's install-now
+// requests, until ctx ends.
 func (s *Scheduler) Run(ctx context.Context) {
+	s.cleanStaleDownloads()
 	go s.watchRequests(ctx)
+	if s.d.AutoUpdate {
+		go s.channelLoop(ctx)
+	} else {
+		s.log.Info("release channels are off (auto_update = false)")
+	}
 	t := time.NewTicker(checkInterval)
 	defer t.Stop()
 	for {
@@ -274,14 +301,10 @@ func (s *Scheduler) CheckDone(err error) {
 // started always finishes, because stopping one halfway helps nobody.
 func (s *Scheduler) CheckAndInstall(ctx context.Context) Outcome {
 	var out Outcome
-	if s.d.Check == nil {
-		out.CheckError = "this board cannot reach the release channels (no device key)"
-	} else {
-		err := s.d.Check(ctx)
-		s.CheckDone(err)
-		if err != nil {
-			out.CheckError = err.Error()
-		}
+	err := s.CheckChannels(ctx)
+	s.CheckDone(err)
+	if err != nil {
+		out.CheckError = err.Error()
 	}
 	b, _ := s.InstallNow(context.WithoutCancel(ctx))
 	out.Results = b.Results

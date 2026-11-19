@@ -1,4 +1,4 @@
-package boardsync
+package updates
 
 import (
 	"context"
@@ -7,15 +7,36 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
+	"time"
 
 	"github.com/LensBridge/agent/internal/core/mbu"
+)
+
+// Release channel timings (docs/architecture.md, section 9.4). They are
+// fields on the Scheduler (set from these in New) so tests can shrink them.
+const (
+	ChannelFirstDelay = 2 * time.Minute
+	ChannelInterval   = 6 * time.Hour
+	// ChannelRetry is the first retry after a failed channel check. It
+	// doubles on each failure, up to ChannelInterval.
+	ChannelRetry = 5 * time.Minute
+	// ChannelTimeout bounds one fetch of a channel file, which is a few
+	// hundred bytes: a request that has had no answer by then is stuck.
+	ChannelTimeout = 30 * time.Second
+
+	// maxChannelBytes bounds a channel pointer file.
+	maxChannelBytes = 1 << 20
+	// maxPackage is the largest package the board will download.
+	maxPackage = mbu.MaxPackageBytes
 )
 
 // Channel is a release channel pointer file (section 9.4). It is only a
@@ -31,7 +52,10 @@ type Channel struct {
 
 var sha256HexRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-func (s *Syncer) channelLoop(ctx context.Context) {
+// channelLoop checks the release channels on schedule until ctx ends. Nothing
+// here needs the board to be enrolled: the channels are public files, and
+// what they point at is verified against the release keys like any package.
+func (s *Scheduler) channelLoop(ctx context.Context) {
 	if !sleep(ctx, s.channelFirstDelay) {
 		return
 	}
@@ -41,7 +65,7 @@ func (s *Syncer) channelLoop(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		s.d.Updates.CheckDone(err)
+		s.CheckDone(err)
 		wait := s.channelInterval
 		if err != nil {
 			// A failed check is usually the network: try again soon rather
@@ -62,14 +86,14 @@ func (s *Syncer) channelLoop(ctx context.Context) {
 // quiet window. The agent goes first because an app release may need a newer
 // local API than the running agent serves: the scheduler only holds such an
 // app when a new enough agent is waiting with it.
-func (s *Syncer) CheckChannels(ctx context.Context) error {
+func (s *Scheduler) CheckChannels(ctx context.Context) error {
 	var errs []error
-	if u := s.d.Cfg.AgentChannelURL(runtime.GOARCH); u != "" {
+	if u := s.d.AgentChannel; u != "" {
 		if err := s.checkChannel(ctx, mbu.TypeAgent, u); err != nil {
 			errs = append(errs, fmt.Errorf("agent channel: %w", err))
 		}
 	}
-	if u := s.d.Cfg.AppChannelURL(); u != "" {
+	if u := s.d.AppChannel; u != "" {
 		if err := s.checkChannel(ctx, mbu.TypeApp, u); err != nil {
 			errs = append(errs, fmt.Errorf("app channel: %w", err))
 		}
@@ -79,8 +103,8 @@ func (s *Syncer) CheckChannels(ctx context.Context) error {
 
 // checkChannel fetches one channel and, if it points at something newer than
 // what is installed or already waiting, downloads it and offers it to the
-// update scheduler.
-func (s *Syncer) checkChannel(ctx context.Context, kind mbu.Type, channelURL string) error {
+// scheduler.
+func (s *Scheduler) checkChannel(ctx context.Context, kind mbu.Type, channelURL string) error {
 	ch, err := s.fetchChannel(ctx, channelURL)
 	if err != nil {
 		return err
@@ -116,7 +140,7 @@ func (s *Syncer) checkChannel(ctx context.Context, kind mbu.Type, channelURL str
 		s.log.Debug("release channel: up to date", "type", kind, "installed", installed, "channel", ch.Version)
 		return nil
 	}
-	if waiting := s.d.Updates.Pending(kind); waiting != "" && mbu.CompareVersions(ch.Version, waiting) <= 0 {
+	if waiting := s.Pending(kind); waiting != "" && mbu.CompareVersions(ch.Version, waiting) <= 0 {
 		s.log.Debug("release channel: already waiting to install", "type", kind, "version", waiting)
 		return nil
 	}
@@ -135,10 +159,10 @@ func (s *Syncer) checkChannel(ctx context.Context, kind mbu.Type, channelURL str
 	if err := s.download(ctx, pkgURL, file, ch); err != nil {
 		return err
 	}
-	return s.d.Updates.Offer(file)
+	return s.Offer(file)
 }
 
-func (s *Syncer) fetchChannel(ctx context.Context, channelURL string) (*Channel, error) {
+func (s *Scheduler) fetchChannel(ctx context.Context, channelURL string) (*Channel, error) {
 	raw, err := s.fetchChannelFile(ctx, channelURL)
 	if err != nil && ctx.Err() == nil && !errors.As(err, new(statusError)) {
 		// No answer at all: the pooled connection may be dead. Drop it and
@@ -177,7 +201,7 @@ type statusError int
 func (e statusError) Error() string { return fmt.Sprintf("channel returned %d", int(e)) }
 
 // fetchChannelFile makes one bounded attempt at a channel file.
-func (s *Syncer) fetchChannelFile(ctx context.Context, channelURL string) ([]byte, error) {
+func (s *Scheduler) fetchChannelFile(ctx context.Context, channelURL string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.channelTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, channelURL, nil)
@@ -198,7 +222,7 @@ func (s *Syncer) fetchChannelFile(ctx context.Context, channelURL string) ([]byt
 
 // download fetches the package and checks its size and hash against the
 // channel before anything else looks at it.
-func (s *Syncer) download(ctx context.Context, pkgURL, file string, ch *Channel) error {
+func (s *Scheduler) download(ctx context.Context, pkgURL, file string, ch *Channel) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pkgURL, nil)
 	if err != nil {
 		return err
@@ -246,3 +270,77 @@ func resolve(base, ref string) (string, error) {
 	}
 	return u.String(), nil
 }
+
+func (s *Scheduler) do(req *http.Request) (*http.Response, error) {
+	req.Header.Set("User-Agent", "musallahboard-agent/"+s.d.AgentVersion)
+	return s.client.Do(req)
+}
+
+// downloadPrefix names the hidden inbox directories downloads are made in.
+// The inbox runner ignores hidden entries, so a half-written package is never
+// picked up, and they are on the same filesystem as the updates directory.
+const downloadPrefix = ".channel-"
+
+func (s *Scheduler) downloadDir() (string, error) {
+	inbox := s.d.Layout.Inbox()
+	if err := os.MkdirAll(inbox, 0o770); err != nil {
+		return "", err
+	}
+	return os.MkdirTemp(inbox, downloadPrefix)
+}
+
+// cleanStaleDownloads removes download directories a previous run left
+// behind when it was killed mid-download.
+func (s *Scheduler) cleanStaleDownloads() {
+	matches, _ := filepath.Glob(filepath.Join(s.d.Layout.Inbox(), downloadPrefix+"*"))
+	for _, m := range matches {
+		os.RemoveAll(m)
+	}
+}
+
+var errTooLarge = fmt.Errorf("the download is larger than %d MiB, the most a package may be", maxPackage>>20)
+
+// saveCapped streams r into a new file at path, reading at most limit bytes;
+// anything longer is errTooLarge and the file is removed. Every byte is also
+// hashed into h.
+func saveCapped(path string, r io.Reader, limit int64, h hash.Hash) (int64, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
+	if err != nil {
+		return 0, err
+	}
+	// One byte past the limit tells "exactly at the limit" from "too big".
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(r, limit+1))
+	if err == nil && n > limit {
+		err = errTooLarge
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(path)
+	}
+	return n, err
+}
+
+func sleep(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+func jitter(b time.Duration) time.Duration {
+	if b < 4 {
+		return 0
+	}
+	return time.Duration(rand.Int63n(int64(b / 4)))
+}
+
+func removeAll(p string) { _ = os.RemoveAll(p) }
