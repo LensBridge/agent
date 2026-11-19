@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LensBridge/agent/internal/core/cdp"
 	"github.com/LensBridge/agent/internal/core/clock"
+	"github.com/LensBridge/agent/internal/core/kiosk"
 	"github.com/LensBridge/agent/internal/core/localserver"
 	"github.com/LensBridge/agent/internal/core/store"
 	"github.com/LensBridge/agent/internal/core/trust"
@@ -137,7 +137,7 @@ func localTime(v any) string {
 func kioskShowing() string {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	t, err := cdp.New("").FirstPageTarget(ctx)
+	t, err := kiosk.NewClient("").FirstPageTarget(ctx)
 	if err != nil {
 		return "NOTHING: the kiosk browser is not running (systemctl status musallahboard-kiosk)"
 	}

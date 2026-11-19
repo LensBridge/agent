@@ -25,11 +25,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/LensBridge/agent/internal/core/cdp"
+	"github.com/LensBridge/agent/internal/core/kiosk"
 	"github.com/LensBridge/agent/internal/core/netinfo"
 )
 
-// Evaluator is the slice of *cdp.Client this package needs.
+// Evaluator is the slice of *kiosk.Client this package needs.
 type Evaluator interface {
 	EvaluateValue(ctx context.Context, expression string, out any) error
 }
@@ -84,7 +84,7 @@ func PushNetInfo(ctx context.Context, ev Evaluator, info netinfo.Info, agentVers
 	// value, which our IIFE cannot do — but a page that failed to parse the
 	// script at all lands here, and "not the splash" is the right reading.
 	if err := ev.EvaluateValue(cctx, script, &applied); err != nil {
-		if errors.Is(err, cdp.ErrEvalUndefined) {
+		if errors.Is(err, kiosk.ErrEvalUndefined) {
 			return ErrNoSplash
 		}
 		return err

@@ -38,7 +38,7 @@ import (
 	"github.com/LensBridge/agent/internal/core/store"
 )
 
-// Screen is the update screen (package updatescreen).
+// Screen is the update screen (kiosk.Screen).
 type Screen interface {
 	OnScreen(ctx context.Context) bool
 	Finish(ctx context.Context, n notice.Notice)

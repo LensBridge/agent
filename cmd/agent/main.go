@@ -17,8 +17,8 @@ import (
 
 	"github.com/coreos/go-systemd/v22/daemon"
 
-	"github.com/LensBridge/agent/internal/core/cdp"
 	"github.com/LensBridge/agent/internal/core/config"
+	"github.com/LensBridge/agent/internal/core/kiosk"
 	"github.com/LensBridge/agent/internal/core/localserver"
 	"github.com/LensBridge/agent/internal/core/netinfo"
 	"github.com/LensBridge/agent/internal/core/splash"
@@ -225,7 +225,7 @@ func awaitEnrollment(ctx context.Context, logger *slog.Logger, hb *heartbeat) *c
 	_, _ = daemon.SdNotify(false, daemon.SdNotifyReady)
 	_, _ = daemon.SdNotify(false, "STATUS=waiting for enrollment")
 
-	cdpClient := cdp.New("")
+	cdpClient := kiosk.NewClient("")
 
 	var last netinfo.Info
 	var reported bool

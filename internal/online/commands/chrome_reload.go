@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/LensBridge/agent/internal/core/cdp"
+	"github.com/LensBridge/agent/internal/core/kiosk"
 )
 
 // ChromeReload triggers a hard reload of the kiosk page via CDP.
 type ChromeReload struct {
-	CDP *cdp.Client
+	CDP *kiosk.Client
 }
 
 func (h *ChromeReload) Kind() string { return "chrome.reload" }

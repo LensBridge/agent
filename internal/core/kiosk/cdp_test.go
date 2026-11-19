@@ -1,4 +1,4 @@
-package cdp
+package kiosk
 
 import (
 	"context"
@@ -72,7 +72,7 @@ func newFakeChrome(t *testing.T, reply func(req rpcRequest) []any) *fakeChrome {
 	return f
 }
 
-func (f *fakeChrome) client() *Client { return New(f.srv.URL) }
+func (f *fakeChrome) client() *Client { return NewClient(f.srv.URL) }
 
 func (f *fakeChrome) seen() []string {
 	f.mu.Lock()

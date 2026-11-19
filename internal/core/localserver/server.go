@@ -26,10 +26,10 @@ import (
 
 	"github.com/LensBridge/agent/internal/core/clock"
 	"github.com/LensBridge/agent/internal/core/events"
+	"github.com/LensBridge/agent/internal/core/kiosk"
 	"github.com/LensBridge/agent/internal/core/mbu"
 	"github.com/LensBridge/agent/internal/core/store"
 	"github.com/LensBridge/agent/internal/core/updates"
-	"github.com/LensBridge/agent/internal/core/updatescreen"
 	updateanim "github.com/LensBridge/agent/update-anim"
 )
 
@@ -132,7 +132,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", cacheNoStore)
 		w.Header().Set("Content-Type", "image/gif")
 		_, _ = w.Write(aliveGIF)
-	case p == updatescreen.Path:
+	case p == kiosk.ScreenPath:
 		w.Header().Set("Cache-Control", cacheNoStore)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(updateanim.HTML)

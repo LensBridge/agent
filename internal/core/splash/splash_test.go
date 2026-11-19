@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/LensBridge/agent/internal/core/cdp"
+	"github.com/LensBridge/agent/internal/core/kiosk"
 	"github.com/LensBridge/agent/internal/core/netinfo"
 )
 
@@ -58,7 +58,7 @@ func TestPushNetInfoNoHook(t *testing.T) {
 }
 
 func TestPushNetInfoUndefinedIsNoSplash(t *testing.T) {
-	ev := &fakeEval{err: cdp.ErrEvalUndefined}
+	ev := &fakeEval{err: kiosk.ErrEvalUndefined}
 	if err := PushNetInfo(context.Background(), ev, netinfo.Info{}, ""); !errors.Is(err, ErrNoSplash) {
 		t.Fatalf("PushNetInfo() = %v, want ErrNoSplash", err)
 	}

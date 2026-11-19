@@ -98,7 +98,7 @@ func (b Batch) OK() bool {
 	return true
 }
 
-// Screen is the kiosk's update screen (package updatescreen).
+// Screen is the kiosk's update screen (kiosk.Screen).
 type Screen interface {
 	// Active reports whether the screen is up, possibly held over from
 	// before an agent restart for this batch to finish.

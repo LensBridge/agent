@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LensBridge/agent/internal/core/cdp"
+	"github.com/LensBridge/agent/internal/core/kiosk"
 	"github.com/LensBridge/agent/internal/core/netinfo"
 )
 
@@ -34,9 +34,9 @@ type Snapshot struct {
 }
 
 // PageProber reports what the kiosk browser is currently showing. Satisfied by
-// *cdp.Client; pass nil to skip the browser probe entirely.
+// *kiosk.Client; pass nil to skip the browser probe entirely.
 type PageProber interface {
-	PageStatus(ctx context.Context) (cdp.PageStatus, error)
+	PageStatus(ctx context.Context) (kiosk.PageStatus, error)
 }
 
 // pageProbeTimeout bounds the CDP round trip. Chromium is on loopback, so this
@@ -178,14 +178,14 @@ func checkKiosk(ctx context.Context, prober PageProber) (alive bool, frameID str
 		case err == nil:
 			// The board answered. It's alive by definition.
 			return true, status.SlideKey
-		case errors.Is(err, cdp.ErrEvalUndefined),
-			errors.Is(err, cdp.ErrPageThrew),
-			errors.Is(err, cdp.ErrPageNavigating):
+		case errors.Is(err, kiosk.ErrEvalUndefined),
+			errors.Is(err, kiosk.ErrPageThrew),
+			errors.Is(err, kiosk.ErrPageNavigating):
 			// A page answered (or is between documents) but isn't the board:
 			// the splash, the update screen, a frontend too old to expose
 			// getStatus(), or a reload in flight. The browser is up.
 			return true, ""
-		case errors.Is(err, cdp.ErrPageCrashed), errors.Is(err, cdp.ErrPageUnresponsive):
+		case errors.Is(err, kiosk.ErrPageCrashed), errors.Is(err, kiosk.ErrPageUnresponsive):
 			// The browser is there and its page is dead.
 			return false, ""
 		}

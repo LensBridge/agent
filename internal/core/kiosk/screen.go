@@ -1,4 +1,4 @@
-// Package updatescreen puts the kiosk on the "Working on updates" screen
+// The update screen puts the kiosk on the "Working on updates" screen
 // (update-anim/index.html, served by the local server at /_mb/updating) while
 // the importer installs something, shows the outcome, and returns the kiosk to
 // the board afterwards (docs/architecture.md, section 8). When nothing is
@@ -17,7 +17,8 @@
 // Every call is best effort. The kiosk may be restarting or absent (a board
 // without a display attached still takes updates), and an update must never
 // fail because the screen could not be shown.
-package updatescreen
+
+package kiosk
 
 import (
 	"context"
@@ -27,12 +28,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/LensBridge/agent/internal/core/cdp"
 	"github.com/LensBridge/agent/internal/core/notice"
 )
 
-// Path is where the local server serves the screen.
-const Path = "/_mb/updating"
+// ScreenPath is where the local server serves the update screen.
+const ScreenPath = "/_mb/updating"
 
 // callTimeout bounds one CDP round trip.
 const callTimeout = 5 * time.Second
@@ -56,7 +56,7 @@ const fadeOutScript = `new Promise(function (done) {
 
 // Screen implements importer.Screen.
 type Screen struct {
-	cdp     *cdp.Client
+	cdp     *Client
 	baseURL string // e.g. http://127.0.0.1:8080
 	logger  *slog.Logger
 
@@ -68,9 +68,9 @@ type Screen struct {
 	carry *notice.Notice
 }
 
-// New returns a Screen for the kiosk at the default CDP endpoint, whose board
-// is served at baseURL.
-func New(c *cdp.Client, baseURL string, logger *slog.Logger) *Screen {
+// NewScreen returns a Screen for the kiosk reached through c, whose board is
+// served at baseURL.
+func NewScreen(c *Client, baseURL string, logger *slog.Logger) *Screen {
 	return &Screen{cdp: c, baseURL: strings.TrimRight(baseURL, "/"), logger: logger}
 }
 
@@ -98,7 +98,7 @@ func (s *Screen) Begin(ctx context.Context) {
 		return
 	}
 	s.fadeOut(ctx)
-	if err := s.navigate(ctx, s.baseURL+Path); err != nil {
+	if err := s.navigate(ctx, s.baseURL+ScreenPath); err != nil {
 		s.logger.Debug("update screen: navigate failed", "err", err)
 		return
 	}
@@ -190,7 +190,7 @@ func (s *Screen) OnScreen(ctx context.Context) bool {
 	cctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 	target, err := s.cdp.FirstPageTarget(cctx)
-	return err == nil && strings.Contains(target.URL, Path)
+	return err == nil && strings.Contains(target.URL, ScreenPath)
 }
 
 // merge combines a held outcome with the one that followed it: the more

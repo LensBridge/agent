@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/LensBridge/agent/internal/core/cdp"
+	"github.com/LensBridge/agent/internal/core/kiosk"
 )
 
 // maxResultBase64 keeps the result frame under the backend's 10 MB WebSocket
@@ -20,7 +20,7 @@ const maxResultBase64 = 8 << 20 // 8 MiB
 // blob into object storage and rewrite output to {"url":"..."}, but the
 // agent always returns inline base64.
 type ChromeScreenshot struct {
-	CDP *cdp.Client
+	CDP *kiosk.Client
 }
 
 func (h *ChromeScreenshot) Kind() string { return "chrome.screenshot" }

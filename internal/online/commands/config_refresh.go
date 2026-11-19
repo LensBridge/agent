@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/LensBridge/agent/internal/core/cdp"
+	"github.com/LensBridge/agent/internal/core/kiosk"
 	"github.com/LensBridge/agent/internal/core/kioskurl"
 )
 
@@ -20,7 +20,7 @@ import (
 // its device id from the agent's /api/local/status, so nothing is pushed into
 // it any more.
 type ConfigRefresh struct {
-	CDP *cdp.Client
+	CDP *kiosk.Client
 	// Before, when set, runs first. The daemon passes the content syncer's
 	// Trigger: the page only shows what the agent has installed, so a refresh
 	// from the admin portal should also pull new content.
@@ -63,7 +63,7 @@ func (h *ConfigRefresh) Execute(ctx context.Context, _ json.RawMessage, progress
 	// success is how this command once spent its life lying to the admin
 	// portal: the board sat on stale content while the dashboard said
 	// SUCCEEDED.
-	if errors.Is(err, cdp.ErrEvalUndefined) {
+	if errors.Is(err, kiosk.ErrEvalUndefined) {
 		return nil, fmt.Errorf("kiosk page returned nothing: it is not the board (splash or update screen?)")
 	}
 	if err != nil {

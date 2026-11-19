@@ -6,16 +6,16 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/LensBridge/agent/internal/core/cdp"
+	"github.com/LensBridge/agent/internal/core/kiosk"
 )
 
 type stubProber struct {
-	status cdp.PageStatus
+	status kiosk.PageStatus
 	err    error
 	calls  int
 }
 
-func (s *stubProber) PageStatus(context.Context) (cdp.PageStatus, error) {
+func (s *stubProber) PageStatus(context.Context) (kiosk.PageStatus, error) {
 	s.calls++
 	return s.status, s.err
 }
@@ -23,7 +23,7 @@ func (s *stubProber) PageStatus(context.Context) (cdp.PageStatus, error) {
 // The board answering is the only positive proof the kiosk is really up, and
 // it is also where displayedFrameKey comes from.
 func TestCheckKioskBoardAnswers(t *testing.T) {
-	p := &stubProber{status: cdp.PageStatus{Paired: true, SlideKey: "poster-3"}}
+	p := &stubProber{status: kiosk.PageStatus{Paired: true, SlideKey: "poster-3"}}
 
 	alive, frame := checkKiosk(context.Background(), p)
 
@@ -38,7 +38,7 @@ func TestCheckKioskBoardAnswers(t *testing.T) {
 // The enrollment splash (and any frontend older than getStatus) has no hook.
 // Chromium is still up, so the kiosk is alive — just not showing a frame.
 func TestCheckKioskSplashIsStillAlive(t *testing.T) {
-	p := &stubProber{err: cdp.ErrEvalUndefined}
+	p := &stubProber{err: kiosk.ErrEvalUndefined}
 
 	alive, frame := checkKiosk(context.Background(), p)
 
@@ -80,8 +80,8 @@ func TestCheckKioskNilProber(t *testing.T) {
 // must not be consulted: the board is blank and has to be reported as such.
 func TestCheckKioskDeadPageIsNotAlive(t *testing.T) {
 	for _, err := range []error{
-		fmt.Errorf("%w (http://127.0.0.1:8080/)", cdp.ErrPageCrashed),
-		fmt.Errorf("%w: read: context deadline exceeded", cdp.ErrPageUnresponsive),
+		fmt.Errorf("%w (http://127.0.0.1:8080/)", kiosk.ErrPageCrashed),
+		fmt.Errorf("%w: read: context deadline exceeded", kiosk.ErrPageUnresponsive),
 	} {
 		p := &stubProber{err: err}
 		alive, frame := checkKiosk(context.Background(), p)
@@ -97,8 +97,8 @@ func TestCheckKioskDeadPageIsNotAlive(t *testing.T) {
 // A page between documents, or one whose hook threw, still answered.
 func TestCheckKioskTransientPageStatesAreAlive(t *testing.T) {
 	for _, err := range []error{
-		fmt.Errorf("%w: Execution context was destroyed.", cdp.ErrPageNavigating),
-		fmt.Errorf("%w: TypeError: x is undefined", cdp.ErrPageThrew),
+		fmt.Errorf("%w: Execution context was destroyed.", kiosk.ErrPageNavigating),
+		fmt.Errorf("%w: TypeError: x is undefined", kiosk.ErrPageThrew),
 	} {
 		p := &stubProber{err: err}
 		if alive, _ := checkKiosk(context.Background(), p); !alive {
@@ -112,8 +112,8 @@ func TestCheckKioskTransientPageStatesAreAlive(t *testing.T) {
 func TestCheckKioskUnreachableUsesUnitState(t *testing.T) {
 	want := systemdKioskActive(context.Background())
 	for _, err := range []error{
-		fmt.Errorf("%w at http://localhost:9222: connection refused", cdp.ErrDebuggerUnreachable),
-		fmt.Errorf("%w (0 total)", cdp.ErrNoPageTarget),
+		fmt.Errorf("%w at http://localhost:9222: connection refused", kiosk.ErrDebuggerUnreachable),
+		fmt.Errorf("%w (0 total)", kiosk.ErrNoPageTarget),
 	} {
 		p := &stubProber{err: err}
 		if alive, _ := checkKiosk(context.Background(), p); alive != want {

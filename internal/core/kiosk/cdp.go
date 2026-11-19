@@ -1,12 +1,15 @@
-// Package cdp is a minimal Chrome DevTools Protocol client for the few
-// methods the agent actually uses against the kiosk Chromium instance:
-// Page.reload, Page.navigate, Page.captureScreenshot, Runtime.evaluate, and
-// Inspector.enable to tell a crashed renderer from a live one.
+// Package kiosk is everything in the agent that touches the kiosk browser:
+// a minimal Chrome DevTools Protocol client (this file), the update screen
+// driven over it (screen.go), and the watcher that heals a crashed or hung
+// page (heal.go).
 //
-// We don't pull in chromedp because we don't drive a browser — we attach to
-// an already-running Chromium with --remote-debugging-port=9222 and only
-// need a thin JSON-RPC over WS shim.
-package cdp
+// The CDP client covers the few methods the agent uses against the kiosk
+// Chromium instance: Page.reload, Page.navigate, Page.captureScreenshot,
+// Runtime.evaluate, and Inspector.enable to tell a crashed renderer from a
+// live one. We don't pull in chromedp because we don't drive a browser — we
+// attach to an already-running Chromium with --remote-debugging-port=9222 and
+// only need a thin JSON-RPC over WS shim.
+package kiosk
 
 import (
 	"context"
@@ -54,9 +57,9 @@ type Client struct {
 	id atomic.Int64 // monotonic JSON-RPC request id
 }
 
-// New returns a Client that talks to the given debugger HTTP endpoint
+// NewClient returns a Client that talks to the given debugger HTTP endpoint
 // (e.g. "http://localhost:9222"). Pass "" to use DefaultDebuggerURL.
-func New(debuggerURL string) *Client {
+func NewClient(debuggerURL string) *Client {
 	if debuggerURL == "" {
 		debuggerURL = DefaultDebuggerURL
 	}
