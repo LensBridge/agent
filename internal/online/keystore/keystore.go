@@ -10,7 +10,6 @@ package keystore
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -80,12 +79,4 @@ func Load(path string) (ed25519.PrivateKey, error) {
 		return nil, fmt.Errorf("key file %s has %d bytes, want %d", path, len(seed), SeedSize)
 	}
 	return ed25519.NewKeyFromSeed(seed), nil
-}
-
-// PublicKeyOf returns the 32-byte raw public key for a private key.
-func PublicKeyOf(priv ed25519.PrivateKey) (ed25519.PublicKey, error) {
-	if len(priv) != ed25519.PrivateKeySize {
-		return nil, errors.New("invalid private key")
-	}
-	return priv.Public().(ed25519.PublicKey), nil
 }

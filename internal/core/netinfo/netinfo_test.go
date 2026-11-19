@@ -50,39 +50,3 @@ func TestRoutableIPv4DropsLinkLocal(t *testing.T) {
 	}
 }
 
-func TestInfoEqual(t *testing.T) {
-	base := Info{IPv4: []string{"192.168.1.42"}, SSID: "MSA", Hostname: "lobby"}
-
-	tests := []struct {
-		name  string
-		other Info
-		want  bool
-	}{
-		{"identical", Info{IPv4: []string{"192.168.1.42"}, SSID: "MSA", Hostname: "lobby"}, true},
-		{"ip changed", Info{IPv4: []string{"192.168.1.43"}, SSID: "MSA", Hostname: "lobby"}, false},
-		{"ip added", Info{IPv4: []string{"192.168.1.42", "10.0.0.7"}, SSID: "MSA", Hostname: "lobby"}, false},
-		{"ssid changed", Info{IPv4: []string{"192.168.1.42"}, SSID: "Guest", Hostname: "lobby"}, false},
-		{"hostname changed", Info{IPv4: []string{"192.168.1.42"}, SSID: "MSA", Hostname: "hall"}, false},
-		{"went offline", Info{SSID: "MSA", Hostname: "lobby"}, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := base.Equal(tt.other); got != tt.want {
-				t.Errorf("Equal() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestInfoOnline(t *testing.T) {
-	if (Info{}).Online() {
-		t.Error("empty Info reported online")
-	}
-	if (Info{IPv4: []string{}}).Online() {
-		t.Error("Info with zero addresses reported online")
-	}
-	if !(Info{IPv4: []string{"192.168.1.42"}}).Online() {
-		t.Error("Info with an address reported offline")
-	}
-}

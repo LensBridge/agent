@@ -16,7 +16,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"slices"
 	"strings"
 	"time"
 )
@@ -27,15 +26,6 @@ type Info struct {
 	SSID     string   `json:"ssid,omitempty"`
 	Hostname string   `json:"hostname,omitempty"`
 }
-
-// Equal reports whether two snapshots describe the same network state. Used to
-// keep a polling loop from logging the same address every few seconds.
-func (i Info) Equal(o Info) bool {
-	return i.SSID == o.SSID && i.Hostname == o.Hostname && slices.Equal(i.IPv4, o.IPv4)
-}
-
-// Online reports whether the device holds at least one usable address.
-func (i Info) Online() bool { return len(i.IPv4) > 0 }
 
 // Collect gathers a snapshot for display. Every field is best-effort: a
 // failure anywhere leaves that field empty rather than failing the call.

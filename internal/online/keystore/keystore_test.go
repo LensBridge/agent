@@ -27,8 +27,7 @@ func TestSaveLoad_RoundTrip(t *testing.T) {
 	if !bytes.Equal(priv.Seed(), loaded.Seed()) {
 		t.Fatalf("seed mismatch after round-trip")
 	}
-	loadedPub, _ := PublicKeyOf(loaded)
-	if !bytes.Equal(pub, loadedPub) {
+	if !bytes.Equal(pub, loaded.Public().(ed25519.PublicKey)) {
 		t.Fatalf("public key mismatch after round-trip")
 	}
 }
@@ -59,19 +58,5 @@ func TestLoad_RejectsWrongSize(t *testing.T) {
 	}
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected error for short key, got nil")
-	}
-}
-
-func TestPublicKeyOf_MatchesGenerate(t *testing.T) {
-	pub, priv, _ := Generate()
-	got, err := PublicKeyOf(priv)
-	if err != nil {
-		t.Fatalf("PublicKeyOf: %v", err)
-	}
-	if len(got) != ed25519.PublicKeySize {
-		t.Fatalf("public key size = %d, want %d", len(got), ed25519.PublicKeySize)
-	}
-	if !bytes.Equal(pub, got) {
-		t.Fatalf("public key mismatch")
 	}
 }
