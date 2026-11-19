@@ -330,3 +330,14 @@ func TestParseProvision(t *testing.T) {
 		}
 	}
 }
+
+func TestContentDaysBound(t *testing.T) {
+	first := "2026-01-01"
+	for days, ok := range map[int]bool{92: true, 93: false} {
+		last := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, days-1).Format(DateLayout)
+		_, err := (&ContentInfo{FirstDay: first, LastDay: last}).Days()
+		if (err == nil) != ok {
+			t.Errorf("%d days: err = %v", days, err)
+		}
+	}
+}

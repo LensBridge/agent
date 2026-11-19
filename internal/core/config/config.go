@@ -37,6 +37,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/LensBridge/agent/internal/core/fsutil"
+	"github.com/LensBridge/agent/internal/core/mbu"
 )
 
 // DefaultPath is agent.toml on a board.
@@ -111,9 +112,10 @@ func (c *Config) ContentSync() bool { return boolOr(c.ContentSyncSet, true) }
 // AutoUpdate reports whether the release channels are followed.
 func (c *Config) AutoUpdate() bool { return boolOr(c.AutoUpdateSet, true) }
 
-// ContentDays is the window of a synced content package, 1-31.
+// ContentDays is the window of a synced content package, from 1 to the most
+// a content package may cover (mbu.MaxContentDays).
 func (c *Config) ContentDays() int {
-	if c.ContentDaysSet == nil || *c.ContentDaysSet < 1 || *c.ContentDaysSet > 31 {
+	if c.ContentDaysSet == nil || *c.ContentDaysSet < 1 || *c.ContentDaysSet > mbu.MaxContentDays {
 		return DefaultContentDays
 	}
 	return *c.ContentDaysSet

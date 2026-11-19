@@ -137,7 +137,7 @@ Per type:
   so two builds in the same second still order).
 - `content.timezone`: IANA zone, not empty, not `Local`, loadable on the board.
 - `content.firstDay`, `content.lastDay`: `YYYY-MM-DD`, inclusive, first <= last,
-  at most 31 days.
+  at most 92 days.
 - `files` contains exactly one `payloads/<date>.json` for every date in the
   range and no other payloads; and `media/<sha256>.<ext>` files (ext
   `[a-z0-9]{1,10}`) whose name hash equals their `sha256`. Nothing else.
@@ -700,7 +700,7 @@ and the `sync`/backend errors in `/api/local/status`. New keys, all optional:
 | `service_port` | `false` | Run the eth0 service port and the upload server. Set by `musallahboard-agent service-port on|off`. |
 | `usb_import` | `true` | Accept USB sticks. |
 | `content_sync` | `true` | Sync content from the backend. |
-| `content_days` | `7` | Days per synced content package (1-31). |
+| `content_days` | `7` | Days per synced content package (1-92). |
 | `auto_update` | `true` | Follow the release channels. |
 | `app_channel_url`, `agent_channel_url` | section 9.4 | Channel pointers. Empty disables that channel. |
 | `update_time` | `"23:00"` | When software from the channels installs, `HH:MM` in the board's time zone (section 9.4). |

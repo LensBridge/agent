@@ -48,7 +48,7 @@ const (
 	MaxTotalBytes     = 1 << 30
 	MaxPayloadBytes   = 16 << 20
 	MaxMediaBytes     = 512 << 20
-	MaxContentDays    = 31
+	MaxContentDays    = 92 // a quarter: an offline board visited every few months
 	maxPathBytes      = 200
 	maxPathSegments   = 8
 )

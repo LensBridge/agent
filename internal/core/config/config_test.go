@@ -48,6 +48,9 @@ func TestDefaults(t *testing.T) {
 	if !strings.HasSuffix(c.AgentChannelURL("arm64"), "agent-channel-arm64.json") {
 		t.Errorf("agent channel = %s", c.AgentChannelURL("arm64"))
 	}
+	if c, _ := Load(writeConfig(t, baseTOML+"content_days = 92\n")); c.ContentDays() != 92 {
+		t.Errorf("content_days = 92 gave %d", c.ContentDays())
+	}
 	c, _ = Load(writeConfig(t, baseTOML+"app_channel_url = \"\"\ncontent_days = 99\n"))
 	if c.AppChannelURL() != "" || c.ContentDays() != DefaultContentDays {
 		t.Errorf("overrides wrong: app=%q days=%d", c.AppChannelURL(), c.ContentDays())
