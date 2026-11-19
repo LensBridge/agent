@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"github.com/LensBridge/agent/internal/core/config"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -42,7 +43,7 @@ func newEnv(t *testing.T) *env {
 	e := &env{l: store.Layout{Root: t.TempDir()}, now: time.Date(2026, 9, 25, 14, 0, 0, 0, time.UTC)}
 	ring := trust.NewRing(nil, []ed25519.PublicKey{releaseKey.Public().(ed25519.PublicKey)})
 	e.im = importer.New(importer.Deps{
-		Layout: e.l, DeviceID: "board", AgentVersion: "0.3.0",
+		Layout: e.l, Config: config.InMemory(config.Config{DeviceID: "board"}), AgentVersion: "0.3.0",
 		Ring: func() (*trust.Ring, error) { return ring, nil },
 		Now:  func() time.Time { return e.now },
 	})

@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"github.com/LensBridge/agent/internal/core/clock"
+	"github.com/LensBridge/agent/internal/core/config"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -43,7 +44,7 @@ func installed(t *testing.T) store.Layout {
 	t.Helper()
 	l := store.Layout{Root: t.TempDir()}
 	ring := trust.NewRing([]ed25519.PublicKey{ck.Public().(ed25519.PublicKey)}, []ed25519.PublicKey{rk.Public().(ed25519.PublicKey)})
-	im := importer.New(importer.Deps{Layout: l, DeviceID: dev, AgentVersion: "0.2.0",
+	im := importer.New(importer.Deps{Layout: l, Config: config.InMemory(config.Config{DeviceID: dev}), AgentVersion: "0.2.0",
 		Ring: func() (*trust.Ring, error) { return ring, nil }})
 	c := pkg(t, mbu.Manifest{Type: mbu.TypeContent, Sequence: 1, DeviceID: dev,
 		Content: &mbu.ContentInfo{Timezone: "America/Toronto", FirstDay: "2026-09-24", LastDay: "2026-09-25"}},
@@ -78,7 +79,7 @@ func TestPayloadPicksDayAndClamps(t *testing.T) {
 		day  int
 		want string
 	}{{23, `"day":24`}, {24, `"day":24`}, {25, `"day":25`}, {28, `"day":25`}} {
-		s := New(Deps{Layout: l, DeviceID: dev, Now: at(c.day, 12)})
+		s := New(Deps{Layout: l, Config: config.InMemory(config.Config{DeviceID: dev}), Now: at(c.day, 12)})
 		w := get(t, s, "/api/musallah/payload")
 		if w.Code != 200 || !strings.Contains(w.Body.String(), c.want) {
 			t.Errorf("day %d: %d %s", c.day, w.Code, w.Body)
@@ -88,7 +89,7 @@ func TestPayloadPicksDayAndClamps(t *testing.T) {
 
 func TestWeatherOverlay(t *testing.T) {
 	l := installed(t)
-	s := New(Deps{Layout: l, DeviceID: dev, Now: at(24, 12),
+	s := New(Deps{Layout: l, Config: config.InMemory(config.Config{DeviceID: dev}), Now: at(24, 12),
 		Weather: func() (json.RawMessage, bool) { return json.RawMessage(`{"tempC":12}`), true }})
 	if w := get(t, s, "/api/musallah/payload"); !strings.Contains(w.Body.String(), `"weather":{"tempC":12}`) {
 		t.Fatalf("overlay missing: %s", w.Body)
@@ -96,7 +97,7 @@ func TestWeatherOverlay(t *testing.T) {
 }
 
 func TestNoContentNoApp(t *testing.T) {
-	s := New(Deps{Layout: store.Layout{Root: t.TempDir()}, DeviceID: dev})
+	s := New(Deps{Layout: store.Layout{Root: t.TempDir()}, Config: config.InMemory(config.Config{DeviceID: dev})})
 	if w := get(t, s, "/api/musallah/payload"); w.Code != 503 || !strings.Contains(w.Body.String(), "no content installed") {
 		t.Errorf("payload without content: %d %s", w.Code, w.Body)
 	}
@@ -111,7 +112,7 @@ func TestNoContentNoApp(t *testing.T) {
 }
 
 func TestAppServing(t *testing.T) {
-	s := New(Deps{Layout: installed(t), DeviceID: dev, Now: at(24, 12)})
+	s := New(Deps{Layout: installed(t), Config: config.InMemory(config.Config{DeviceID: dev}), Now: at(24, 12)})
 	if w := get(t, s, "/"); !strings.Contains(w.Body.String(), "board") || w.Header().Get("Cache-Control") != cacheNoCache {
 		t.Errorf("index: %s %v", w.Body, w.Header())
 	}
@@ -141,7 +142,7 @@ func TestAppServing(t *testing.T) {
 }
 
 func TestStatus(t *testing.T) {
-	s := New(Deps{Layout: installed(t), DeviceID: dev, AgentVersion: "0.2.0", Now: at(25, 12),
+	s := New(Deps{Layout: installed(t), Config: config.InMemory(config.Config{DeviceID: dev}), AgentVersion: "0.2.0", Now: at(25, 12),
 		Sync: func() any { return map[string]bool{"enabled": true} }})
 	var st Status
 	json.Unmarshal(get(t, s, "/api/local/status").Body.Bytes(), &st)
@@ -182,7 +183,8 @@ func TestNoAppPageOffersOnlyWorkingRoutes(t *testing.T) {
 		{false, false, []string{"set up for USB sticks or its ethernet service port first"}, []string{"10.77.0.1"}},
 	}
 	for _, tc := range cases {
-		page := (&Server{d: Deps{USBImport: tc.usb, ServicePort: tc.port}}).noAppPage()
+		cfg := config.Config{USBImportSet: &tc.usb, ServicePortSet: &tc.port}
+		page := New(Deps{Config: config.InMemory(cfg)}).noAppPage()
 		for _, w := range tc.want {
 			if !strings.Contains(page, w) {
 				t.Errorf("usb=%v port=%v: missing %q", tc.usb, tc.port, w)
@@ -193,5 +195,23 @@ func TestNoAppPageOffersOnlyWorkingRoutes(t *testing.T) {
 				t.Errorf("usb=%v port=%v: offers %q", tc.usb, tc.port, n)
 			}
 		}
+	}
+}
+
+// An unprovisioned board shows its setup screen at every page path, whatever
+// is installed, and still serves its API.
+func TestUnprovisionedBoardShowsSetupScreen(t *testing.T) {
+	s := New(Deps{Layout: installed(t), Now: at(24, 12)})
+	for _, path := range []string{"/", "/some/route"} {
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), "This board is not set up yet") {
+			t.Fatalf("%s: %d %.80q", path, rec.Code, rec.Body.String())
+		}
+	}
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest("GET", "/api/local/status", nil))
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"deviceId":""`) {
+		t.Fatalf("status: %d %s", rec.Code, rec.Body.String())
 	}
 }

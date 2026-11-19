@@ -8,6 +8,8 @@ import (
 	"testing"
 )
 
+// baseTOML keeps key_path, which configs written before it was dropped
+// carry: an unknown key must not stop a board from loading its config.
 const baseTOML = `device_id = "3f2a1b4c-0000-4000-8000-000000000001"
 backend_url = "https://api.example.com"
 websocket_url = "wss://api.example.com/api/agent/ws"
@@ -64,8 +66,54 @@ func TestSetServicePortKeepsOtherFields(t *testing.T) {
 	if c.ServicePort() || c.DeviceID != "3f2a1b4c-0000-4000-8000-000000000001" {
 		t.Errorf("after SetServicePort(false): %+v", c)
 	}
-	if err := SetServicePort(filepath.Join(t.TempDir(), "missing.toml"), true); err == nil {
-		t.Fatal("expected an error for a missing config")
+	// An unprovisioned board has no config yet; the switch creates one.
+	missing := filepath.Join(t.TempDir(), "missing.toml")
+	if err := SetServicePort(missing, true); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := Load(missing); err != nil || !c.ServicePort() || c.Provisioned() {
+		t.Fatalf("created config: %+v, %v", c, err)
+	}
+}
+
+// No agent.toml is an unprovisioned board, which still runs.
+func TestLoadMissingIsUnprovisioned(t *testing.T) {
+	c, err := Load(filepath.Join(t.TempDir(), "agent.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Provisioned() || c.Online() || !c.USBImport() {
+		t.Fatalf("missing config: %+v", c)
+	}
+	if _, err := Load(writeConfig(t, "device_id = [")); err == nil {
+		t.Fatal("a corrupt config loaded")
+	}
+}
+
+func TestLiveUpdateSavesAndNotifies(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "agent.toml")
+	l, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := l.Changed()
+	if err := l.Update(func(c *Config) error { c.DeviceID = "d"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-changed:
+	default:
+		t.Fatal("Update did not signal a change")
+	}
+	if l.Get().DeviceID != "d" {
+		t.Fatal("Update not current")
+	}
+	if c, _ := Load(p); c.DeviceID != "d" {
+		t.Fatal("Update not saved")
+	}
+	// A failed update changes nothing.
+	if err := l.Update(func(c *Config) error { c.DeviceID = "e"; return errors.New("no") }); err == nil || l.Get().DeviceID != "d" {
+		t.Fatalf("failed update applied: %v %q", err, l.Get().DeviceID)
 	}
 }
 
@@ -133,7 +181,7 @@ func TestLoadKeepsInsecureConfigReadable(t *testing.T) {
 // The opt-in is written as an explicit key, and only when on.
 func TestSaveWritesInsecureDevOnlyWhenSet(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "agent.toml")
-	c := &Config{DeviceID: "d", BackendURL: "https://a", WebSocketURL: "wss://a/ws", KeyPath: "/k"}
+	c := &Config{DeviceID: "d", BackendURL: "https://a", WebSocketURL: "wss://a/ws"}
 	if err := Save(p, c); err != nil {
 		t.Fatal(err)
 	}

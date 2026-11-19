@@ -9,3 +9,5 @@ package fsutil
 func SyncDir(string) error { return nil }
 
 func LockDir(string) (func(), error) { return func() {}, nil }
+
+func ChownToDirOwner(string, string) {}

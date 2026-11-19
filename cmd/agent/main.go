@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -18,24 +17,12 @@ import (
 	"github.com/coreos/go-systemd/v22/daemon"
 
 	"github.com/LensBridge/agent/internal/core/config"
-	"github.com/LensBridge/agent/internal/core/kiosk"
 	"github.com/LensBridge/agent/internal/core/localserver"
-	"github.com/LensBridge/agent/internal/core/netinfo"
-	"github.com/LensBridge/agent/internal/core/splash"
 	"github.com/LensBridge/agent/internal/online/enroll"
 	"github.com/LensBridge/agent/internal/version"
 )
 
-const (
-	defaultConfigPath = "/etc/musallahboard/agent.toml"
-
-	// enrollPollInterval is how often an unenrolled agent re-reads its network
-	// state, repaints the kiosk splash, and checks whether a config appeared.
-	// Short enough that a board plugged into ethernet shows its address while
-	// the installer is still standing in front of it, and that enrollment
-	// takes effect without anyone restarting the service by hand.
-	enrollPollInterval = 5 * time.Second
-)
+const defaultConfigPath = config.DefaultPath
 
 func main() {
 	if len(os.Args) < 2 {
@@ -128,7 +115,7 @@ func runEnroll(args []string) {
 
 	// Enrolling again gives the board a new identity; the old device stays
 	// in the portal, orphaned, until someone revokes it. Only on purpose.
-	if old, err := config.Load(*configPath); err == nil && !*force {
+	if old, err := config.Load(*configPath); err == nil && old.WebSocketURL != "" && !*force {
 		fmt.Fprintf(os.Stderr, "This board is already enrolled (device %s).\n", old.DeviceID)
 		fmt.Fprintln(os.Stderr, "Enrolling again gives it a new identity; revoke the old device in the portal afterwards.")
 		fmt.Fprintln(os.Stderr, "To go ahead, run the same command with --force.")
@@ -152,8 +139,9 @@ func runEnroll(args []string) {
 		fail("enrolled, but the config it wrote cannot be read: %v", err)
 	}
 	fmt.Printf("Enrolled as device %s.\n", cfg.DeviceID)
-	fmt.Println("The board switches from the enrollment screen to MusallahBoard within a few seconds, then")
-	fmt.Println("downloads its board app and content. Check on it with: musallahboard-agent status")
+	restartAgent()
+	fmt.Println("The board connects to LensBridge within a few seconds, then syncs its content.")
+	fmt.Println("Check on it with: musallahboard-agent status")
 }
 
 func runDaemon() {
@@ -164,10 +152,6 @@ func runDaemon() {
 	defer cancel()
 
 	var wg sync.WaitGroup
-
-	// Started before the config gate: awaitEnrollment below can hold the
-	// process for days, and systemd's WatchdogSec does not pause for it.
-	// It pings only while hb is fresh (watchdogLoop).
 	hb := newHeartbeat()
 	wg.Add(1)
 	go func() {
@@ -175,24 +159,24 @@ func runDaemon() {
 		watchdogLoop(ctx, logger, hb)
 	}()
 
-	cfg, err := config.Load(defaultConfigPath)
+	// No agent.toml is an unprovisioned board: it runs all the same, shows
+	// its "not set up yet" screen and takes USB sticks. An unreadable one is
+	// reported and treated the same, so the screen still says something.
+	cfg, err := config.Open(defaultConfigPath)
 	if err != nil {
-		logger.Info("not enrolled yet — entering pre-enrollment mode", "reason", err)
-		cfg = awaitEnrollment(ctx, logger, hb)
-		if cfg == nil { // context cancelled while waiting
-			wg.Wait()
-			logger.Info("shutdown complete")
-			return
-		}
-		logger.Info("enrollment detected", "deviceId", cfg.DeviceID)
+		logger.Error("cannot read the agent config; running as an unprovisioned board", "err", err, "path", defaultConfigPath)
+	}
+	if c := cfg.Get(); c.Provisioned() {
+		logger.Info("board identity", "deviceId", c.DeviceID, "displayName", c.DisplayName, "online", c.Online())
+	} else {
+		logger.Info("this board is not set up yet: waiting for its setup USB stick")
 	}
 
-	hb.beat()
 	if err := startBoard(ctx, logger, cfg, &wg); err != nil {
 		logger.Error("could not start", "err", err)
 		os.Exit(1)
 	}
-	// From now on the heartbeat is the local server answering.
+	// The heartbeat is the local server answering.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -206,74 +190,12 @@ func runDaemon() {
 	logger.Info("shutdown complete")
 }
 
-// awaitEnrollment blocks until a usable config appears at defaultConfigPath,
-// painting this device's IP address onto the kiosk splash while it waits.
-// Returns nil if ctx is cancelled first.
-//
-// Before this existed the daemon exited(1) on a missing config, so a freshly
-// imaged board burned through systemd's StartLimitBurst within a minute and
-// then sat dead behind a static "waiting for enrollment" card. Finding the box
-// to SSH into meant plugging in a keyboard or trawling the router's DHCP
-// leases. The screen is the one output an appliance always has, so an
-// unenrolled agent now stays up and uses it: no network client, no command
-// dispatcher, no key — just a poll loop and a CDP push.
-//
-// Waiting is a legitimate running state rather than a slow start, so we report
-// READY to systemd up front; otherwise Type=notify would hold the unit in
-// "activating" and kill it at TimeoutStartSec.
-func awaitEnrollment(ctx context.Context, logger *slog.Logger, hb *heartbeat) *config.Config {
-	_, _ = daemon.SdNotify(false, daemon.SdNotifyReady)
-	_, _ = daemon.SdNotify(false, "STATUS=waiting for enrollment")
-
-	cdpClient := kiosk.NewClient("")
-
-	var last netinfo.Info
-	var reported bool
-
-	t := time.NewTicker(enrollPollInterval)
-	defer t.Stop()
-	for {
-		// Every step below is bounded, so a loop that stops coming round
-		// is stuck, and the watchdog should restart us.
-		hb.beat()
-		info := netinfo.Collect(ctx)
-		if !reported || !info.Equal(last) {
-			logger.Info("device network address",
-				"ipv4", info.IPv4,
-				"ssid", info.SSID,
-				"hostname", info.Hostname,
-			)
-			last, reported = info, true
-		}
-
-		// Chromium may not be up yet, or may be mid-restart, and once enrolled
-		// the board replaces the splash entirely — a push that finds no hook is
-		// the normal case, not an error worth a log line every tick.
-		switch err := splash.PushNetInfo(ctx, cdpClient, info, version.Version); {
-		case err == nil, errors.Is(err, splash.ErrNoSplash):
-		default:
-			logger.Debug("could not update enrollment splash", "err", err)
-		}
-
-		if cfg, err := config.Load(defaultConfigPath); err == nil {
-			return cfg
-		}
-
-		select {
-		case <-t.C:
-		case <-ctx.Done():
-			return nil
-		}
-	}
-}
-
 // The systemd watchdog (WatchdogSec= in musallahboard-agent.service).
 //
 // A ping on a timer of its own would only prove that the Go runtime still
 // schedules goroutines. So the agent pings only while a heartbeat is fresh,
-// and the heartbeat is bumped by real work: before enrollment by the poll
-// loop in awaitEnrollment (every 5 s), and once enrolled by probeLoop, which
-// asks the agent's own local server for /api/local/status. Answering that
+// and the heartbeat is bumped by real work: probeLoop, which asks the
+// agent's own local server for /api/local/status. Answering that
 // takes the HTTP server and the locks of the sync, backend, update and clock
 // state, i.e. what the board and the admin portal depend on. None of it
 // waits on the network or on the disk beyond a few small files, so an idle or

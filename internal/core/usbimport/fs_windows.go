@@ -20,5 +20,3 @@ func openRegularNoFollow(path string) (*os.File, error) {
 	}
 	return os.Open(path)
 }
-
-func chownToDirOwner(string, string) {}

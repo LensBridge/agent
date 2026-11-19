@@ -63,7 +63,7 @@ func newEnv(t *testing.T, backend string) *env {
 	)
 	im := importer.New(importer.Deps{
 		Layout:       l,
-		DeviceID:     testDevice,
+		Config:       config.InMemory(config.Config{DeviceID: testDevice}),
 		AgentVersion: "0.3.0",
 		Ring:         func() (*trust.Ring, error) { return ring, nil },
 	})

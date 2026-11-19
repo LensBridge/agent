@@ -58,8 +58,9 @@ type ClockReport struct {
 
 // Deps is what the server needs.
 type Deps struct {
-	Layout       store.Layout
-	DeviceID     string
+	Layout store.Layout
+	// DeviceID is the board's, read for every status.
+	DeviceID     func() string
 	AgentVersion string
 	Importer     *importer.Importer
 	// ApplyClientTime is the clock keeper's decision on X-MB-Client-Time.
@@ -83,6 +84,9 @@ func New(d Deps) *Server {
 	}
 	if d.Logger == nil {
 		d.Logger = slog.New(slog.DiscardHandler)
+	}
+	if d.DeviceID == nil {
+		d.DeviceID = func() string { return "" }
 	}
 	return &Server{d: d}
 }
@@ -155,7 +159,7 @@ type Status struct {
 
 func (s *Server) status() Status {
 	now := s.d.Now()
-	ls := localserver.BuildStatus(s.d.Layout, s.d.DeviceID, s.d.AgentVersion, now)
+	ls := localserver.BuildStatus(s.d.Layout, s.d.DeviceID(), s.d.AgentVersion, now)
 	st := Status{DeviceID: ls.DeviceID, AgentVersion: ls.AgentVersion, App: ls.App, Content: ls.Content,
 		Today: ls.Today, DaysRemaining: ls.DaysRemaining, StaleDays: ls.StaleDays}
 	st.Clock.Unix = now.Unix()

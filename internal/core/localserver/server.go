@@ -25,9 +25,11 @@ import (
 	"time"
 
 	"github.com/LensBridge/agent/internal/core/clock"
+	"github.com/LensBridge/agent/internal/core/config"
 	"github.com/LensBridge/agent/internal/core/events"
 	"github.com/LensBridge/agent/internal/core/kiosk"
 	"github.com/LensBridge/agent/internal/core/mbu"
+	"github.com/LensBridge/agent/internal/core/netinfo"
 	"github.com/LensBridge/agent/internal/core/store"
 	"github.com/LensBridge/agent/internal/core/updates"
 	updateanim "github.com/LensBridge/agent/update-anim"
@@ -50,8 +52,9 @@ const (
 
 // Deps is what the server reads.
 type Deps struct {
-	Layout       store.Layout
-	DeviceID     string
+	Layout store.Layout
+	// Config is agent.toml: the board's identity and offline routes.
+	Config       *config.Live
 	AgentVersion string
 	Hub          *events.Hub
 	// Sync returns the sync status object for /api/local/status. May be nil.
@@ -64,8 +67,6 @@ type Deps struct {
 	Updates func() updates.Info
 	// Clock says whether the board's clock can be believed. May be nil.
 	Clock func() clock.Info
-	// ServicePort and USBImport are the board's offline routes (agent.toml).
-	ServicePort, USBImport bool
 	// Backend reports the backend connection (wsclient.ConnState), or nil
 	// when there is none. May be nil.
 	Backend func() any
@@ -86,6 +87,9 @@ func New(d Deps) *Server {
 	}
 	if d.Hub == nil {
 		d.Hub = &events.Hub{}
+	}
+	if d.Config == nil {
+		d.Config = config.InMemory(config.Config{})
 	}
 	return &Server{d: d}
 }
@@ -143,8 +147,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // Status is the current /api/local/status object.
 func (s *Server) Status() Status {
-	st := BuildStatus(s.d.Layout, s.d.DeviceID, s.d.AgentVersion, s.d.Now())
-	st.ServicePort, st.USBImport = s.d.ServicePort, s.d.USBImport
+	cfg := s.d.Config.Get()
+	st := BuildStatus(s.d.Layout, cfg.DeviceID, s.d.AgentVersion, s.d.Now())
+	st.DisplayName = cfg.DisplayName
+	st.ServicePort, st.USBImport = cfg.ServicePort(), cfg.USBImport()
 	if s.d.Backend != nil {
 		st.Backend = s.d.Backend()
 	}
@@ -247,6 +253,14 @@ func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
 // /assets/ file is a 404 instead: it is hashed build output, and HTML under an
 // immutable cache header for a stale script URL is worse than an honest miss.
 func (s *Server) handleApp(w http.ResponseWriter, r *http.Request) {
+	if !s.d.Config.Get().Provisioned() {
+		// Whatever is installed, an unprovisioned board says so and nothing
+		// else: it does not know which board it is.
+		w.Header().Set("Cache-Control", cacheNoStore)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, setupPage(netinfo.Collect(r.Context())))
+		return
+	}
 	a, err := s.d.Layout.CurrentApp()
 	if err != nil {
 		w.Header().Set("Cache-Control", cacheNoStore)
@@ -335,11 +349,12 @@ func writeJSONError(w http.ResponseWriter, code int, msg string) {
 // appears on its own once an app package lands. It suggests only the offline
 // routes this board accepts.
 func (s *Server) noAppPage() string {
+	cfg := s.d.Config.Get()
 	var routes []string
-	if s.d.USBImport {
+	if cfg.USBImport() {
 		routes = append(routes, "plug in a USB stick holding a MusallahBoard update")
 	}
-	if s.d.ServicePort {
+	if cfg.ServicePort() {
 		routes = append(routes, "connect a laptop or phone to the board's ethernet port and open http://10.77.0.1/")
 	}
 	offline := "Without internet, it needs to be set up for USB sticks or its ethernet service port first."
@@ -348,6 +363,37 @@ func (s *Server) noAppPage() string {
 	}
 	return strings.Replace(noAppHTML, "{{offline}}", html.EscapeString(offline), 1)
 }
+
+// setupPage is the board's screen until a setup file (provision package) has
+// given it an identity. The address line is for a maintainer with SSH. It
+// shows the banners an import raises ("Reading USB stick", and the outcome),
+// and reloads once the board is set up.
+func setupPage(n netinfo.Info) string {
+	where := n.Hostname
+	if len(n.IPv4) > 0 {
+		where += " · " + strings.Join(n.IPv4, ", ")
+	}
+	return strings.Replace(setupHTML, "{{where}}", html.EscapeString(where), 1)
+}
+
+const setupHTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>MusallahBoard</title>
+<style>html,body{height:100%;margin:0;background:#082D5D;color:#fff;font-family:system-ui,sans-serif}
+main{height:100%;display:grid;place-items:center;text-align:center;padding:6vmin;box-sizing:border-box}
+h1{font-weight:300;font-size:5vmin;margin:0 0 2.5vmin}p{font-size:2.8vmin;line-height:1.45;opacity:.85;margin:0}
+#note{margin-top:5vmin;font-size:2.6vmin;min-height:8vmin}#note b{display:block;font-size:3vmin}
+small{position:fixed;bottom:2vmin;left:0;right:0;font-size:1.6vmin;opacity:.45}</style>
+</head><body><main><div><h1>This board is not set up yet</h1>
+<p>Plug in its setup USB stick.</p><div id="note"></div></div></main><small>{{where}}</small>
+<script>
+function show(n){var e=document.getElementById('note');e.textContent='';if(!n)return;
+var b=document.createElement('b');b.textContent=n.headline;e.appendChild(b);
+(n.lines||[]).concat(n.footer?[n.footer]:[]).forEach(function(l){var d=document.createElement('div');d.textContent=l;e.appendChild(d)});
+if(n.seconds>0)setTimeout(function(){show(null)},n.seconds*1000)}
+try{new EventSource('/api/local/events').addEventListener('notice',function(ev){show(JSON.parse(ev.data))})}catch(e){}
+setInterval(function(){fetch('/api/local/status',{cache:'no-store'}).then(function(r){return r.json()})
+.then(function(s){if(s&&s.deviceId)location.reload()}).catch(function(){})},3000)
+</script></body></html>`
 
 // aliveGIF is a transparent 1x1 GIF.
 var aliveGIF = []byte("GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\x00\x00\x00" +

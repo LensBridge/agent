@@ -24,10 +24,10 @@ func (f *fakeHandler) Execute(_ context.Context, _ json.RawMessage, _ ProgressFn
 }
 
 type fakeSender struct {
-	mu        sync.Mutex
-	acks      []string
-	progress  []string
-	results   []sentResult
+	mu       sync.Mutex
+	acks     []string
+	progress []string
+	results  []sentResult
 }
 
 type sentResult struct {

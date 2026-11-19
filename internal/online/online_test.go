@@ -1,4 +1,4 @@
-package main
+package online
 
 import (
 	"bytes"
@@ -9,7 +9,7 @@ import (
 	"github.com/LensBridge/agent/internal/core/config"
 )
 
-func TestBackendTransport(t *testing.T) {
+func TestCheckTransport(t *testing.T) {
 	on := true
 	cases := []struct {
 		name    string
@@ -26,7 +26,7 @@ func TestBackendTransport(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			err := backendTransport(slog.New(slog.NewTextHandler(&buf, nil)), &tc.cfg)
+			err := checkTransport(slog.New(slog.NewTextHandler(&buf, nil)), &tc.cfg)
 			if (err != nil) != tc.wantErr {
 				t.Errorf("err = %v, want error %v", err, tc.wantErr)
 			}

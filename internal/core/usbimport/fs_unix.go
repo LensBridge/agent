@@ -27,15 +27,3 @@ func openRegularNoFollow(path string) (*os.File, error) {
 	}
 	return f, nil
 }
-
-// chownToDirOwner gives path the owner and group of dir. Best effort: the
-// helper runs as root, and the inbox belongs to the daemon's user.
-func chownToDirOwner(path, dir string) {
-	fi, err := os.Stat(dir)
-	if err != nil {
-		return
-	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
-		_ = os.Chown(path, int(st.Uid), int(st.Gid))
-	}
-}

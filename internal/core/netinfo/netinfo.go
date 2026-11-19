@@ -6,7 +6,7 @@
 //
 //   - telemetry's heartbeat, via IPv4Addrs — reports every non-loopback IPv4
 //     the box holds, because the backend wants the raw picture.
-//   - the pre-enrollment splash, via Collect — reports only addresses an
+//   - the "not set up yet" screen, via Collect — reports only addresses an
 //     operator can actually connect to, because that address is printed on
 //     the screen as an instruction.
 package netinfo

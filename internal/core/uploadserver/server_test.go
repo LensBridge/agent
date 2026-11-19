@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/json"
+	"github.com/LensBridge/agent/internal/core/config"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -29,10 +30,10 @@ func appPkg(t *testing.T, version string) []byte {
 func server(t *testing.T) (*Server, *int64) {
 	l := store.Layout{Root: t.TempDir()}
 	ring := trust.NewRing(nil, []ed25519.PublicKey{rk.Public().(ed25519.PublicKey)})
-	im := importer.New(importer.Deps{Layout: l, DeviceID: "3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b", AgentVersion: "0.2.0",
+	im := importer.New(importer.Deps{Layout: l, Config: config.InMemory(config.Config{DeviceID: "3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b"}), AgentVersion: "0.2.0",
 		Ring: func() (*trust.Ring, error) { return ring, nil }})
 	var got int64
-	return New(Deps{Layout: l, DeviceID: "3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b", Importer: im,
+	return New(Deps{Layout: l, DeviceID: func() string { return "3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b" }, Importer: im,
 		ApplyClientTime: func(unix int64, b importer.Batch) ClockReport {
 			if b.Verified {
 				got = unix

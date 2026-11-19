@@ -2,14 +2,12 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"net"
 	"os"
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/coreos/go-systemd/v22/daemon"
@@ -27,23 +25,22 @@ import (
 	"github.com/LensBridge/agent/internal/core/trust"
 	"github.com/LensBridge/agent/internal/core/updates"
 	"github.com/LensBridge/agent/internal/core/uploadserver"
-	"github.com/LensBridge/agent/internal/online/boardsync"
-	"github.com/LensBridge/agent/internal/online/commands"
-	"github.com/LensBridge/agent/internal/online/keystore"
-	"github.com/LensBridge/agent/internal/online/wsclient"
+	"github.com/LensBridge/agent/internal/online"
 	"github.com/LensBridge/agent/internal/version"
 )
 
-// startBoard starts everything an enrolled board runs (docs/architecture.md,
-// section 3). The local server comes first and is the only part whose failure
-// is fatal: without it the board has nothing to show. Everything that needs
-// the network or the device key degrades to "not running" instead, because a
-// board that cannot reach LensBridge must still show what it has.
-func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, wg *sync.WaitGroup) error {
+// startBoard starts everything a board runs (docs/architecture.md, section
+// 3), provisioned or not. The local server comes first and is the only part
+// whose failure is fatal: without it the board has nothing to show. The
+// online layer runs beside the core when agent.toml asks for it, and degrades
+// to "not running" on its own, because a board that cannot reach LensBridge
+// must still show what it has.
+func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Live, wg *sync.WaitGroup) error {
 	layout := store.Default()
 	if err := os.MkdirAll(layout.Inbox(), 0o770); err != nil {
 		logger.Warn("could not create inbox", "err", err)
 	}
+	c := cfg.Get()
 
 	hub := &events.Hub{}
 	cdpClient := kiosk.NewClient("")
@@ -51,7 +48,7 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, wg
 	var reporter *selfupdate.Reporter
 	imp := importer.New(importer.Deps{
 		Layout:       layout,
-		DeviceID:     cfg.DeviceID,
+		Config:       cfg,
 		AgentVersion: version.Version,
 		Ring:         func() (*trust.Ring, error) { return trust.LoadRing(trust.DefaultPath) },
 		Screen:       screen,
@@ -65,73 +62,31 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, wg
 	})
 	keeper := clock.New(layout, logger)
 
-	priv, keyErr := keystore.Load(cfg.KeyPath)
-	if keyErr != nil {
-		logger.Error("device key unreadable: serving installed content only (no sync, no remote commands)",
-			"err", keyErr, "keyPath", cfg.KeyPath)
-	}
-	// Nothing that talks to the backend is built from an insecure config:
-	// content sync and the command WebSocket both take
-	// their addresses from it (docs/architecture.md, section 11).
-	transportErr := backendTransport(logger, cfg)
-	offline := func() string {
-		if transportErr != nil {
-			return "not talking to LensBridge: " + transportErr.Error()
-		}
-		return "device key unreadable"
-	}
-	hour, minute := cfg.UpdateTime()
+	hour, minute := c.UpdateTime()
 	// The release channels are public files: any board with a network
-	// follows them, enrolled or not.
+	// follows them, provisioned and enrolled or not.
 	sched := updates.New(updates.Deps{
-		Layout: layout, Importer: imp, Hour: hour, Minute: minute, AutoUpdate: cfg.AutoUpdate(), Logger: logger,
-		AppChannel: cfg.AppChannelURL(), AgentChannel: cfg.AgentChannelURL(runtime.GOARCH),
+		Layout: layout, Importer: imp, Hour: hour, Minute: minute, AutoUpdate: c.AutoUpdate(), Logger: logger,
+		AppChannel: c.AppChannelURL(), AgentChannel: c.AgentChannelURL(runtime.GOARCH),
 		AgentVersion: version.Version,
 		Changed:      func(info updates.Info) { hub.UpdatesChanged(info) },
 	})
-	var syncer *boardsync.Syncer
-	if keyErr == nil && transportErr == nil {
-		syncer = boardsync.New(boardsync.Deps{
-			Cfg: cfg, Key: priv, Layout: layout, Importer: imp,
-			AgentVersion: version.Version, Logger: logger,
-		})
-	}
 
-	// The backend connection starts after the local server; its state is
-	// read through this once it exists.
-	var backend atomic.Pointer[wsclient.Client]
-	local := localserver.New(localserver.Deps{
-		Layout: layout, DeviceID: cfg.DeviceID, AgentVersion: version.Version, Hub: hub,
-		Sync: func() any {
-			if syncer == nil {
-				// Enabled as configured, so the board app and `status` show
-				// the reason as a sync error rather than "sync off".
-				return map[string]any{"enabled": transportErr != nil && cfg.ContentSync(), "lastError": offline()}
-			}
-			return syncer.Status()
-		},
-		Weather: func() (json.RawMessage, bool) {
-			if syncer == nil {
-				return nil, false
-			}
-			return syncer.Weather()
-		},
+	var local *localserver.Server
+	layer := online.New(online.Deps{
+		Config: cfg, Layout: layout, Importer: imp, Updates: sched, Kiosk: cdpClient,
+		BoardReport:  func() any { return local.Status().Board() },
+		AgentVersion: version.Version, Logger: logger,
+	})
+	local = localserver.New(localserver.Deps{
+		Layout: layout, Config: cfg, AgentVersion: version.Version, Hub: hub,
+		Sync:         layer.Sync,
+		Weather:      layer.Weather,
+		Backend:      layer.Backend,
 		UpdateActive: screen.Active,
 		Updates:      sched.Info,
 		Clock:        keeper.Info,
-		Backend: func() any {
-			if ws := backend.Load(); ws != nil {
-				s := ws.State()
-				return &s
-			}
-			if transportErr != nil {
-				return map[string]any{"connected": false, "lastError": offline()}
-			}
-			return nil
-		},
-		ServicePort: cfg.ServicePort(),
-		USBImport:   cfg.USBImport(),
-		Logger:      logger,
+		Logger:       logger,
 	})
 	ln, err := net.Listen("tcp", localserver.ListenAddr)
 	if err != nil {
@@ -151,13 +106,9 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, wg
 		logger.Warn("could not write kiosk url", "err", err)
 	}
 	_, _ = daemon.SdNotify(false, daemon.SdNotifyReady)
-	if transportErr != nil {
-		_, _ = daemon.SdNotify(false, "STATUS=serving installed content only; refusing the backend: "+transportErr.Error())
-	} else {
-		_, _ = daemon.SdNotify(false, "STATUS=serving the board on "+localserver.ListenAddr)
-	}
+	_, _ = daemon.SdNotify(false, "STATUS=serving the board on "+localserver.ListenAddr)
 
-	logInstalled(logger, layout, cfg)
+	logInstalled(logger, layout, c)
 	goRun(wg, func() { kiosk.Watch(ctx, logger, cdpClient, localserver.BaseURL, screen.Active) })
 	goRun(wg, func() {
 		// First say how an agent update that restarted us went: the rest of
@@ -168,45 +119,15 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, wg
 	})
 	goRun(wg, func() { keeper.Run(ctx) })
 	goRun(wg, func() { sched.Run(ctx) })
+	goRun(wg, func() { layer.Run(ctx) })
 
-	if cfg.ServicePort() {
+	if c.ServicePort() {
 		startUploadServer(ctx, logger, cfg, layout, imp, keeper, screen, wg)
 	}
-
-	if syncer != nil {
-		goRun(wg, func() { syncer.Run(ctx) })
-		ws := startCommandChannel(ctx, logger, cfg, priv, cdpClient, syncer, sched,
-			func() any { return local.Status().Board() }, wg)
-		backend.Store(ws)
-	}
 	return nil
 }
 
-// backendTransport checks that the config may be used to talk to the
-// backend (config.CheckTransport) and says so loudly at every start when it
-// may not, or when it may only because of the insecure_dev opt-in. A board
-// enrolled over plain http before https was required lands here: it keeps
-// showing what it has, and the log, `systemctl status`, `musallahboard-agent
-// status` and the board app's sync error all carry the reason and the fix.
-func backendTransport(logger *slog.Logger, cfg *config.Config) error {
-	if err := cfg.CheckTransport(); err != nil {
-		logger.Error("REFUSING TO TALK TO THE BACKEND: this board's config is not safe to use. "+
-			"Serving installed content only: no content sync, no release channel checks, no remote commands. "+
-			"Re-enroll it over https (sudo musallahboard-agent enroll --force --token=... --backend=https://...), "+
-			"or, for a development board only, add insecure_dev = true to "+defaultConfigPath+" and restart the agent.",
-			"err", err, "backendUrl", cfg.BackendURL, "websocketUrl", cfg.WebSocketURL)
-		return err
-	}
-	if cfg.InsecureDev() {
-		logger.Warn("INSECURE DEVELOPMENT BOARD: insecure_dev = true, so this board accepts a plaintext backend. "+
-			"Anyone on its network can impersonate the backend: send it content, reboot it, read its screen and logs. "+
-			"Never deploy a board like this.",
-			"backendUrl", cfg.BackendURL, "websocketUrl", cfg.WebSocketURL)
-	}
-	return nil
-}
-
-func startUploadServer(ctx context.Context, logger *slog.Logger, cfg *config.Config, layout store.Layout,
+func startUploadServer(ctx context.Context, logger *slog.Logger, cfg *config.Live, layout store.Layout,
 	imp *importer.Importer, keeper *clock.Keeper, screen *kiosk.Screen, wg *sync.WaitGroup) {
 	ln, err := uploadserver.Listen()
 	if err != nil {
@@ -214,7 +135,9 @@ func startUploadServer(ctx context.Context, logger *slog.Logger, cfg *config.Con
 		return
 	}
 	srv := uploadserver.New(uploadserver.Deps{
-		Layout: layout, DeviceID: cfg.DeviceID, AgentVersion: version.Version, Importer: imp,
+		Layout:       layout,
+		DeviceID:     func() string { return cfg.Get().DeviceID },
+		AgentVersion: version.Version, Importer: imp,
 		ApplyClientTime: func(unix int64, b importer.Batch) uploadserver.ClockReport {
 			r := keeper.ApplyClientTime(unix, b)
 			return uploadserver.ClockReport{DriftSeconds: r.DriftSeconds, Adjusted: r.Adjusted, Note: r.Note}
@@ -230,29 +153,6 @@ func startUploadServer(ctx context.Context, logger *slog.Logger, cfg *config.Con
 			logger.Error("upload server stopped", "err", err)
 		}
 	})
-}
-
-// startCommandChannel holds the backend WebSocket (telemetry and remote
-// commands) open. config.refresh also asks the content syncer for a sync now;
-// update.install_now checks the release channels and installs at once.
-func startCommandChannel(ctx context.Context, logger *slog.Logger, cfg *config.Config, priv []byte,
-	cdpClient *kiosk.Client, syncer *boardsync.Syncer, sched *updates.Scheduler,
-	boardReport func() any, wg *sync.WaitGroup) *wsclient.Client {
-	wsClient := wsclient.New(cfg, priv, logger, version.Version)
-	wsClient.SetPageProber(cdpClient)
-	wsClient.SetBoardReport(boardReport)
-	registry := commands.NewRegistry()
-	registry.Register(&commands.ChromeReload{CDP: cdpClient})
-	registry.Register(&commands.ChromeScreenshot{CDP: cdpClient})
-	registry.Register(&commands.ConfigRefresh{CDP: cdpClient, Before: syncer.Trigger})
-	registry.Register(&commands.KioskRestart{})
-	registry.Register(&commands.SystemReboot{})
-	registry.Register(&commands.LogsTail{})
-	registry.Register(&commands.UpdateInstallNow{Run: sched.CheckAndInstall})
-	logger.Info("command handlers registered", "kinds", registry.Kinds())
-	wsClient.SetCommandHandler(commands.NewDispatcher(registry, logger).Handle)
-	goRun(wg, func() { wsClient.Run(ctx) })
-	return wsClient
 }
 
 func logInstalled(logger *slog.Logger, l store.Layout, cfg *config.Config) {

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/LensBridge/agent/internal/core/config"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -67,7 +68,7 @@ func setup(t *testing.T) (*Importer, store.Layout, *fakeEvents, *fakeScreen) {
 	ring := trust.NewRing([]ed25519.PublicKey{contentKey.Public().(ed25519.PublicKey)},
 		[]ed25519.PublicKey{releaseKey.Public().(ed25519.PublicKey)})
 	im := New(Deps{
-		Layout: l, DeviceID: dev, AgentVersion: "0.2.0",
+		Layout: l, Config: config.InMemory(config.Config{DeviceID: dev}), AgentVersion: "0.2.0",
 		Ring:   func() (*trust.Ring, error) { return ring, nil },
 		Screen: sc, Events: ev,
 		Now: func() time.Time { return time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC) },

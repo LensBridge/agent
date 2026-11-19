@@ -32,7 +32,7 @@ func TestResultCache_GetPromotes(t *testing.T) {
 	c := NewResultCache(2)
 	c.Put("a", CachedResult{Status: "ok"})
 	c.Put("b", CachedResult{Status: "ok"})
-	_, _ = c.Get("a")                       // promote a → MRU
+	_, _ = c.Get("a")                      // promote a → MRU
 	c.Put("c", CachedResult{Status: "ok"}) // should now evict b, not a
 
 	if _, ok := c.Get("a"); !ok {

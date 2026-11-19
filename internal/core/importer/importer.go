@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/LensBridge/agent/internal/core/clock/timesync"
+	"github.com/LensBridge/agent/internal/core/config"
 	"github.com/LensBridge/agent/internal/core/fsutil"
 	"github.com/LensBridge/agent/internal/core/mbu"
 	"github.com/LensBridge/agent/internal/core/notice"
@@ -123,8 +124,10 @@ type Events interface {
 
 // Deps is what an Importer needs.
 type Deps struct {
-	Layout       store.Layout
-	DeviceID     string
+	Layout store.Layout
+	// Config is agent.toml. Content binds to its device id, read for every
+	// package.
+	Config       *config.Live
 	AgentVersion string
 	// Ring loads the trust ring. Called per batch, so `trust fetch` or
 	// `trust add` take effect without a restart.
@@ -177,6 +180,8 @@ func (im *Importer) awaitReplacement() <-chan struct{} {
 	return im.staged
 }
 
+func (im *Importer) deviceID() string { return im.d.Config.Get().DeviceID }
+
 // New returns an Importer.
 func New(d Deps) *Importer {
 	if d.Now == nil {
@@ -187,6 +192,9 @@ func New(d Deps) *Importer {
 	}
 	if d.TrustedNow == nil {
 		d.TrustedNow = timesync.Now
+	}
+	if d.Config == nil {
+		d.Config = config.InMemory(config.Config{})
 	}
 	return &Importer{d: d}
 }
@@ -272,7 +280,7 @@ func (im *Importer) run(ctx context.Context, src Source, files []string) Batch {
 			b.Results = append(b.Results, im.requeue(it.path, name))
 			continue
 		}
-		if it.peek != nil && it.peek.Type == mbu.TypeContent && it.peek.DeviceID != "" && it.peek.DeviceID != im.d.DeviceID {
+		if it.peek != nil && it.peek.Type == mbu.TypeContent && it.peek.DeviceID != "" && it.peek.DeviceID != im.deviceID() {
 			b.Results = append(b.Results, skippedForeign(name))
 			continue
 		}
@@ -390,7 +398,7 @@ func (im *Importer) one(ctx context.Context, src Source, path, name string, ring
 
 	switch m.Type {
 	case mbu.TypeContent:
-		if m.DeviceID != im.d.DeviceID {
+		if m.DeviceID != im.deviceID() {
 			return skippedForeign(name)
 		}
 		switch {

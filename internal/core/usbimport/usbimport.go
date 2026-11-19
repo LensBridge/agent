@@ -82,7 +82,7 @@ func New() *Helper {
 		MountRoot:   DefaultMountRoot,
 		DevDir:      "/dev",
 		Exec:        runCommand,
-		Chown:       chownToDirOwner,
+		Chown:       fsutil.ChownToDirOwner,
 		Logf:        func(f string, a ...any) { fmt.Printf(f+"\n", a...) },
 		WaitTimeout: WaitTimeout,
 		Poll:        time.Second,

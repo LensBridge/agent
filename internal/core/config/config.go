@@ -1,37 +1,49 @@
-// Package config persists the agent's runtime identity at /etc/musallahboard/agent.toml.
+// Package config is the board's /etc/musallahboard/agent.toml
+// (docs/architecture.md, section 11). Every key is optional: a board with no
+// agent.toml at all is an unprovisioned board, which still runs, shows its
+// "not set up yet" screen and takes USB sticks.
 //
-// Schema:
+// Identity, written by a provision package (setup file) or `enroll`:
 //
-//	device_id      = "uuid"
-//	backend_url    = "https://api.utmmsa.ca"
-//	websocket_url  = "wss://api.utmmsa.ca/api/agent/ws"
-//	key_path       = "/etc/musallahboard/agent.key"
+//	device_id          = "uuid"
+//	display_name       = "North Musallah"
+//	provision_sequence = 1700000000000
 //
-// Optional keys (docs/architecture.md, section 11): service_port, usb_import,
-// content_sync, content_days, auto_update, app_channel_url, agent_channel_url,
-// update_time, insecure_dev.
+// The optional online layer, also from the setup file or `enroll`:
+//
+//	backend_url   = "https://api.example.org"
+//	claim_secret  = "<base64url>"   until the board has claimed its device key
+//	websocket_url = "wss://api.example.org/api/agent/ws"   from the claim or enroll reply
 //
 // backend_url must be https:// and websocket_url wss:// on the same host,
-// unless insecure_dev = true (CheckTransport).
+// unless insecure_dev = true (CheckTransport). The device key is always at
+// KeyPath.
 //
-// Identity is proved by signing a server-issued challenge with the Ed25519 key
-// at KeyPath.
+// Board options: service_port, usb_import, content_sync, content_days,
+// auto_update, app_channel_url, agent_channel_url, update_time, insecure_dev.
 package config
 
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/LensBridge/agent/internal/core/fsutil"
 )
 
-// DefaultKeyPath is where Save writes if the caller leaves Config.KeyPath empty.
-const DefaultKeyPath = "/etc/musallahboard/agent.key"
+// DefaultPath is agent.toml on a board.
+const DefaultPath = "/etc/musallahboard/agent.toml"
+
+// KeyPath is the device key (package keystore), next to agent.toml.
+const KeyPath = "/etc/musallahboard/agent.key"
 
 // Channel defaults (section 9.4). %s is the board's GOARCH.
 const (
@@ -41,17 +53,15 @@ const (
 	DefaultUpdateHour      = 23
 )
 
-// Config is the persisted agent configuration written at enrollment.
-//
-// The first four fields are required at runtime; Load returns an error if any
-// is empty. Everything else is optional: a nil pointer means "not set", and
-// the accessor methods supply the default, so a freshly enrolled config needs
-// none of them.
+// Config is agent.toml. Every field is optional. For the options, a nil
+// pointer means "not set" and the accessor methods supply the default.
 type Config struct {
-	DeviceID     string `toml:"device_id"`
-	BackendURL   string `toml:"backend_url"`
-	WebSocketURL string `toml:"websocket_url"`
-	KeyPath      string `toml:"key_path"`
+	DeviceID          string `toml:"device_id,omitempty"`
+	DisplayName       string `toml:"display_name,omitempty"`
+	ProvisionSequence int64  `toml:"provision_sequence,omitempty"`
+	BackendURL        string `toml:"backend_url,omitempty"`
+	ClaimSecret       string `toml:"claim_secret,omitempty"`
+	WebSocketURL      string `toml:"websocket_url,omitempty"`
 
 	ServicePortSet  *bool   `toml:"service_port,omitempty"`
 	USBImportSet    *bool   `toml:"usb_import,omitempty"`
@@ -67,6 +77,14 @@ type Config struct {
 	// agent.toml so that what the daemon accepts is visible there.
 	InsecureDevSet *bool `toml:"insecure_dev,omitempty"`
 }
+
+// Provisioned reports whether the board has an identity (a device id).
+func (c *Config) Provisioned() bool { return c.DeviceID != "" }
+
+// Online reports whether the board is set up for the online layer: it has
+// an identity and a backend to talk to. It may still have to claim its
+// device key first (no websocket_url yet).
+func (c *Config) Online() bool { return c.DeviceID != "" && c.BackendURL != "" }
 
 // InsecureDev reports whether this board may talk to its backend without TLS.
 // Development boards only.
@@ -216,43 +234,37 @@ func (c *Config) CheckTransport() error {
 	return CheckWebSocketURL(c.WebSocketURL, c.BackendURL, c.InsecureDev())
 }
 
+// Load reads the config at path. A missing file is the empty config of an
+// unprovisioned board, not an error.
 func Load(path string) (*Config, error) {
 	var c Config
 	if _, err := toml.DecodeFile(path, &c); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return &Config{}, nil
+		}
 		return nil, fmt.Errorf("read %s: %w", path, err)
-	}
-	if c.KeyPath == "" {
-		c.KeyPath = DefaultKeyPath
-	}
-	if c.DeviceID == "" || c.BackendURL == "" || c.WebSocketURL == "" {
-		return nil, fmt.Errorf("config %s is incomplete (run `agent enroll` first)", path)
 	}
 	return &c, nil
 }
 
-// SetServicePort rewrites service_port in the config at path, leaving every
-// other field as it was. The file
-// keeps its owner: this runs as root via sudo, but the daemon reading the
-// result runs as the service user, and Save creates a fresh 0600 file that
-// would otherwise belong to root.
+// SetServicePort rewrites service_port in the config at path (creating it if
+// need be), leaving every other field as it was.
 func SetServicePort(path string, on bool) error {
 	c, err := Load(path)
 	if err != nil {
 		return err
 	}
-	owner, haveOwner := fileOwner(path)
 	c.ServicePortSet = &on
-	if err := Save(path, c); err != nil {
-		return err
-	}
-	if haveOwner {
-		owner.apply(path)
-	}
-	return nil
+	return Save(path, c)
 }
 
 // Save writes the config atomically: tmp file + fsync + rename. Survives a
 // power cut mid-write — either the old file is intact or the new one is.
+//
+// The file gets the owner of its directory. Root tools (`enroll`,
+// `service-port`) write it under sudo, but the daemon that reads it runs as
+// the service user, which owns /etc/musallahboard; run as that user, this is
+// a no-op.
 func Save(path string, c *Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
@@ -277,9 +289,75 @@ func Save(path string, c *Config) error {
 		os.Remove(tmp)
 		return fmt.Errorf("close: %w", err)
 	}
+	fsutil.ChownToDirOwner(tmp, filepath.Dir(path))
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
 		return fmt.Errorf("rename: %w", err)
 	}
 	return nil
+}
+
+// Live is agent.toml as the daemon holds it: read once at start, changed by
+// the importer when it applies a setup file (and by the online layer when a
+// claim completes), and read again by everything that needs the board's
+// identity. Each change is saved before anyone sees it.
+type Live struct {
+	path string
+
+	mu      sync.Mutex
+	cur     Config
+	changed chan struct{}
+}
+
+// Open reads the config at path into a Live. On an error it still returns a
+// Live, holding the empty config, so the board runs as unprovisioned while
+// the caller reports why.
+func Open(path string) (*Live, error) {
+	l := &Live{path: path, changed: make(chan struct{})}
+	c, err := Load(path)
+	if err != nil {
+		return l, err
+	}
+	l.cur = *c
+	return l, nil
+}
+
+// InMemory is a Live that holds c and never saves it, for tests and tools.
+func InMemory(c Config) *Live {
+	return &Live{cur: c, changed: make(chan struct{})}
+}
+
+// Get returns a copy of the current config.
+func (l *Live) Get() *Config {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	c := l.cur
+	return &c
+}
+
+// Update applies fn to a copy of the current config and saves it; only then
+// does it become current. fn's error aborts without saving.
+func (l *Live) Update(fn func(*Config) error) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	next := l.cur
+	if err := fn(&next); err != nil {
+		return err
+	}
+	if l.path != "" {
+		if err := Save(l.path, &next); err != nil {
+			return err
+		}
+	}
+	l.cur = next
+	close(l.changed)
+	l.changed = make(chan struct{})
+	return nil
+}
+
+// Changed returns a channel closed at the next Update.
+func (l *Live) Changed() <-chan struct{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.changed
 }

@@ -18,7 +18,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -32,7 +31,7 @@ type Params struct {
 	Token      string
 	BackendURL string
 	ConfigPath string
-	KeyPath    string // optional; defaults to config.DefaultKeyPath
+	KeyPath    string // optional; defaults to config.KeyPath
 	// TrustPath is the trust store the backend's content keys are pinned
 	// in; optional, defaults to trust.DefaultPath.
 	TrustPath    string
@@ -50,7 +49,7 @@ type Params struct {
 func Run(ctx context.Context, logger *slog.Logger, p Params) error {
 	keyPath := p.KeyPath
 	if keyPath == "" {
-		keyPath = config.DefaultKeyPath
+		keyPath = config.KeyPath
 	}
 
 	// Before anything goes on the wire: the reply pins the content keys and
@@ -130,14 +129,23 @@ func Run(ctx context.Context, logger *slog.Logger, p Params) error {
 	if err := keystore.Save(keyPath, priv); err != nil {
 		return fmt.Errorf("save key: %w", err)
 	}
-	_ = chownToDirOwner(keyPath, filepath.Dir(keyPath))
 
-	cfg := &config.Config{
-		DeviceID:     deviceID,
-		BackendURL:   strings.TrimRight(p.BackendURL, "/"),
-		WebSocketURL: websocketURL,
-		KeyPath:      keyPath,
+	// The board's other settings (a setup file's name, service_port, ...)
+	// stay; the online identity is the backend's answer.
+	cfg, err := config.Load(p.ConfigPath)
+	if err != nil {
+		cfg = &config.Config{}
 	}
+	if cfg.DeviceID != deviceID {
+		if cfg.DeviceID != "" {
+			logger.Warn("the backend enrolled this board as a different device than its setup file named",
+				"setupDeviceId", cfg.DeviceID, "deviceId", deviceID)
+		}
+		cfg.DeviceID, cfg.DisplayName, cfg.ProvisionSequence = deviceID, "", 0
+	}
+	cfg.BackendURL = strings.TrimRight(p.BackendURL, "/")
+	cfg.WebSocketURL = websocketURL
+	cfg.ClaimSecret = ""
 	if p.InsecureDev {
 		on := true
 		cfg.InsecureDevSet = &on
@@ -145,11 +153,6 @@ func Run(ctx context.Context, logger *slog.Logger, p Params) error {
 	if err := config.Save(p.ConfigPath, cfg); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
-	_ = chownToDirOwner(p.ConfigPath, filepath.Dir(p.ConfigPath))
-
-	// The kiosk URL is not written here any more: in v2 the kiosk always
-	// loads the agent's own local server, and the daemon writes kiosk-url
-	// itself once it sees the config (docs/architecture.md, section 14).
 
 	// Pin the backend's content keys. They arrive over the same TLS
 	// connection that just established this device's identity, which is as

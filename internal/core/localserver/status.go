@@ -15,9 +15,11 @@ import (
 // Status is /api/local/status (docs/architecture.md, section 7). The CLI and
 // the upload server build theirs from it.
 type Status struct {
-	LocalAPI      int          `json:"localApi"`
-	AgentVersion  string       `json:"agentVersion"`
-	DeviceID      string       `json:"deviceId"`
+	LocalAPI     int    `json:"localApi"`
+	AgentVersion string `json:"agentVersion"`
+	DeviceID     string `json:"deviceId"`
+	// DisplayName is the board's name from its setup file, if it has one.
+	DisplayName   string       `json:"displayName,omitempty"`
 	App           *AppInfo     `json:"app"`
 	Content       *ContentInfo `json:"content"`
 	Today         string       `json:"today"`

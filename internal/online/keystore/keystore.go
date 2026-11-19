@@ -1,7 +1,7 @@
 // Package keystore manages the per-device Ed25519 private key.
 //
 // The key lives at /etc/musallahboard/agent.key as a raw 32-byte seed, mode
-// 0600, root-owned. This is symmetric with the backend, which stores the raw
+// 0600, owned by the daemon's user (the owner of /etc/musallahboard). This is symmetric with the backend, which stores the raw
 // 32-byte public key in device.public_key. The backend never sees the private
 // key — it's generated locally on the Pi at first enroll.
 package keystore
@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/LensBridge/agent/internal/core/fsutil"
 )
 
 // SeedSize is the size in bytes of the Ed25519 private-key seed.
@@ -58,6 +60,7 @@ func Save(path string, priv ed25519.PrivateKey) error {
 		os.Remove(tmp)
 		return fmt.Errorf("close: %w", err)
 	}
+	fsutil.ChownToDirOwner(tmp, filepath.Dir(path))
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
 		return fmt.Errorf("rename: %w", err)

@@ -43,3 +43,17 @@ func LockDir(dir string) (unlock func(), err error) {
 		f.Close()
 	}, nil
 }
+
+// ChownToDirOwner gives path the owner and group of dir. Root tools (the USB
+// helper, `enroll`, `service-port`) write files the unprivileged daemon must
+// read, into directories the daemon owns. Best effort: not root, it fails
+// harmlessly, and then the caller owns the file already.
+func ChownToDirOwner(path, dir string) {
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		_ = os.Chown(path, int(st.Uid), int(st.Gid))
+	}
+}

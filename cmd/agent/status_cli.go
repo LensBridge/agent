@@ -161,7 +161,14 @@ func printStatus(st cliStatus) {
 	row := func(k, format string, args ...any) {
 		fmt.Printf("  %-18s %s\n", k+":", fmt.Sprintf(format, args...))
 	}
-	row("Device", "%s", st.DeviceID)
+	switch {
+	case st.DeviceID == "":
+		row("Device", "NOT SET UP YET: plug in its setup USB stick (from LensBridge, Devices, Setup file)")
+	case st.DisplayName != "":
+		row("Device", "%s (%s)", st.DisplayName, st.DeviceID)
+	default:
+		row("Device", "%s", st.DeviceID)
+	}
 	if st.Daemon {
 		row("Agent", "%s (running)", st.AgentVersion)
 	} else {
@@ -171,7 +178,7 @@ func printStatus(st cliStatus) {
 		row("Screen", "%s", kioskShowing())
 		switch b, _ := st.Backend.(map[string]any); {
 		case b == nil:
-			row("LensBridge", "not connected: no device key")
+			row("LensBridge", "offline board (no backend in its setup file)")
 		case b["connected"] == true:
 			row("LensBridge", "connected since %s", localTime(b["since"]))
 		case b["lastError"] != nil && b["lastError"] != "":

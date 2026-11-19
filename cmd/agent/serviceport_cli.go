@@ -44,7 +44,8 @@ func requireRoot(cmd string) {
 	}
 }
 
-// loadConfigCLI loads the enrolled config, explaining the usual failures.
+// loadConfigCLI loads agent.toml (empty on an unprovisioned board),
+// explaining the usual failures.
 func loadConfigCLI() *config.Config {
 	cfg, err := config.Load(defaultConfigPath)
 	switch {
@@ -52,8 +53,6 @@ func loadConfigCLI() *config.Config {
 		return cfg
 	case errors.Is(err, fs.ErrPermission):
 		fail("cannot read %s (permission denied). Run this with sudo.", defaultConfigPath)
-	case errors.Is(err, fs.ErrNotExist):
-		fail("this board is not enrolled yet (%s does not exist). Enroll it online first:\n       sudo musallahboard-agent enroll --token=<token> --backend=<url>", defaultConfigPath)
 	default:
 		fail("%v", err)
 	}
@@ -200,7 +199,7 @@ func servicePortOff() {
 	fmt.Println("Content keeps syncing from LensBridge whenever the board can reach it.")
 }
 
-// restartAgent restarts the daemon so it starts or stops the upload server.
+// restartAgent restarts the daemon, so it reads the config a command changed.
 func restartAgent() {
 	if out, err := runCmd("systemctl", "restart", agentUnit); err != nil {
 		fail("could not restart %s: %v\n%s", agentUnit, err, out)
