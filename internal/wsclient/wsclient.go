@@ -68,7 +68,6 @@ type Client struct {
 	priv         ed25519.PrivateKey
 	logger       *slog.Logger
 	agentVersion string
-	safeMode     bool
 
 	onCommand   CommandHandler
 	prober      telemetry.PageProber
@@ -106,13 +105,12 @@ func (c *Client) setState(connected bool, err error) {
 	}
 }
 
-func New(cfg *config.Config, priv ed25519.PrivateKey, logger *slog.Logger, agentVersion string, safeMode bool) *Client {
+func New(cfg *config.Config, priv ed25519.PrivateKey, logger *slog.Logger, agentVersion string) *Client {
 	return &Client{
 		cfg:          cfg,
 		priv:         priv,
 		logger:       logger,
 		agentVersion: agentVersion,
-		safeMode:     safeMode,
 	}
 }
 
@@ -287,7 +285,7 @@ func (c *Client) serve(ctx context.Context, sess *session, hbInterval time.Durat
 
 func (c *Client) heartbeatLoop(ctx context.Context, sess *session, interval time.Duration) error {
 	send := func() error {
-		snap := telemetry.Collect(ctx, c.agentVersion, c.safeMode, c.prober)
+		snap := telemetry.Collect(ctx, c.agentVersion, c.prober)
 		hb := HeartbeatFrame{
 			Type:      "heartbeat",
 			Seq:       sess.nextSeq(),

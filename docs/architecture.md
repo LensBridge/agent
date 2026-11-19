@@ -775,8 +775,7 @@ one that does not is resumed as above.
 
 Not covered: a new agent that starts crashing after its probation is
 restarted by systemd for ever (with a growing delay) and is not rolled
-back. Safe mode (`internal/safemode`) only reports such a board, as
-`safeMode` in its heartbeats; it does not change what the agent does.
+back.
 
 Telling the people at the board (`internal/agentupdate`): the agent that
 staged the package leaves the screen on "Restarting MusallahBoard" and its

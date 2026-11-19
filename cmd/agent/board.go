@@ -46,7 +46,7 @@ const kioskWatchInterval = 30 * time.Second
 // is fatal: without it the board has nothing to show. Everything that needs
 // the network or the device key degrades to "not running" instead, because a
 // board that cannot reach LensBridge must still show what it has.
-func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, safeMode bool, wg *sync.WaitGroup) error {
+func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, wg *sync.WaitGroup) error {
 	layout := store.Default()
 	if err := os.MkdirAll(layout.Inbox(), 0o770); err != nil {
 		logger.Warn("could not create inbox", "err", err)
@@ -184,7 +184,7 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, sa
 
 	if syncer != nil {
 		goRun(wg, func() { syncer.Run(ctx) })
-		ws := startCommandChannel(ctx, logger, cfg, priv, safeMode, cdpClient, syncer, sched,
+		ws := startCommandChannel(ctx, logger, cfg, priv, cdpClient, syncer, sched,
 			func() any { return local.Status().Board() }, wg)
 		backend.Store(ws)
 	}
@@ -245,9 +245,9 @@ func startUploadServer(ctx context.Context, logger *slog.Logger, cfg *config.Con
 // commands) open. config.refresh also asks the content syncer for a sync now;
 // update.install_now checks the release channels and installs at once.
 func startCommandChannel(ctx context.Context, logger *slog.Logger, cfg *config.Config, priv []byte,
-	safeMode bool, cdpClient *cdp.Client, syncer *boardsync.Syncer, sched *updates.Scheduler,
+	cdpClient *cdp.Client, syncer *boardsync.Syncer, sched *updates.Scheduler,
 	boardReport func() any, wg *sync.WaitGroup) *wsclient.Client {
-	wsClient := wsclient.New(cfg, priv, logger, version.Version, safeMode)
+	wsClient := wsclient.New(cfg, priv, logger, version.Version)
 	wsClient.SetPageProber(cdpClient)
 	wsClient.SetBoardReport(boardReport)
 	registry := commands.NewRegistry()

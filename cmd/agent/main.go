@@ -22,19 +22,12 @@ import (
 	"github.com/LensBridge/agent/internal/enroll"
 	"github.com/LensBridge/agent/internal/localserver"
 	"github.com/LensBridge/agent/internal/netinfo"
-	"github.com/LensBridge/agent/internal/safemode"
 	"github.com/LensBridge/agent/internal/splash"
 	"github.com/LensBridge/agent/internal/version"
 )
 
 const (
 	defaultConfigPath = "/etc/musallahboard/agent.toml"
-	defaultStateDir   = "/var/lib/musallahboard"
-
-	// stableRunDuration is how long the agent must run cleanly before its
-	// crash counter is reset. Shorter than systemd's StartLimitIntervalSec
-	// so that a flapping agent never gets credit for "stable."
-	stableRunDuration = 5 * time.Minute
 
 	// enrollPollInterval is how often an unenrolled agent re-reads its network
 	// state, repaints the kiosk splash, and checks whether a config appeared.
@@ -194,14 +187,8 @@ func runDaemon() {
 		logger.Info("enrollment detected", "deviceId", cfg.DeviceID)
 	}
 
-	sm := safemode.New(defaultStateDir)
-	safeMode := sm.OnStartup()
-	if safeMode {
-		logger.Warn("agent starting in safe mode (repeated crashes detected)")
-	}
-
 	hb.beat()
-	if err := startBoard(ctx, logger, cfg, safeMode, &wg); err != nil {
+	if err := startBoard(ctx, logger, cfg, &wg); err != nil {
 		logger.Error("could not start", "err", err)
 		os.Exit(1)
 	}
@@ -210,17 +197,6 @@ func runDaemon() {
 	go func() {
 		defer wg.Done()
 		probeLoop(ctx, hb, "http://"+localserver.ListenAddr+"/api/local/status", livenessProbeInterval)
-	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		select {
-		case <-time.After(stableRunDuration):
-			sm.OnSuccessfulRun()
-			logger.Info("crash counter reset (agent stable)")
-		case <-ctx.Done():
-		}
 	}()
 
 	<-ctx.Done()

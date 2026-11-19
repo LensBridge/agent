@@ -27,7 +27,7 @@ func TestRunRefusesInsecureWebSocketURL(t *testing.T) {
 		"other host": {DeviceID: "d", BackendURL: "https://api.example.com", WebSocketURL: "wss://" + host + "/ws"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			c := New(cfg, nil, slog.New(slog.DiscardHandler), "test", false)
+			c := New(cfg, nil, slog.New(slog.DiscardHandler), "test")
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			c.Run(ctx) // must return on its own

@@ -31,7 +31,6 @@ type Snapshot struct {
 	IPAddrs           []string `json:"ipAddrs,omitempty"`
 	SSID              string   `json:"ssid,omitempty"`
 	AgentVersion      string   `json:"agentVersion"`
-	SafeMode          bool     `json:"safeMode,omitempty"`
 }
 
 // PageProber reports what the kiosk browser is currently showing. Satisfied by
@@ -46,11 +45,10 @@ const pageProbeTimeout = 3 * time.Second
 
 // Collect gathers a fresh snapshot. Errors in individual collectors are
 // swallowed and the corresponding field left zero/empty.
-func Collect(ctx context.Context, agentVersion string, safeMode bool, prober PageProber) Snapshot {
+func Collect(ctx context.Context, agentVersion string, prober PageProber) Snapshot {
 	s := Snapshot{
 		Timestamp:    time.Now().Unix(),
 		AgentVersion: agentVersion,
-		SafeMode:     safeMode,
 	}
 	s.UptimeSec, _ = readUptime()
 	s.CPUTempC, _ = readCPUTemp()
