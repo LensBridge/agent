@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"math/rand"
 	"net/http"
-	"net/url"
 	"os"
 	"time"
 
@@ -23,8 +23,6 @@ var errTooLarge = fmt.Errorf("the download is larger than %d MiB, the most a pac
 func signRequest(req *http.Request, body []byte, deviceID string, key ed25519.PrivateKey, now time.Time) {
 	devauth.Sign(req, body, deviceID, key, now)
 }
-
-func urlQueryEscape(s string) string { return url.QueryEscape(s) }
 
 // saveCapped streams r into a new file at path, reading at most limit bytes;
 // anything longer is errTooLarge and the file is removed. When h is not nil
@@ -58,3 +56,12 @@ func saveCapped(path string, r io.Reader, limit int64, h hash.Hash) (int64, erro
 	}
 	return n, nil
 }
+
+func jitter(b time.Duration) time.Duration {
+	if b < 4 {
+		return 0
+	}
+	return time.Duration(rand.Int63n(int64(b / 4)))
+}
+
+func removeAll(p string) { _ = os.RemoveAll(p) }

@@ -47,9 +47,7 @@ const (
 	ChannelRetry = 5 * time.Minute
 	// ChannelTimeout bounds one fetch of a channel file, which is a few
 	// hundred bytes: a request that has had no answer by then is stuck.
-	ChannelTimeout    = 30 * time.Second
-	RefreshMinBackoff = time.Second
-	RefreshMaxBackoff = 5 * time.Minute
+	ChannelTimeout = 30 * time.Second
 
 	// MaxHaveMedia caps the haveMedia list. A store bigger than this only
 	// costs a larger download; the backend includes whatever is not listed.
@@ -108,7 +106,6 @@ type Syncer struct {
 	contentInterval, triggerDelay, minBackoff, maxBackoff time.Duration
 	weatherInterval, channelFirstDelay, channelInterval   time.Duration
 	channelRetry, channelTimeout                          time.Duration
-	refreshMinBackoff, refreshMaxBackoff                  time.Duration
 
 	mu        sync.Mutex
 	status    Status
@@ -141,8 +138,6 @@ func New(d Deps) *Syncer {
 		channelInterval:   ChannelInterval,
 		channelRetry:      ChannelRetry,
 		channelTimeout:    ChannelTimeout,
-		refreshMinBackoff: RefreshMinBackoff,
-		refreshMaxBackoff: RefreshMaxBackoff,
 	}
 }
 
@@ -183,7 +178,6 @@ func (s *Syncer) Run(ctx context.Context) {
 	}
 	if s.d.Cfg.ContentSync() {
 		run(s.contentLoop)
-		run(s.refreshLoop)
 		run(s.weatherLoop)
 	} else {
 		s.log.Info("content sync is off (content_sync = false); the board only takes content from USB, uploads and the CLI")
@@ -197,8 +191,8 @@ func (s *Syncer) Run(ctx context.Context) {
 }
 
 // Trigger asks for a content sync in TriggerDelay. Calls within that window
-// fold into one sync: the backend's refresh channel fires once per admin
-// edit, and an admin editing five posters should cost one download.
+// fold into one sync: an admin editing five posters should cost one
+// download.
 func (s *Syncer) Trigger() {
 	select {
 	case s.trigger <- struct{}{}:
@@ -240,7 +234,7 @@ func (s *Syncer) contentLoop(ctx context.Context) {
 		case <-s.trigger:
 			// Bring the next sync forward to at most triggerDelay away, but
 			// never push an already-closer one back: a steady stream of
-			// refresh messages must not postpone the sync forever.
+			// triggers must not postpone the sync forever.
 			if until := deadline.Sub(s.now()); until > s.triggerDelay {
 				deadline = s.now().Add(s.triggerDelay)
 				resetTimer(timer, s.triggerDelay)

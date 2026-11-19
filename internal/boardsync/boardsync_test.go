@@ -16,12 +16,9 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/coder/websocket"
 
 	"github.com/LensBridge/agent/internal/config"
 	"github.com/LensBridge/agent/internal/devauth"
@@ -263,35 +260,16 @@ func TestContentBackoff(t *testing.T) {
 	}
 }
 
-func TestRefreshTriggersDebouncedSync(t *testing.T) {
+func TestTriggerFoldsIntoOneSync(t *testing.T) {
 	pkg := contentPackage(t, 1000)
 	var hits atomic.Int32
-	var mu sync.Mutex
-	var sockets []*websocket.Conn
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/agent/content-bundle":
-			hits.Add(1)
-			w.Write(pkg)
-		case "/api/refresh-musallahboard":
-			if r.URL.Query().Get("deviceId") != testDevice {
-				t.Errorf("refresh deviceId = %q", r.URL.Query().Get("deviceId"))
-			}
-			c, err := websocket.Accept(w, r, nil)
-			if err != nil {
-				return
-			}
-			mu.Lock()
-			sockets = append(sockets, c)
-			mu.Unlock()
-			// Three messages in quick succession fold into one sync.
-			for range 3 {
-				c.Write(r.Context(), websocket.MessageText, []byte("refresh"))
-			}
-			c.Read(r.Context()) // hold open until the client goes
-		default:
+		if r.URL.Path != "/api/agent/content-bundle" {
 			http.NotFound(w, r)
+			return
 		}
+		hits.Add(1)
+		w.Write(pkg)
 	}))
 	defer srv.Close()
 	e := newEnv(t, srv.URL)
@@ -299,10 +277,14 @@ func TestRefreshTriggersDebouncedSync(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { e.syncer.Run(ctx); close(done) }()
-	// Wait for the second sync rather than giving the whole exchange a fixed
-	// budget: under -race on a busy CI runner, start-up sync, WebSocket dial
-	// and debounce together can take longer than any small constant.
 	deadline := time.Now().Add(10 * time.Second)
+	for hits.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Three triggers in quick succession fold into one sync.
+	for range 3 {
+		e.syncer.Trigger()
+	}
 	for hits.Load() < 2 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -310,30 +292,9 @@ func TestRefreshTriggersDebouncedSync(t *testing.T) {
 	time.Sleep(10 * e.syncer.triggerDelay)
 	cancel()
 	<-done
-	mu.Lock()
-	for _, c := range sockets {
-		c.CloseNow()
-	}
-	mu.Unlock()
-	// One at start, one for the burst of refresh messages.
+	// One at start, one for the burst of triggers.
 	if n := hits.Load(); n != 2 {
 		t.Fatalf("%d content syncs, want 2", n)
-	}
-}
-
-func TestRefreshURL(t *testing.T) {
-	for in, want := range map[string]string{
-		"https://api.example":       "wss://api.example/api/refresh-musallahboard?deviceId=" + testDevice,
-		"http://10.0.0.2:8080/":     "ws://10.0.0.2:8080/api/refresh-musallahboard?deviceId=" + testDevice,
-		"https://api.example/base/": "wss://api.example/base/api/refresh-musallahboard?deviceId=" + testDevice,
-	} {
-		got, err := refreshURL(in, testDevice)
-		if err != nil || got != want {
-			t.Errorf("refreshURL(%q) = %q, %v; want %q", in, got, err, want)
-		}
-	}
-	if _, err := refreshURL("ftp://x", testDevice); err == nil {
-		t.Error("ftp scheme accepted")
 	}
 }
 

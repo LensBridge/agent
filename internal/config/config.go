@@ -204,7 +204,7 @@ func sameHost(a, b string) bool {
 
 // CheckTransport applies CheckBackendURL and CheckWebSocketURL to this
 // config. The daemon calls it before it builds anything that talks to the
-// backend (content sync, the refresh channel, release checks, the command
+// backend (content sync, release checks, the command
 // WebSocket) and talks to none of them when it fails.
 //
 // Load does not call it: a board with an insecure config still shows the

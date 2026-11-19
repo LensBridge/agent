@@ -78,7 +78,7 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, wg
 			"err", keyErr, "keyPath", cfg.KeyPath)
 	}
 	// Nothing that talks to the backend is built from an insecure config:
-	// content sync, its refresh channel and the command WebSocket all take
+	// content sync and the command WebSocket both take
 	// their addresses from it (docs/architecture.md, section 11).
 	transportErr := backendTransport(logger, cfg)
 	offline := func() string {
