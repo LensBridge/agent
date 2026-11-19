@@ -606,7 +606,7 @@ func TestOutcomeOfAResumedCommitIsTheSame(t *testing.T) {
 	if _, err := u.Apply(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	// agentupdate shows an outcome once, by its timestamp.
+	// The Reporter shows an outcome once, by its timestamp.
 	if again := lastUpdate(t, u); again != first {
 		t.Errorf("outcome rewritten: %+v, was %+v", again, first)
 	}

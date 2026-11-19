@@ -43,7 +43,7 @@ func (l Layout) AgentStagedDir() string  { return filepath.Join(l.Root, "agent",
 func (l Layout) AgentLastUpdate() string { return filepath.Join(l.Root, "agent", "last-update.json") }
 
 // AgentPendingNotice is the outcome of the batch that staged an agent, left
-// for the agent that starts next to show (package agentupdate).
+// for the agent that starts next to show (selfupdate.Reporter).
 func (l Layout) AgentPendingNotice() string {
 	return filepath.Join(l.Root, "agent", "pending-notice.json")
 }

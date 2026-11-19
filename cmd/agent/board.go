@@ -15,7 +15,6 @@ import (
 
 	"github.com/coreos/go-systemd/v22/daemon"
 
-	"github.com/LensBridge/agent/internal/core/agentupdate"
 	"github.com/LensBridge/agent/internal/core/cdp"
 	"github.com/LensBridge/agent/internal/core/clock"
 	"github.com/LensBridge/agent/internal/core/config"
@@ -24,6 +23,7 @@ import (
 	"github.com/LensBridge/agent/internal/core/kioskurl"
 	"github.com/LensBridge/agent/internal/core/localserver"
 	"github.com/LensBridge/agent/internal/core/notice"
+	"github.com/LensBridge/agent/internal/core/selfupdate"
 	"github.com/LensBridge/agent/internal/core/store"
 	"github.com/LensBridge/agent/internal/core/trust"
 	"github.com/LensBridge/agent/internal/core/updates"
@@ -55,7 +55,7 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, wg
 	hub := &events.Hub{}
 	cdpClient := cdp.New("")
 	screen := updatescreen.New(cdpClient, strings.TrimSuffix(localserver.BaseURL, "/"), logger)
-	var reporter *agentupdate.Reporter
+	var reporter *selfupdate.Reporter
 	imp := importer.New(importer.Deps{
 		Layout:       layout,
 		DeviceID:     cfg.DeviceID,
@@ -66,7 +66,7 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Config, wg
 		Events:       hub,
 		Logger:       logger,
 	})
-	reporter = agentupdate.New(agentupdate.Deps{
+	reporter = selfupdate.NewReporter(selfupdate.ReporterDeps{
 		Layout: layout, Version: version.Version, Screen: screen,
 		Banner: hub.Notice, Resume: imp.AgentNotReplaced, Logger: logger,
 	})

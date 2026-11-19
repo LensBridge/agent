@@ -1,4 +1,4 @@
-package agentupdate
+package selfupdate
 
 import (
 	"context"
@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/LensBridge/agent/internal/core/notice"
-	"github.com/LensBridge/agent/internal/core/selfupdate"
 	"github.com/LensBridge/agent/internal/core/store"
 )
 
@@ -38,7 +37,7 @@ func newEnv(t *testing.T, version string) *env {
 	t.Helper()
 	e := &env{l: store.Layout{Root: t.TempDir()}, screen: &fakeScreen{}}
 	os.MkdirAll(filepath.Join(e.l.Root, "agent"), 0o750)
-	e.r = New(Deps{
+	e.r = NewReporter(ReporterDeps{
 		Layout: e.l, Version: version, Screen: e.screen,
 		Banner: func(n notice.Notice) { e.banners = append(e.banners, n) },
 		Resume: func() { e.resumed++ },
@@ -47,7 +46,7 @@ func newEnv(t *testing.T, version string) *env {
 	return e
 }
 
-func (e *env) outcome(t *testing.T, o selfupdate.Outcome) {
+func (e *env) outcome(t *testing.T, o Outcome) {
 	t.Helper()
 	raw, _ := json.Marshal(o)
 	if err := os.WriteFile(e.l.AgentLastUpdate(), raw, 0o644); err != nil {
@@ -85,8 +84,8 @@ func TestRollbackIsShownOnce(t *testing.T) {
 	e := newEnv(t, "0.2.1")
 	e.screen.onScreen = true
 	staged(t, e)
-	e.outcome(t, selfupdate.Outcome{From: "0.2.1", To: "0.3.0", At: "2026-09-25T23:01:00Z",
-		Status: selfupdate.StatusRolledBack, Message: "agent 0.3.0 did not come up healthy"})
+	e.outcome(t, Outcome{From: "0.2.1", To: "0.3.0", At: "2026-09-25T23:01:00Z",
+		Status: StatusRolledBack, Message: "agent 0.3.0 did not come up healthy"})
 	e.r.Startup(context.Background())
 	if len(e.screen.finished) != 1 {
 		t.Fatalf("finished = %+v", e.screen.finished)
@@ -107,7 +106,7 @@ func TestRollbackIsShownOnce(t *testing.T) {
 
 func TestRollbackOffScreenIsABanner(t *testing.T) {
 	e := newEnv(t, "0.2.1")
-	e.outcome(t, selfupdate.Outcome{From: "0.2.1", To: "0.3.0", At: "2026-09-25T23:01:00Z", Status: selfupdate.StatusRolledBack})
+	e.outcome(t, Outcome{From: "0.2.1", To: "0.3.0", At: "2026-09-25T23:01:00Z", Status: StatusRolledBack})
 	e.r.Startup(context.Background())
 	if len(e.banners) != 1 || e.banners[0].Tone != notice.Problem || len(e.screen.finished) != 0 {
 		t.Fatalf("banners %+v, finished %+v", e.banners, e.screen.finished)
@@ -128,7 +127,7 @@ func TestQueuedBatchHoldsTheScreen(t *testing.T) {
 
 func TestPlainStartupSaysNothing(t *testing.T) {
 	e := newEnv(t, "0.3.0")
-	e.outcome(t, selfupdate.Outcome{From: "0.2.1", To: "0.3.0", At: "2026-09-25T23:01:00Z", Status: selfupdate.StatusOK})
+	e.outcome(t, Outcome{From: "0.2.1", To: "0.3.0", At: "2026-09-25T23:01:00Z", Status: StatusOK})
 	e.r.Startup(context.Background())
 	if len(e.banners)+len(e.screen.finished)+len(e.screen.held) != 0 {
 		t.Fatal("a successful update from long ago was announced")
@@ -143,8 +142,8 @@ func TestRefusalIsNoticed(t *testing.T) {
 	e.r.d.Resume = func() { close(resumed) }
 	// The outcome is in place before the watch starts, so the watch's reads
 	// and this write do not overlap.
-	e.outcome(t, selfupdate.Outcome{From: "0.2.1", To: "0.3.0", At: "2026-09-25T23:00:03Z",
-		Status: selfupdate.StatusRefused, Message: "the staged package did not verify"})
+	e.outcome(t, Outcome{From: "0.2.1", To: "0.3.0", At: "2026-09-25T23:00:03Z",
+		Status: StatusRefused, Message: "the staged package did not verify"})
 	e.r.Staged(notice.New(notice.OK, "Update complete", "Agent 0.3.0", "Board app 2.1.0"))
 	select {
 	case <-resumed:

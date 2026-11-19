@@ -1,4 +1,4 @@
-// Package agentupdate tells the people at a board how an agent self-update
+// The daemon side of an agent update: telling the people at the board how it
 // went (docs/architecture.md, section 12).
 //
 // An agent update spans two processes. The running agent stages the package,
@@ -18,7 +18,8 @@
 // Each outcome is shown once (state.json's agentUpdateSeen). When the batch
 // had more behind the agent (queued in the inbox for the new agent), the
 // screen is held until that finishes, so there is one screen, not two.
-package agentupdate
+
+package selfupdate
 
 import (
 	"context"
@@ -33,7 +34,6 @@ import (
 
 	"github.com/LensBridge/agent/internal/core/fsutil"
 	"github.com/LensBridge/agent/internal/core/notice"
-	"github.com/LensBridge/agent/internal/core/selfupdate"
 	"github.com/LensBridge/agent/internal/core/state"
 	"github.com/LensBridge/agent/internal/core/store"
 )
@@ -45,8 +45,8 @@ type Screen interface {
 	Hold(ctx context.Context, n notice.Notice)
 }
 
-// Deps is what a Reporter needs.
-type Deps struct {
+// ReporterDeps is what a Reporter needs.
+type ReporterDeps struct {
 	Layout  store.Layout
 	Version string // this agent's
 	Screen  Screen
@@ -60,13 +60,13 @@ type Deps struct {
 
 // Reporter shows agent update outcomes.
 type Reporter struct {
-	d Deps
+	d ReporterDeps
 	// watchTimeout bounds how long Watch waits for the root updater.
 	watchTimeout, watchPoll time.Duration
 }
 
-// New returns a Reporter.
-func New(d Deps) *Reporter {
+// NewReporter returns a Reporter.
+func NewReporter(d ReporterDeps) *Reporter {
 	if d.Logger == nil {
 		d.Logger = slog.New(slog.DiscardHandler)
 	}
@@ -77,7 +77,7 @@ func New(d Deps) *Reporter {
 }
 
 // LastOutcome is the root updater's last outcome, if any.
-func (r *Reporter) LastOutcome() *selfupdate.Outcome { return selfupdate.ReadOutcome(r.d.Layout) }
+func (r *Reporter) LastOutcome() *Outcome { return ReadOutcome(r.d.Layout) }
 
 // Staged is called after a batch staged an agent (importer.Deps.AgentStaged):
 // it leaves the batch's outcome for the next agent, and watches for the
@@ -96,7 +96,7 @@ func (r *Reporter) Staged(n notice.Notice) {
 func (r *Reporter) watch(ctx context.Context, since time.Time) {
 	deadline := time.Now().Add(r.watchTimeout)
 	for time.Now().Before(deadline) {
-		if o := r.LastOutcome(); o != nil && o.Status == selfupdate.StatusRefused && !before(o.At, since) {
+		if o := r.LastOutcome(); o != nil && o.Status == StatusRefused && !before(o.At, since) {
 			r.markSeen(o.At)
 			r.conclude(ctx, r.failure(*o, r.takePending()))
 			r.d.Resume()
@@ -128,7 +128,7 @@ func (r *Reporter) Startup(ctx context.Context) {
 
 	var n notice.Notice
 	switch {
-	case unseen && o.Status != selfupdate.StatusOK:
+	case unseen && o.Status != StatusOK:
 		n = r.failure(*o, pending)
 	case pending != nil:
 		n = *pending
@@ -159,10 +159,10 @@ func (r *Reporter) conclude(ctx context.Context, n notice.Notice) {
 
 // failure is the notice for an update that did not replace the agent. The
 // lines from its batch that are not about the agent still stand.
-func (r *Reporter) failure(o selfupdate.Outcome, pending *notice.Notice) notice.Notice {
+func (r *Reporter) failure(o Outcome, pending *notice.Notice) notice.Notice {
 	var line string
 	switch {
-	case o.Status == selfupdate.StatusRolledBack && o.To != "":
+	case o.Status == StatusRolledBack && o.To != "":
 		line = "Agent " + o.To + " did not start correctly, so the board went back to " + o.From
 	case o.To != "":
 		line = "Agent " + o.To + " could not be installed on this board"

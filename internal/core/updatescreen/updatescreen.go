@@ -126,7 +126,7 @@ func (s *Screen) Caption(ctx context.Context, text string) {
 }
 
 // Restarting says the agent is about to be replaced. The screen stays up and
-// working; the next agent finishes it (package agentupdate).
+// working; the next agent finishes it (selfupdate.Reporter).
 func (s *Screen) Restarting(ctx context.Context) {
 	s.Caption(ctx, "Restarting MusallahBoard")
 }

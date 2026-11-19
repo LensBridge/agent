@@ -109,7 +109,7 @@ type Screen interface {
 	// countdown.
 	Finish(ctx context.Context, n notice.Notice)
 	// Restarting says the agent is about to be replaced. The new agent
-	// finishes the screen (package agentupdate).
+	// finishes the screen (selfupdate.Reporter).
 	Restarting(ctx context.Context)
 }
 
@@ -154,7 +154,7 @@ type Importer struct {
 }
 
 // AgentNotReplaced says the staged agent update ended without replacing this
-// agent, so the inbox should carry on (package agentupdate).
+// agent, so the inbox should carry on (selfupdate.Reporter).
 func (im *Importer) AgentNotReplaced() {
 	im.stagedMu.Lock()
 	defer im.stagedMu.Unlock()
