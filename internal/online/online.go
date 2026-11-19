@@ -11,18 +11,27 @@ package online
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/LensBridge/agent/internal/core/config"
 	"github.com/LensBridge/agent/internal/core/importer"
 	"github.com/LensBridge/agent/internal/core/kiosk"
 	"github.com/LensBridge/agent/internal/core/store"
+	"github.com/LensBridge/agent/internal/core/trust"
 	"github.com/LensBridge/agent/internal/core/updates"
+	"github.com/LensBridge/agent/internal/online/api"
 	"github.com/LensBridge/agent/internal/online/boardsync"
 	"github.com/LensBridge/agent/internal/online/commands"
+	"github.com/LensBridge/agent/internal/online/enroll"
 	"github.com/LensBridge/agent/internal/online/keystore"
 	"github.com/LensBridge/agent/internal/online/wsclient"
 )
@@ -40,9 +49,22 @@ type Deps struct {
 	BoardReport  func() any
 	AgentVersion string
 	Logger       *slog.Logger
+	// TrustPath is trust.json, to say whether the backend's content keys
+	// are pinned; trust.DefaultPath on a board.
+	TrustPath string
 	// HTTP is optional (tests).
 	HTTP *http.Client
+	// ClaimRetry is the first wait after a failed claim; zero is
+	// ClaimRetry (tests shorten it).
+	ClaimRetry time.Duration
 }
+
+// Claim retry: a board set up for a backend it cannot reach yet (no network
+// until someone plugs one in) keeps trying, without ever blocking the board.
+const (
+	ClaimRetry    = time.Minute
+	ClaimRetryMax = time.Hour
+)
 
 // Layer runs the online layer for whatever agent.toml says, and reports its
 // state to the local status.
@@ -65,6 +87,12 @@ func New(d Deps) *Layer {
 	}
 	if d.KeyPath == "" {
 		d.KeyPath = config.KeyPath
+	}
+	if d.TrustPath == "" {
+		d.TrustPath = trust.DefaultPath
+	}
+	if d.ClaimRetry == 0 {
+		d.ClaimRetry = ClaimRetry
 	}
 	return &Layer{d: d}
 }
@@ -117,7 +145,12 @@ func (l *Layer) runOnce(ctx context.Context, cfg *config.Config) {
 		return
 	}
 	if cfg.WebSocketURL == "" {
-		l.set(nil, nil, true, cfg.ContentSync(), "not enrolled: no device key is bound to this board yet")
+		if cfg.ClaimSecret == "" {
+			l.set(nil, nil, true, cfg.ContentSync(), "not enrolled: no device key is bound to this board yet")
+			return
+		}
+		// Once the claim is saved, Run starts the layer over with it.
+		l.claim(ctx, cfg)
 		return
 	}
 	priv, err := keystore.Load(l.d.KeyPath)
@@ -131,6 +164,112 @@ func (l *Layer) runOnce(ctx context.Context, cfg *config.Config) {
 		return
 	}
 	l.serve(ctx, cfg, priv)
+}
+
+// claim binds the device key (made here if the board has none; it never
+// leaves the board) to the device named in agent.toml, with the setup file's
+// claim secret, retrying with backoff until it works or ctx ends. On success
+// it saves the WebSocket URL and drops the secret.
+func (l *Layer) claim(ctx context.Context, cfg *config.Config) {
+	log := l.d.Logger.With("backendUrl", cfg.BackendURL, "deviceId", cfg.DeviceID)
+	why := func(s string) { l.set(nil, nil, true, cfg.ContentSync(), s) }
+	// The reply decides where the board takes commands from, so it must
+	// come over TLS.
+	if err := config.CheckBackendURL(cfg.BackendURL, cfg.InsecureDev()); err != nil {
+		log.Error("not claiming: the setup file's backend is not safe to use", "err", err)
+		why("not talking to LensBridge: " + err.Error())
+		return
+	}
+	priv, err := deviceKey(l.d.KeyPath)
+	if err != nil {
+		log.Error("no device key: cannot claim", "err", err, "keyPath", l.d.KeyPath)
+		why("device key unreadable")
+		return
+	}
+	wait := l.d.ClaimRetry
+	why("claiming this board at " + cfg.BackendURL)
+	for {
+		err := l.claimOnce(ctx, cfg, priv)
+		if err == nil || ctx.Err() != nil {
+			return
+		}
+		if errors.Is(err, enroll.ErrKeyConflict) {
+			log.Error("claim refused: LensBridge has a different key for this board. Reset it in the console and use a new setup file", "err", err)
+			wait = ClaimRetryMax
+		} else {
+			log.Warn("claim failed; retrying", "err", err, "retryIn", wait)
+		}
+		why("claim failed: " + err.Error())
+		t := time.NewTimer(wait + time.Duration(rand.Int63n(int64(wait/4)+1)))
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return
+		case <-t.C:
+		}
+		wait = min(wait*2, ClaimRetryMax)
+	}
+}
+
+func (l *Layer) claimOnce(ctx context.Context, cfg *config.Config, priv ed25519.PrivateKey) error {
+	r, err := enroll.Claim(ctx, enroll.ClaimParams{
+		BackendURL: cfg.BackendURL, DeviceID: cfg.DeviceID, ClaimSecret: cfg.ClaimSecret,
+		Key: priv, AgentVersion: l.d.AgentVersion, HTTP: l.d.HTTP,
+	})
+	if err != nil {
+		return err
+	}
+	ws := *r.WebsocketUrl
+	if err := config.CheckWebSocketURL(ws, cfg.BackendURL, cfg.InsecureDev()); err != nil {
+		return fmt.Errorf("the backend's reply cannot be used: %w", err)
+	}
+	l.checkPinned(r.ContentSigningKeys)
+	err = l.d.Config.Update(func(c *config.Config) error {
+		if settingsOf(c) != settingsOf(cfg) {
+			return errors.New("agent.toml changed during the claim")
+		}
+		c.WebSocketURL, c.ClaimSecret = ws, ""
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	l.d.Logger.Info("board claimed: its device key is bound in LensBridge", "deviceId", cfg.DeviceID, "websocketUrl", ws)
+	return nil
+}
+
+// checkPinned says when the backend signs content with a key this board does
+// not trust. The daemon cannot pin keys (trust.json is root's); setup.sh
+// pins the content key, and `trust fetch` re-reads the backend's.
+func (l *Layer) checkPinned(keys []api.SigningKeyView) {
+	ring, err := trust.LoadRing(l.d.TrustPath)
+	if err != nil {
+		return
+	}
+	pinned := ring.Keys(trust.RoleContent)
+	for _, k := range keys {
+		if _, ok := pinned[k.KeyId]; !ok {
+			l.d.Logger.Warn("LensBridge signs content with a key this board does not trust; its content will be refused until it is pinned: sudo musallahboard-agent trust fetch",
+				"keyId", k.KeyId)
+		}
+	}
+}
+
+// deviceKey loads the device key, or makes and saves one if there is none.
+// It is saved before it is first sent, so every retry claims the same key.
+func deviceKey(path string) (ed25519.PrivateKey, error) {
+	priv, err := keystore.Load(path)
+	if err == nil || !errors.Is(err, fs.ErrNotExist) {
+		return priv, err
+	}
+	_, priv, err = keystore.Generate()
+	if err != nil {
+		return nil, err
+	}
+	if err := keystore.Save(path, priv); err != nil {
+		return nil, err
+	}
+	return priv, nil
 }
 
 // serve runs content sync and the backend WebSocket until ctx ends.
