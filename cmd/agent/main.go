@@ -65,9 +65,11 @@ func main() {
 func printHelp() {
 	fmt.Print(`musallahboard-agent: device agent for MusallahBoard kiosk Pis (docs/architecture.md)
 
+A board is set up by its setup file (a provision .mbu from the LensBridge
+console), on a USB stick or with import; it needs no network for that.
+
 Usage:
   musallahboard-agent run                          Run the daemon (default)
-  musallahboard-agent enroll --token=X --backend=Y Register this device
   musallahboard-agent status [--json]              Show versions, content, sync, trust and clock
   musallahboard-agent version                      Print version
 
@@ -77,6 +79,7 @@ Administration (need sudo):
   musallahboard-agent service-port on|off          eth0 service port + upload server at http://10.77.0.1/
   musallahboard-agent trust show|add|remove|fetch  Keys this board accepts packages from
   musallahboard-agent install-system [--rtc]       Write the agent's systemd units, udev rules and sudoers file
+  musallahboard-agent enroll --token=X --backend=Y Bind this board to LensBridge with a token (maintainers)
 
 Run by systemd (root):
   musallahboard-agent selfupdate apply             Install a staged agent update, with rollback

@@ -1,9 +1,10 @@
 // Package keystore manages the per-device Ed25519 private key.
 //
 // The key lives at /etc/musallahboard/agent.key as a raw 32-byte seed, mode
-// 0600, owned by the daemon's user (the owner of /etc/musallahboard). This is symmetric with the backend, which stores the raw
-// 32-byte public key in device.public_key. The backend never sees the private
-// key — it's generated locally on the Pi at first enroll.
+// 0600, owned by the daemon's user (the owner of /etc/musallahboard). The
+// backend stores the raw 32-byte public key in device.public_key and never
+// sees the private key: it is generated on the board, at its claim or at
+// `enroll`.
 package keystore
 
 import (

@@ -79,7 +79,7 @@ func runServicePort(args []string) {
 		os.Exit(2)
 	}
 	requireRoot("service-port " + rest[0])
-	loadConfigCLI() // must be enrolled; SetServicePort rewrites this file
+	loadConfigCLI() // must be readable; SetServicePort rewrites this file
 
 	// Turning it off over the service port kills this SSH session part way
 	// through. Keep going when the terminal hangs up; every step left is one
