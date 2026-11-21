@@ -326,7 +326,8 @@ copies embedded in the binary (`packaging/`): the units in
 `musallahboard-kiosk.service`, `musallahboard-agent-update.{path,service}`,
 `musallahboard-usb-import@.service`, and `musallahboard-rtc.service` with
 `--rtc`), `/etc/udev/rules.d/90-musallahboard-{usb,rtc}.rules` (and
-`85-musallahboard-rtc.rules`), `/etc/sudoers.d/musallahboard-agent`,
+`85-musallahboard-rtc.rules`), the no-cursor theme under
+`/usr/share/musallahboard/cursors/default/`, `/etc/sudoers.d/musallahboard-agent`,
 `/etc/modules-load.d/musallahboard.conf`, `/usr/bin/start-kiosk.sh` and
 `/usr/share/musallahboard/starting.html`.
 
@@ -993,6 +994,18 @@ trip nor leaves the port off for good. The four `nmcli` argument sets it
 runs as root are named in the sudoers allow-list.
 
 ## 14. Kiosk
+
+- No cursor. A Pi's HDMI CEC remote-control inputs (`vc4-hdmi-0`, `-1`)
+  report relative motion, so libinput takes them for a mouse and cage draws a
+  cursor over the board. Reclassifying them does not hold (udev labels and
+  libinput quirks leave them pointers) and ignoring them leaves cage with no
+  input device, which it will not start with. So every cursor is invisible:
+  `install-system` writes a cursor theme at
+  `/usr/share/musallahboard/cursors/default` in which each cursor name is one
+  transparent pixel (`packaging/cursors.go`), and `start-kiosk.sh` sets
+  `XCURSOR_PATH` (cage loads the theme named `default` from it) and
+  `XCURSOR_THEME` (Chromium), unless `kiosk.env` sets them. A real mouse is
+  invisible too.
 
 - `start-kiosk.sh` always opens `starting.html#http://127.0.0.1:8080/`.
   `starting.html` (a local page, written by `install-system`) loads
