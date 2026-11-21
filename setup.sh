@@ -118,6 +118,8 @@ Usage: bash setup.sh [options]
   --content-key=B64      LensBridge's content signing public key (base64)
   --reboot=auto|never|ask
   --yes, -y              answer every prompt with its default
+  --no-service-port      never serve addresses on eth0: leave the ethernet
+                         service port off (it is on by default)
   -h, --help
 
 Service port (after a normal setup, while still online):
@@ -141,6 +143,7 @@ for arg in "$@"; do
         --reboot=*)        export MB_REBOOT="${arg#*=}" ;;
         --yes|-y)          export MB_ASSUME_YES=1 ;;
         --service-port)    SERVICE_PORT=1 ;;
+        --no-service-port) export MB_SERVICE_PORT=0 ;;
         --rtc)             SERVICE_PORT_RTC=1 ;;
         -h|--help)         usage; exit 0 ;;
         *) echo "Unknown option: $arg" >&2; usage >&2; exit 1 ;;
@@ -681,9 +684,11 @@ print_summary() {
   itself whenever it has internet. (Maintainers can still enroll with a
   token: sudo musallahboard-agent enroll --token=<token> --backend=<url>)
 
-  Laptop and phone updates over the ethernet service port
-  (http://10.77.0.1/):
-      sudo musallahboard-agent service-port on
+  Without internet, update it from a phone (the MusallahBoard Push app)
+  or a laptop plugged straight into its ethernet port, at http://10.77.0.1/.
+  The service port is on: on any network that hands out addresses the
+  board is just a client there. (Never serve addresses from this board:
+  sudo musallahboard-agent service-port off)
   To fit a DS3231 clock module as well, re-run this setup with --rtc:
       curl -fsSL $SETUP_URL | bash -s -- --service-port --rtc
 
@@ -881,7 +886,24 @@ prepare_service_port() {
     service_port_install_packages
     service_port_profiles
     service_port_firewall
-    info "Service port prepared and OFF. Turn it on with: sudo musallahboard-agent service-port on"
+    info "Service port prepared; it is switched on once the agent is installed"
+}
+
+# On by default: eth0 stays a DHCP client on any network that answers, and
+# serves a phone or laptop plugged straight in only when none does; the
+# agent's service-port guard stops it serving a network. --no-service-port
+# (MB_SERVICE_PORT=0) leaves it off for a board that must never serve
+# addresses.
+enable_service_port() {
+    if [[ "${MB_SERVICE_PORT:-1}" == "0" ]]; then
+        info "Service port left OFF (--no-service-port). Turn it on later with: sudo musallahboard-agent service-port on"
+        return
+    fi
+    if ! command -v nmcli >/dev/null; then
+        return
+    fi
+    section "Service port: switch on"
+    sudo "$BINARY_DEST" service-port on || warn "Could not switch the service port on; run: sudo musallahboard-agent service-port on"
 }
 
 service_port_switch_on() {
@@ -959,6 +981,7 @@ main() {
     install_state_dirs
     pin_content_key
     install_system_files
+    enable_service_port
     apply_appliance_policy
 
     print_summary

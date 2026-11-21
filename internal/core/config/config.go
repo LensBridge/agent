@@ -99,8 +99,13 @@ func boolOr(p *bool, def bool) bool {
 }
 
 // ServicePort reports whether the eth0 service port and upload server run.
+// ServicePort is on unless switched off (`service-port off`): eth0 tries
+// DHCP first and serves a phone or laptop only when no network answers, and
+// the service-port guard (internal/core/portguard) stops it serving a
+// network. A board with no internet then takes updates from a phone or
+// laptop plugged straight in, with nothing to switch first.
 func (c *Config) ServicePort() bool {
-	return boolOr(c.ServicePortSet, false)
+	return boolOr(c.ServicePortSet, true)
 }
 
 // USBImport reports whether USB sticks are accepted.

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/LensBridge/agent/internal/core/kiosk"
 	"github.com/LensBridge/agent/internal/core/localserver"
 	"github.com/LensBridge/agent/internal/core/notice"
+	"github.com/LensBridge/agent/internal/core/portguard"
 	"github.com/LensBridge/agent/internal/core/selfupdate"
 	"github.com/LensBridge/agent/internal/core/store"
 	"github.com/LensBridge/agent/internal/core/trust"
@@ -118,6 +120,12 @@ func startBoard(ctx context.Context, logger *slog.Logger, cfg *config.Live, wg *
 
 	if c.ServicePort() {
 		startUploadServer(ctx, logger, cfg, layout, imp, keeper, screen, wg)
+		// The service port only serves a phone or laptop, never a network.
+		guard := portguard.New(portguard.Deps{Logger: logger, Run: func(ctx context.Context, name string, args ...string) (string, error) {
+			out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+			return string(out), err
+		}})
+		goRun(wg, func() { guard.Run(ctx) })
 	}
 	return nil
 }

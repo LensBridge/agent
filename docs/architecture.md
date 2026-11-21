@@ -848,7 +848,7 @@ backend runs.
 | `backend_url` | setup file, `enroll` | the online layer's backend |
 | `claim_secret` | setup file | until the claim succeeds |
 | `websocket_url` | claim, `enroll` | the agent WebSocket; its presence means "key bound" |
-| `service_port` (`false`) | `service-port on\|off` | run the eth0 service port and the upload server |
+| `service_port` (`true`) | `service-port on\|off`, `setup.sh` | run the eth0 service port, its guard and the upload server |
 | `usb_import` (`true`) | by hand | accept USB sticks |
 | `content_sync` (`true`) | by hand | sync content from the backend |
 | `content_days` (`7`) | by hand | days per synced content package (1-92) |
@@ -973,8 +973,24 @@ profiles on eth0, `musallahboard-lan` (DHCP client, priority 0,
 (`ipv4.method shared`, `10.77.0.1/24`, priority -999), whose autoconnect is
 owned by `musallahboard-agent service-port on|off`. A board plugged into a real
 network stays a client there; a laptop or phone plugged straight in gets an
-address from the board within about a minute. Turn the service port off before
-connecting a board to a network permanently.
+address from the board within about a minute.
+
+The service port is **on by default** (`service_port` defaults to true;
+`setup.sh` runs `service-port on`, `--no-service-port` opts out), so a board
+with no internet takes updates from a phone or laptop with nothing to switch
+first. The remaining exposure, a building network whose DHCP server does not
+answer within 30 s (or a lease that lapses), is covered by the agent's
+**service-port guard** (`internal/core/portguard`), which runs whenever
+`service_port` is on. Every 15 s, while `musallahboard-service-port` is the
+connection on eth0, it counts the devices it can see there: the leases in
+`/var/lib/NetworkManager/dnsmasq-eth0.leases` and eth0's neighbour table. A
+phone or laptop is one; at 3 it is a network, so the guard switches the
+profile's autoconnect off and takes it down (eth0 goes back to being a DHCP
+client) and logs a warning. When eth0 has no carrier and autoconnect is off,
+it switches it back on, ready for the next phone. Its state is
+NetworkManager's autoconnect setting, so an agent restart neither loses a
+trip nor leaves the port off for good. The four `nmcli` argument sets it
+runs as root are named in the sudoers allow-list.
 
 ## 14. Kiosk
 
@@ -1053,7 +1069,7 @@ per-day payloads from installed content, and weather comes through the agent.
 | Daemon compromise escalating to root | Daemon is unprivileged (only `CAP_SYS_TIME`, `CAP_NET_BIND_SERVICE`); the root updater re-verifies from a private copy with root-owned keys. |
 | Zip-slip, zip bombs, disk exhaustion | Strict entry names, declared sizes enforced while reading, global caps, one import at a time. |
 | Hostile USB stick | Allow-listed filesystems, read-only `nosuid,nodev,noexec` mount, only `*.mbu` regular files copied, no network in the helper, signature checks as for any source. |
-| Rogue DHCP on a building network | Service port only after a DHCP client attempt fails; off by default; `service-port off` before connecting. |
+| Rogue DHCP on a building network | Service port only after a DHCP client attempt fails; the service-port guard takes it down as soon as eth0 shows 3 or more devices, until the cable is unplugged; `service-port off` (or `setup.sh --no-service-port`) for a board that must never serve addresses. |
 | Clock tampering | With NTP, nothing but NTP moves the clock, and a floor ahead of NTP time is lowered. Without NTP, the clock only moves forward to the floor automatically; uploader time only with a verified package and within 90 days past the floor, and never into the floor. Packages signed more than a day ahead of an NTP clock are refused. A clock-only request (`POST /api/clock`) is tighter: never under NTP, never on a board that has verified no package, only up to 90 days past the newest signed `createdAt`, and it never moves the floor either. |
 | DNS rebinding against the upload server | `Host` allow-list. |
 | Enrollment, claim or backend impersonated on the LAN | `https://` backend and `wss://` socket on the backend's host, enforced before an enrollment or claim is sent, on its reply, and at every start of the online layer; plaintext only with the explicit `insecure_dev` opt-in (section 11). |
@@ -1062,7 +1078,6 @@ per-day payloads from installed content, and weather comes through the agent.
 
 - Weather on boards without internet (online boards get it through the weather
   overlay in section 7).
-- Automatic eth0 switching between service port and LAN.
 - Release key rotation other than shipping a new agent with an added key.
 - Wifi: a maintainer joins a network over SSH if a board needs one.
 - Clock: beyond the floor and an optional RTC (section 10).

@@ -26,7 +26,7 @@ func writeConfig(t *testing.T, body string) string {
 }
 
 func TestServicePort(t *testing.T) {
-	for extra, want := range map[string]bool{"": false, "service_port = true": true, "service_port = false": false} {
+	for extra, want := range map[string]bool{"": true, "service_port = true": true, "service_port = false": false} {
 		c, err := Load(writeConfig(t, baseTOML+extra+"\n"))
 		if err != nil {
 			t.Fatalf("%q: %v", extra, err)
