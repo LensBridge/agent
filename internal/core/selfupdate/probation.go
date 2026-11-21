@@ -41,6 +41,9 @@ const (
 	// MaxProbationAttempts bounds how often a probation cut short is
 	// started again before the update is rolled back.
 	MaxProbationAttempts = 3
+	// MaxHandRestarts bounds how often the new agent is judged again because
+	// someone (not systemd) restarted or stopped it during its probation.
+	MaxHandRestarts = 3
 )
 
 // AgentStatus is the part of /api/local/status (docs/architecture.md,
@@ -124,6 +127,12 @@ type verdict struct {
 //     timeout;
 //   - from then on systemd never restarts it (same MainPID, same NRestarts,
 //     still active) for ProbationPeriod;
+//   - a crash (systemd's NRestarts goes up, or the unit fails) rejects it.
+//     A restart or stop that is not systemd's doing (a new MainPID, or the
+//     unit inactive, with NRestarts unchanged: someone ran systemctl, or
+//     rebooted it into a resumed probation) is not the new agent's fault: it
+//     is judged again from the start, up to MaxHandRestarts times, and if it
+//     then fails to come up the version only gets a strike;
 //   - if rec.BackendBefore, it connects to LensBridge within BackendTimeout.
 //
 // A board that was offline before the update is not asked to be online
@@ -140,6 +149,11 @@ func (u *Updater) probation(ctx context.Context, rec *Txn, resumed bool) (*verdi
 		base      ServiceState
 		backendOK = !rec.BackendBefore
 		last      = "no answer"
+		// restartBase is systemd's NRestarts when the agent first came up.
+		// It is not reset when the agent is judged again, so a crash that a
+		// poll happened to see as a plain restart is still caught.
+		restartBase  = -1
+		handRestarts int
 	)
 	need := ""
 	if rec.BackendBefore {
@@ -167,21 +181,42 @@ func (u *Updater) probation(ctx context.Context, rec *Txn, resumed bool) (*verdi
 		}
 		good := serr == nil && st.AgentVersion == rec.To && verr == nil && svc.ActiveState == "active" && svc.MainPID > 0
 
+		crashed := verr == nil && restartBase >= 0 && (svc.NRestarts > restartBase || svc.ActiveState == "failed")
+		if crashed {
+			return &verdict{fmt.Sprintf("agent %s was restarted by systemd during its probation: it crashed (systemd: %s, pid %d, %d restarts)",
+				rec.To, svc.ActiveState, svc.MainPID, svc.NRestarts), true}, nil
+		}
 		if !healthy {
 			if good {
 				healthy, healthyAt, base = true, now, svc
+				if restartBase < 0 {
+					restartBase = svc.NRestarts
+				}
 				u.Logf("agent %s is up (pid %d)", rec.To, svc.MainPID)
 			} else if now.Sub(start) >= comeUp {
 				if last == "" && verr != nil {
 					last = verr.Error()
 				}
-				return &verdict{fmt.Sprintf("agent %s did not come up within %s: %s", rec.To, comeUp, last), true}, nil
+				// After a restart by hand, not coming back is as likely the
+				// hand's doing (a stop that was never undone) as the agent's.
+				return &verdict{fmt.Sprintf("agent %s did not come up within %s: %s", rec.To, comeUp, last), handRestarts == 0}, nil
 			}
 		} else {
-			if verr == nil && (svc.MainPID != base.MainPID || svc.NRestarts != base.NRestarts ||
+			if verr == nil && (svc.MainPID != base.MainPID ||
 				(svc.ActiveState != "active" && svc.ActiveState != "reloading")) {
-				return &verdict{fmt.Sprintf("agent %s was restarted %s after it came up (systemd: %s, pid %d, %d restarts)",
-					rec.To, now.Sub(healthyAt).Round(time.Second), svc.ActiveState, svc.MainPID, svc.NRestarts), true}, nil
+				// Not a crash (checked above): someone restarted or stopped it.
+				handRestarts++
+				if handRestarts > MaxHandRestarts {
+					return &verdict{fmt.Sprintf("agent %s could not be judged: it was restarted or stopped by hand %d times during its probation",
+						rec.To, handRestarts), false}, nil
+				}
+				u.Logf("agent %s was restarted or stopped %s after it came up, not by systemd (systemd: %s, pid %d, %d restarts); judging it again from the start",
+					rec.To, now.Sub(healthyAt).Round(time.Second), svc.ActiveState, svc.MainPID, svc.NRestarts)
+				healthy, start, backendOK = false, now, !rec.BackendBefore
+				if err := u.Sleep(ctx, u.PollInterval); err != nil {
+					return nil, ErrInterrupted
+				}
+				continue
 			}
 			if serr == nil && st.AgentVersion != rec.To {
 				return &verdict{fmt.Sprintf("agent %s was replaced by %s during its probation", rec.To, st.AgentVersion), true}, nil
