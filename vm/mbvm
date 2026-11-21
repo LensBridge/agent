@@ -779,6 +779,7 @@ require_app_dir() {
 app_local() {
     require_running
     require_app_dir
+    need go
     trust_dev_release_key
     local base ver out seed
     base="$(cd "$APP_DIR" && node -p "require('./package.json').version")"
@@ -788,10 +789,18 @@ app_local() {
     seed="$(cat "$DEV_KEY")"
     out="$DIR/app-build"
     rm -rf "$out"
+    # The local API version the build needs: what the board app's own
+    # packaging passes to mbpack, else the current one.
+    local api
+    api="$(grep -o -- '--local-api [0-9]*' "$APP_DIR/scripts/package.sh" 2>/dev/null | head -1 | awk '{print $2}')"
+    api="${api:-2}"
     info "Building the board app $ver from $APP_DIR"
-    (cd "$APP_DIR" && MB_APP_VERSION="$ver" npx vite build --logLevel warn) || die "the board app did not build"
-    (cd "$APP_DIR" && MB_APP_VERSION="$ver" MB_RELEASE_SIGNING_KEY="$seed" \
-        node scripts/package-mbu.mjs --out-dir "$(hostpath "$out")" >/dev/null) || die "the board app did not package"
+    (cd "$APP_DIR" && npx vite build --logLevel warn) || die "the board app did not build"
+    mkdir -p "$out"
+    # Packaged by this checkout's mbpack: the code the agent verifies it with.
+    (cd "$REPO_DIR" && MBVM_DEV_RELEASE_KEY="$seed" go run ./cmd/mbpack app --version "$ver" --local-api "$api" \
+        --key-env MBVM_DEV_RELEASE_KEY "$(hostpath "$APP_DIR/dist")" -o "$(hostpath "$out/musallahboard-app-$ver.mbu")" >/dev/null) ||
+        die "the board app did not package"
     vm_scp "$out/musallahboard-app-$ver.mbu" /tmp/mbvm-app.mbu
     vm_ssh 'sudo musallahboard-agent import /tmp/mbvm-app.mbu; rc=$?; rm -f /tmp/mbvm-app.mbu; exit $rc'
 }
