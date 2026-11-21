@@ -509,3 +509,106 @@ func TestUploaderTimeIsCorrectableButNotRollback(t *testing.T) {
 		t.Fatalf("floor = %d, want %d", got, want)
 	}
 }
+
+func TestDescribeDrift(t *testing.T) {
+	for drift, want := range map[int64]string{
+		1: "1 second ahead", -90: "90 seconds behind", 600: "10 minutes ahead",
+		-7200: "2 hours behind", 3 * 86400: "3 days ahead",
+	} {
+		if got := describeDrift(drift); got != want {
+			t.Errorf("describeDrift(%d) = %q, want %q", drift, got, want)
+		}
+	}
+}
+
+func setSignedFloor(t *testing.T, k *Keeper, unix int64) {
+	t.Helper()
+	if _, err := k.layout.State().Update(func(s *state.State) error { s.SignedClockFloor = unix; return nil }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestApplyClockOnlyTime(t *testing.T) {
+	const day = int64(24 * 3600)
+	signed := base.Unix() - 10*day // the newest package the board verified
+	floor := base.Unix()           // the persisted wall clock, ahead of it
+	cases := []struct {
+		name     string
+		signed   int64
+		now      time.Time
+		client   int64
+		adjusted bool
+	}{
+		{"board behind", signed, base.Add(-time.Hour), floor + 60, true},
+		{"board ahead, client at floor", signed, base.Add(time.Hour), floor, true},
+		{"within tolerance", signed, base, floor + 4, false},
+		{"behind floor", signed, base.Add(time.Hour), floor - 10, false},
+		{"exactly 90 days past signed", signed, base, signed + 90*day, true},
+		// floor + 90 days would pass for an upload with a verified package.
+		{"beyond 90 days past signed", signed, base, signed + 90*day + 1, false},
+		{"nothing ever verified", 0, base.Add(-time.Hour), floor + 60, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			k, f := newKeeper(t, floor, tc.now, false)
+			setSignedFloor(t, k, tc.signed)
+			rep := k.ApplyClockOnlyTime(tc.client)
+			if want := tc.now.Unix() - tc.client; rep.Adjusted != tc.adjusted || rep.DriftSeconds != want {
+				t.Fatalf("report = %+v, want adjusted=%v drift=%d", rep, tc.adjusted, want)
+			}
+			if rep.Note == "" {
+				t.Error("empty note")
+			}
+			if tc.adjusted && (len(f.sets) != 1 || f.sets[0].Unix() != tc.client) {
+				t.Fatalf("sets = %v", f.sets)
+			}
+			if !tc.adjusted && len(f.sets) != 0 {
+				t.Fatalf("clock set: %v", f.sets)
+			}
+			if got := floorOf(t, k); got != floor {
+				t.Fatalf("a clock-only request moved the floor to %d, want %d", got, floor)
+			}
+		})
+	}
+}
+
+// Repeated clock-only requests cannot walk the board forward: after the wall
+// clock is persisted into the floor, the bound is still the signed floor's.
+func TestClockOnlyCannotRatchet(t *testing.T) {
+	const day = int64(24 * 3600)
+	signed := base.Unix()
+	k, f := newKeeper(t, signed, base, false)
+	setSignedFloor(t, k, signed)
+	if rep := k.ApplyClockOnlyTime(signed + 90*day); !rep.Adjusted {
+		t.Fatalf("first jump refused: %+v", rep)
+	}
+	k.Check()
+	f.sets = nil
+	if rep := k.ApplyClockOnlyTime(signed + 170*day); rep.Adjusted || len(f.sets) != 0 {
+		t.Fatalf("second jump accepted: %+v", rep)
+	}
+}
+
+func TestClockOnlyConfirmsClock(t *testing.T) {
+	k, _ := newKeeper(t, base.Unix(), base, false)
+	setSignedFloor(t, k, base.Unix())
+	k.ApplyClockOnlyTime(base.Unix() - 3600) // before the floor: proves nothing
+	if i := k.Info(); i.Trusted {
+		t.Fatalf("after a refused clock-only request: %+v", i)
+	}
+	k.ApplyClockOnlyTime(base.Unix() + 2)
+	if i := k.Info(); i.Source != SourceUploader || !i.Trusted {
+		t.Fatalf("after an agreeing clock-only request: %+v", i)
+	}
+}
+
+// On an NTP-synchronised board nothing but NTP moves the clock, a
+// clock-only request included.
+func TestClockOnlyIgnoredUnderNTP(t *testing.T) {
+	k, f := newKeeper(t, base.Unix(), base, false)
+	setSignedFloor(t, k, base.Unix())
+	f.ntp = true
+	if rep := k.ApplyClockOnlyTime(base.Unix() + 3600); rep.Adjusted || len(f.sets) != 0 || rep.Note == "" {
+		t.Fatalf("report = %+v, sets = %v", rep, f.sets)
+	}
+}

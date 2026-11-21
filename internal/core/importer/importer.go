@@ -686,3 +686,15 @@ func (im *Importer) Busy() bool {
 	}
 	return true
 }
+
+// TryExclusive runs fn while no import can start, or fails at once with
+// ErrBusy if one is running. The upload server sets the clock this way, so a
+// clock change never lands in the middle of an install.
+func (im *Importer) TryExclusive(fn func()) error {
+	if !im.mu.TryLock() {
+		return ErrBusy
+	}
+	defer im.mu.Unlock()
+	fn()
+	return nil
+}

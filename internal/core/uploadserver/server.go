@@ -1,12 +1,13 @@
 // Package uploadserver is the service-port upload server (docs/architecture.md,
 // section 9.5): a laptop or phone plugged into the board's ethernet port opens
 // http://10.77.0.1/ in a browser, or runs mbpush or the Android app, and
-// uploads .mbu packages.
+// uploads .mbu packages, or just sets the board's clock from its own.
 //
 // There is no authentication, by design. Every package is signed, content is
 // bound to this board and nothing installs backwards, so the most an
 // anonymous uploader can do is make the board check a file and refuse it.
-// Sizes and one-import-at-a-time bound that. What the server does guard
+// Sizes and one-import-at-a-time bound that. The clock is the exception, and
+// the clock keeper bounds what an uploader's time can do (package clock). What the server does guard
 // against is a web page on the uploader's laptop reaching it through DNS
 // rebinding: requests must name the board's own address in Host.
 package uploadserver
@@ -66,7 +67,11 @@ type Deps struct {
 	// ApplyClientTime is the clock keeper's decision on X-MB-Client-Time.
 	// May be nil.
 	ApplyClientTime func(clientUnix int64, b importer.Batch) ClockReport
-	RTCPresent      func() bool
+	// ApplyClockOnlyTime is the clock keeper's decision on a clock-only
+	// request (POST /api/clock), which has no package to vouch for it. May
+	// be nil, and then the endpoint is not offered.
+	ApplyClockOnlyTime func(clientUnix int64) ClockReport
+	RTCPresent         func() bool
 	// ClockInfo says whether the board's clock can be believed. May be nil.
 	ClockInfo    func() clock.Info
 	UpdateActive func() bool
@@ -134,6 +139,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.status())
 	case r.URL.Path == "/api/import" && r.Method == http.MethodPost:
 		s.handleImport(w, r)
+	case r.URL.Path == "/api/clock" && r.Method == http.MethodPost && s.d.ApplyClockOnlyTime != nil:
+		s.handleClock(w, r)
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]string{"message": "not found"})
 	}
@@ -286,6 +293,32 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// ClockResponse is POST /api/clock's body.
+type ClockResponse struct {
+	Clock   *ClockReport `json:"clock,omitempty"`
+	Message string       `json:"message,omitempty"`
+}
+
+// handleClock sets the board's clock from the uploader's, with no package.
+// X-MB-Client-Time is required. Being a custom header, it also means a web
+// page on the uploader's laptop cannot send this request cross-origin without
+// a CORS preflight, which this server never answers.
+func (s *Server) handleClock(w http.ResponseWriter, r *http.Request) {
+	unix, err := strconv.ParseInt(r.Header.Get("X-MB-Client-Time"), 10, 64)
+	if err != nil || unix <= 0 {
+		writeJSON(w, http.StatusBadRequest, ClockResponse{Message: "send this device's time as X-MB-Client-Time: <unix seconds>"})
+		return
+	}
+	var rep ClockReport
+	// One at a time, and never while an import is installing: the same rule
+	// as uploads, through the same lock.
+	if err := s.d.Importer.TryExclusive(func() { rep = s.d.ApplyClockOnlyTime(unix) }); err != nil {
+		writeJSON(w, http.StatusConflict, ClockResponse{Message: "the board is installing an update; set the clock once it has finished"})
+		return
+	}
+	writeJSON(w, http.StatusOK, ClockResponse{Clock: &rep})
 }
 
 // restartingNotice is what an uploader is told when the upload staged a new

@@ -86,6 +86,85 @@ func TestGarbageIsRefusedAndClockIgnored(t *testing.T) {
 	}
 }
 
+func clockServer(t *testing.T) (*Server, *importer.Importer, *[]int64) {
+	l := store.Layout{Root: t.TempDir()}
+	im := importer.New(importer.Deps{Layout: l, Config: config.InMemory(config.Config{DeviceID: "3f2a"}), AgentVersion: "0.2.0",
+		Ring: func() (*trust.Ring, error) { return trust.NewRing(nil, nil), nil }})
+	var got []int64
+	s := New(Deps{Layout: l, DeviceID: func() string { return "3f2a" }, Importer: im,
+		ApplyClockOnlyTime: func(unix int64) ClockReport {
+			got = append(got, unix)
+			return ClockReport{DriftSeconds: -60, Adjusted: true, Note: "set"}
+		}})
+	return s, im, &got
+}
+
+func postClock(s *Server, host, clientTime string) (*httptest.ResponseRecorder, ClockResponse) {
+	req := httptest.NewRequest(http.MethodPost, "/api/clock", nil)
+	req.Host = host
+	if clientTime != "" {
+		req.Header.Set("X-MB-Client-Time", clientTime)
+	}
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	var r ClockResponse
+	json.Unmarshal(w.Body.Bytes(), &r)
+	return w, r
+}
+
+func TestClock(t *testing.T) {
+	s, _, got := clockServer(t)
+	w, r := postClock(s, ServiceIP, "1790000000")
+	if w.Code != 200 || r.Clock == nil || !r.Clock.Adjusted || r.Clock.DriftSeconds != -60 || r.Clock.Note != "set" {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if len(*got) != 1 || (*got)[0] != 1790000000 {
+		t.Fatalf("keeper got %v", *got)
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"clock":{"driftSeconds":-60,"adjusted":true,"note":"set"}`)) {
+		t.Errorf("response shape: %s", w.Body)
+	}
+}
+
+func TestClockRefusals(t *testing.T) {
+	s, im, got := clockServer(t)
+	for _, v := range []string{"", "soon", "-5", "0"} {
+		if w, r := postClock(s, ServiceIP, v); w.Code != http.StatusBadRequest || r.Message == "" {
+			t.Errorf("X-MB-Client-Time %q: %d %s", v, w.Code, w.Body)
+		}
+	}
+	if w, _ := postClock(s, "evil.example", "1790000000"); w.Code != http.StatusMisdirectedRequest {
+		t.Errorf("rebinding host accepted: %d", w.Code)
+	}
+	// While an import holds the importer, the clock waits its turn.
+	release, held := make(chan struct{}), make(chan struct{})
+	go im.TryExclusive(func() { close(held); <-release })
+	<-held
+	w, r := postClock(s, ServiceIP, "1790000000")
+	close(release)
+	if w.Code != http.StatusConflict || r.Message == "" {
+		t.Errorf("during an import: %d %s", w.Code, w.Body)
+	}
+	if len(*got) != 0 {
+		t.Fatalf("keeper called on a refused request: %v", *got)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/clock", nil)
+	req.Host = ServiceIP
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("GET /api/clock: %d", rec.Code)
+	}
+}
+
+func TestClockOffWithoutKeeper(t *testing.T) {
+	s, _ := server(t)
+	if w, _ := postClock(s, ServiceIP, "1790000000"); w.Code != http.StatusNotFound {
+		t.Fatalf("clock endpoint without a keeper: %d", w.Code)
+	}
+}
+
 func TestHostGuard(t *testing.T) {
 	s, _ := server(t)
 	w, _ := upload(t, s, "evil.example", map[string][]byte{"a.mbu": appPkg(t, "2.0.0")})

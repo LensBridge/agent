@@ -135,7 +135,10 @@ func startUploadServer(ctx context.Context, logger *slog.Logger, cfg *config.Liv
 		AgentVersion: version.Version, Importer: imp,
 		ApplyClientTime: func(unix int64, b importer.Batch) uploadserver.ClockReport {
 			r := keeper.ApplyClientTime(unix, b)
-			return uploadserver.ClockReport{DriftSeconds: r.DriftSeconds, Adjusted: r.Adjusted, Note: r.Note}
+			return uploadserver.ClockReport(r)
+		},
+		ApplyClockOnlyTime: func(unix int64) uploadserver.ClockReport {
+			return uploadserver.ClockReport(keeper.ApplyClockOnlyTime(unix))
 		},
 		RTCPresent:   keeper.RTCPresent,
 		ClockInfo:    keeper.Info,

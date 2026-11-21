@@ -625,9 +625,10 @@ When `service_port` is on, the daemon listens on `10.77.0.1:80` (bound with
 
 | Method, path | Behaviour |
 |---|---|
-| `GET /` | A small self-contained upload page: pick or drop `.mbu` files, see progress and per-package results, see board status and clock drift. |
-| `GET /api/status` | `{"deviceId", "agentVersion", "app", "content", "today", "daysRemaining", "staleDays", "clock": {"unix", "timezone"}, "rtc": bool, "update": {"active": bool}}` |
+| `GET /` | A small self-contained upload page: pick or drop `.mbu` files, see progress and per-package results, see board status and clock drift, and a "Set the board's clock from this computer" button (`POST /api/clock`). |
+| `GET /api/status` | `{"deviceId", "agentVersion", "app", "content", "today", "daysRemaining", "staleDays", "clock": {"unix", "timezone", "source", "trusted"}, "rtc": bool, "update": {"active": bool}}` (`source` and `trusted` as in section 10) |
 | `POST /api/import` | `multipart/form-data`, one to 16 `package` parts (each at most 512 MiB, total at most 1 GiB). Optional header `X-MB-Client-Time: <unix seconds>`. Each part is streamed to the inbox, then processed as one batch (source `upload`). Response `200 {"results": [...], "notice": {...}, "restarting": bool, "agentVersion": "…", "clock": {"driftSeconds": n, "adjusted": bool, "note": "…"}}`. Only one import runs at a time; a second gets `409`. |
+| `POST /api/clock` | Sets the clock from the uploader's, with no package. No body; header `X-MB-Client-Time: <unix seconds>` required (`400` without it). Response `200 {"clock": {"driftSeconds": n, "adjusted": bool, "note": "…"}}`, under the clock-only rules of section 10. `409` while any import is running (it takes the same lock, so a clock change never lands mid-install). Agents before this endpoint answer `404`. |
 
 Errors are `{"message": "..."}` with a 4xx status. `driftSeconds` is the
 board's clock minus the uploader's, before any correction (positive: the board
@@ -635,21 +636,26 @@ was ahead).
 
 No authentication: every package is signed, device-bound where it matters and
 monotonic, so the worst an unauthenticated uploader can do is make the board
-verify a file and refuse it. Sizes and the single-import rule bound that.
-`ufw` allows `80/tcp` only on `eth0` from `10.77.0.0/24`.
+verify a file and refuse it. Sizes and the single-import rule bound that. The
+clock is the one thing an uploader's own data can move, within the bounds of
+section 10. `POST /api/clock` needs a custom header, so a web page open on the
+uploader's laptop cannot send it cross-origin (the server answers no CORS
+preflight). `ufw` allows `80/tcp` only on `eth0` from `10.77.0.0/24`.
 
 Clients:
 
 - **Browser**: `http://10.77.0.1/` from any laptop. Nothing to install.
 - **`mbpush`** (agent repo, Windows/macOS/Linux): `mbpush [--host 10.77.0.1] <file.mbu>...`,
-  `mbpush status`, `mbpush fetch [--dir D] [--arch arm64]` (downloads the
+  `mbpush status`, `mbpush clock` (`POST /api/clock`; exits non-zero when the
+  board's clock is off and was not changed), `mbpush fetch [--dir D] [--arch arm64]` (downloads the
   latest app and agent packages from the channels ahead of a visit; the content
   package comes from LensBridge's "Download offline bundle"). `--ssh user@host`
   streams to `sudo musallahboard-agent import -` for boards reachable only by
-  SSH.
+  SSH (`push` and `status` only).
 - **Android app**: downloads the content package from LensBridge and the
   software packages from the channels while it has signal, then POSTs them over
-  a USB ethernet adapter bound to that `Network`.
+  a USB ethernet adapter bound to that `Network`. "Set the board's clock" sends
+  `POST /api/clock` the same way, and needs nothing downloaded or signed in.
 
 ### 9.6 Offline: USB stick
 
@@ -791,11 +797,21 @@ minutes off.
   5 s, and only within `[clockFloor, clockFloor + 90 days]`. It sets the
   clock and the RTC but not the floor, so a later uploader with a right
   clock, or NTP, undoes a wrong one. The response reports the drift.
+- A clock-only request (`POST /api/clock`, section 9.5) has no package to
+  vouch for it, so its bounds are tighter: applied only when the clock is
+  not NTP-synchronised, only when it differs by more than 5 s, only on a
+  board that has verified a package before (`signedClockFloor` set), and only
+  within `[clockFloor, signedClockFloor + 90 days]`. Like an upload's, it
+  sets the clock and the RTC but never the floor, so a wrong one is undone by
+  the next good uploader or by NTP, and repeating it cannot take the board
+  more than 90 days past the newest signed `createdAt` it holds. The
+  response reports the drift and, when it was not applied, why.
 - **Trust.** The floor keeps the clock from going backwards; it cannot say
   the clock is right. `clock` in `/api/local/status` does: `source` is `ntp`
   (systemd-timesyncd has synchronised it), `rtc` (a hardware clock is
-  fitted), `uploader` (an upload with a verified package set or confirmed it
-  since this boot, recorded against the kernel boot id), `starting` (the
+  fitted), `uploader` (an upload with a verified package, or a clock-only
+  request within its bounds, set or confirmed it since this boot, recorded
+  against the kernel boot id), `starting` (the
   first 3 minutes after boot) or `unverified`. `trusted` is false only for
   `unverified`, and then the board shows "The clock may be wrong: connect the
   board to the internet, or send an update from a laptop", the upload page
@@ -1038,7 +1054,7 @@ per-day payloads from installed content, and weather comes through the agent.
 | Zip-slip, zip bombs, disk exhaustion | Strict entry names, declared sizes enforced while reading, global caps, one import at a time. |
 | Hostile USB stick | Allow-listed filesystems, read-only `nosuid,nodev,noexec` mount, only `*.mbu` regular files copied, no network in the helper, signature checks as for any source. |
 | Rogue DHCP on a building network | Service port only after a DHCP client attempt fails; off by default; `service-port off` before connecting. |
-| Clock tampering | With NTP, nothing but NTP moves the clock, and a floor ahead of NTP time is lowered. Without NTP, the clock only moves forward to the floor automatically; uploader time only with a verified package and within 90 days past the floor, and never into the floor. Packages signed more than a day ahead of an NTP clock are refused. |
+| Clock tampering | With NTP, nothing but NTP moves the clock, and a floor ahead of NTP time is lowered. Without NTP, the clock only moves forward to the floor automatically; uploader time only with a verified package and within 90 days past the floor, and never into the floor. Packages signed more than a day ahead of an NTP clock are refused. A clock-only request (`POST /api/clock`) is tighter: never under NTP, never on a board that has verified no package, only up to 90 days past the newest signed `createdAt`, and it never moves the floor either. |
 | DNS rebinding against the upload server | `Host` allow-list. |
 | Enrollment, claim or backend impersonated on the LAN | `https://` backend and `wss://` socket on the backend's host, enforced before an enrollment or claim is sent, on its reply, and at every start of the online layer; plaintext only with the explicit `insecure_dev` opt-in (section 11). |
 

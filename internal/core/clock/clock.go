@@ -20,9 +20,12 @@
 // board in the future.
 //
 // The only other way the clock moves is an uploader's time, and only without
-// NTP, when a package in that same upload verified and the time is within 90
-// days past the floor. It sets the clock but not the floor, so a wrong
-// uploader's time is undone by the next good one, or by NTP.
+// NTP: with an upload, when a package in that same upload verified and the
+// time is within 90 days past the floor; with no package (POST /api/clock),
+// only on a board that has verified a package before, and only up to 90 days
+// past the newest signed createdAt it has seen. Either way it sets the clock
+// but not the floor, so a wrong uploader's time is undone by the next good
+// one, or by NTP.
 //
 // The floor keeps the clock from going backwards; it cannot say the clock is
 // right. Info does: a board without NTP, an RTC, or a laptop's time since it
@@ -370,26 +373,103 @@ func (k *Keeper) ApplyClientTime(clientUnix int64, b importer.Batch) ClockReport
 		rep.Note = fmt.Sprintf("the board's clock is %s, but this device's time is more than 90 days past anything the board can confirm; the board's clock was not changed", describeDrift(drift))
 		return rep
 	}
-	target := time.Unix(clientUnix, 0)
-	if err := k.set(target); err != nil {
-		rep.Note = fmt.Sprintf("the board's clock is %s; setting it failed: %v", describeDrift(drift), err)
-		k.logger.Error("clock: could not apply uploader time", "err", err)
-		return rep
-	}
-	rep.Adjusted = true
-	k.verifiedThisBoot()
-	rep.Note = fmt.Sprintf("the board's clock was %s and has been set to this device's time", describeDrift(drift))
-	k.logger.Info("clock set from uploader", "driftSeconds", drift, "to", target.UTC().Format(time.RFC3339))
+	k.setFromClient(&rep, clientUnix)
 	return rep
 }
 
+// ApplyClockOnlyTime considers an uploader's clock sent without any package
+// (POST /api/clock). With no signed package in the request to vouch for it,
+// the bounds are tighter than an upload's: the time must be within
+// [floor, signedFloor + ClientWindow], signedFloor being the newest createdAt
+// of any package this board has verified. As for an upload, it is ignored
+// when the clock is NTP-synchronised, and it sets the clock but never the
+// floor, so a wrong time is undone by the next good one. However often it is
+// repeated, a clock-only request cannot take the board more than 90 days
+// past the newest signed proof it holds. ClientTolerance applies as for an
+// upload.
+func (k *Keeper) ApplyClockOnlyTime(clientUnix int64) ClockReport {
+	drift := k.Now().Unix() - clientUnix
+	rep := ClockReport{DriftSeconds: drift}
+	if k.NTPSynced() {
+		if abs(drift) <= int64(ClientTolerance/time.Second) {
+			rep.Note = "the board's clock agrees with this device"
+		} else {
+			rep.Note = fmt.Sprintf("the board's clock is %s, but it is set from the internet, so it was not changed; this device's clock may be wrong", describeDrift(drift))
+		}
+		return rep
+	}
+	st, err := k.layout.State().Load()
+	if err != nil {
+		rep.Note = "the board's clock was not changed: cannot read its clock floor: " + err.Error()
+		return rep
+	}
+	switch {
+	case st.SignedClockFloor <= 0:
+		rep.Note = fmt.Sprintf("the board's clock is %s, but the board has not verified any update package yet, so it has nothing to check this device's time against; send an update package instead, which also sets the clock", describeDrift(drift))
+		return rep
+	case clientUnix < st.ClockFloor:
+		rep.Note = fmt.Sprintf("the board's clock is %s, but this device's time is earlier than a signed package the board has seen; this device's clock looks wrong, so the board's was not changed", describeDrift(drift))
+		return rep
+	case clientUnix > st.SignedClockFloor+int64(ClientWindow/time.Second):
+		rep.Note = fmt.Sprintf("the board's clock is %s, but this device's time is more than 90 days past the newest update package the board has verified, so it was not changed; send a current update package, which also sets the clock", describeDrift(drift))
+		return rep
+	case abs(drift) <= int64(ClientTolerance/time.Second):
+		// Checked after the bounds: only a time the board could have
+		// accepted confirms its clock.
+		rep.Note = "the board's clock agrees with this device"
+		k.verifiedThisBoot()
+		return rep
+	}
+	// The clock only: never the floor (see the package comment).
+	k.setFromClient(&rep, clientUnix)
+	return rep
+}
+
+// setFromClient sets the clock to an uploader's time that passed the checks,
+// and reports whether it did.
+func (k *Keeper) setFromClient(rep *ClockReport, clientUnix int64) bool {
+	target := time.Unix(clientUnix, 0)
+	if err := k.set(target); err != nil {
+		rep.Note = fmt.Sprintf("the board's clock is %s; setting it failed: %v", describeDrift(rep.DriftSeconds), err)
+		k.logger.Error("clock: could not apply uploader time", "err", err)
+		return false
+	}
+	rep.Adjusted = true
+	k.verifiedThisBoot()
+	rep.Note = fmt.Sprintf("the board's clock was %s and has been set to this device's time", describeDrift(rep.DriftSeconds))
+	k.logger.Info("clock set from uploader", "driftSeconds", rep.DriftSeconds, "to", target.UTC().Format(time.RFC3339))
+	return true
+}
+
 // describeDrift says which way the board is off, against the uploader.
+// The note is shown as is by the upload page, mbpush and the Android app.
 func describeDrift(drift int64) string {
-	d := (time.Duration(abs(drift)) * time.Second).String()
+	d := humanSeconds(abs(drift))
 	if drift > 0 {
 		return d + " ahead"
 	}
 	return d + " behind"
+}
+
+// humanSeconds puts a drift in words a person reads at a glance: "2 hours",
+// not "2h0m0s".
+func humanSeconds(s int64) string {
+	unit := func(n int64, one string) string {
+		if n == 1 {
+			return "1 " + one
+		}
+		return fmt.Sprintf("%d %ss", n, one)
+	}
+	switch {
+	case s < 120:
+		return unit(s, "second")
+	case s < 2*3600:
+		return unit(s/60, "minute")
+	case s < 2*86400:
+		return unit(s/3600, "hour")
+	default:
+		return unit(s/86400, "day")
+	}
 }
 
 func abs(n int64) int64 {

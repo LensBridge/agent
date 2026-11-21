@@ -272,7 +272,7 @@ func printStatus(st cliStatus) {
 			row("", "not confirmed yet (just booted)")
 		default:
 			row("", "NOT CONFIRMED since boot: it may be wrong. Connect the board to the internet,")
-			row("", "fit an RTC (setup.sh --rtc), or send an update from http://10.77.0.1/")
+			row("", "fit an RTC (setup.sh --rtc), or set it from http://10.77.0.1/ or `mbpush clock`")
 		}
 	}
 	if st.RTC {

@@ -22,7 +22,8 @@ button:disabled{opacity:.5;cursor:default}ul{padding-left:18px;margin:8px 0}prog
 </style></head><body>
 <header><h1>MusallahBoard update</h1><p>Send signed update packages (.mbu) to this board.</p></header>
 <main>
-<section class="card"><h2>This board</h2><dl id="st"><dt>Status</dt><dd>loading…</dd></dl></section>
+<section class="card"><h2>This board</h2><dl id="st"><dt>Status</dt><dd>loading…</dd></dl>
+<p><button id="clk">Set the board's clock from this computer</button></p><p id="clkout" class="muted" hidden></p></section>
 <section class="card"><h2>Send updates</h2>
 <div id="drop">Drop .mbu files here, or click to choose<input id="pick" type="file" accept=".mbu" multiple hidden></div>
 <p class="muted">Up to 16 files at a time, 1 GiB in total.</p>
@@ -40,9 +41,9 @@ function loadStatus(){fetch('/api/status',{cache:'no-store'}).then(function(r){r
  row(dl,'Content',s.content?(s.content.firstDay+' to '+s.content.lastDay):'none installed');
  if(s.content){row(dl,'Days left',s.staleDays>0?('ran out '+s.staleDays+' day(s) ago'):String(s.daysRemaining))}
  var drift=Math.round(s.clock.unix-Date.now()/1000);
- row(dl,'Board clock',new Date(s.clock.unix*1000).toLocaleString()+(Math.abs(drift)>5?(' ('+drift+' s off this computer; '+(s.clock.source==='ntp'?'the board is set from the internet, so this computer\'s clock is probably wrong':'corrected when you send an update')+')'):''));
+ row(dl,'Board clock',new Date(s.clock.unix*1000).toLocaleString()+(Math.abs(drift)>5?(' ('+human(Math.abs(drift))+(drift>0?' ahead of':' behind')+' this computer; '+(s.clock.source==='ntp'?'the board is set from the internet, so this computer's clock is probably wrong':'set it with the button below, or by sending an update')+')'):''));
  row(dl,'RTC',s.rtc?'present':'not fitted');
- var src={ntp:'set from the internet',rtc:'kept by the hardware clock',uploader:'set from a laptop or phone',starting:'checking',unverified:'NOT CONFIRMED: send an update from this page to set it'};
+ var src={ntp:'set from the internet',rtc:'kept by the hardware clock',uploader:'set from a laptop or phone',starting:'checking',unverified:'NOT CONFIRMED: set it with the button below'};
  if(s.clock.source)row(dl,'Clock',src[s.clock.source]||s.clock.source);
 }).catch(function(){document.getElementById('st').textContent='Could not reach the board.'})}
 function show(){var ul=document.getElementById('files');ul.textContent='';chosen.forEach(function(f){ul.appendChild(el('li',null,f.name+' ('+Math.round(f.size/1024)+' KB)'))});
@@ -86,5 +87,17 @@ function watchRestart(before,out){
    if(Date.now()-start>240000){p.className='bad';p.textContent='The board has not come back after 4 minutes. Check its screen, and make sure it has power.';return}
    setTimeout(poll,3000)})
  })()}
+function human(s){return s<120?s+' s':s<7200?Math.round(s/60)+' min':s<172800?Math.round(s/3600)+' h':Math.round(s/86400)+' days'}
+// Sets the clock with no package. The board decides whether to accept this
+// computer's time (it must be within its limits) and says why.
+document.getElementById('clk').onclick=function(){
+ var b=this,o=document.getElementById('clkout');b.disabled=true;o.hidden=false;o.className='muted';o.textContent='Setting the clock…';
+ fetch('/api/clock',{method:'POST',cache:'no-store',headers:{'X-MB-Client-Time':String(Math.floor(Date.now()/1000))}}).then(function(res){
+  return res.json().catch(function(){return {}}).then(function(r){
+   if(res.ok&&r.clock){o.className=r.clock.adjusted?'ok':'muted';o.textContent='Clock: '+r.clock.note}
+   else if(res.status===404){o.className='bad';o.textContent="This board's agent is too old to set its clock on its own. Send an update instead; that sets the clock too."}
+   else{o.className='bad';o.textContent=r.message||('The board answered HTTP '+res.status)}
+   b.disabled=false;loadStatus()})
+ }).catch(function(){o.className='bad';o.textContent='Could not reach the board.';b.disabled=false})};
 loadStatus();
 </script></body></html>`

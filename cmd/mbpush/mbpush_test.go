@@ -113,6 +113,9 @@ func TestParseArgs(t *testing.T) {
 			return o.host == "musallahboard.local" && slices.Equal(o.files, []string{"a.mbu"})
 		}, false},
 		{"status", []string{"status"}, func(o options) bool { return o.command == "status" }, false},
+		{"clock", []string{"clock", "--host", "musallahboard.local"}, func(o options) bool {
+			return o.command == "clock" && o.host == "musallahboard.local"
+		}, false},
 		{"fetch defaults", []string{"fetch"}, func(o options) bool {
 			return o.command == "fetch" && o.dir == "." && o.arch == "arm64" &&
 				o.appChannel == defaultAppChannel &&
@@ -128,6 +131,8 @@ func TestParseArgs(t *testing.T) {
 		{"not a package", []string{"bundle.zip"}, nil, true},
 		{"status plus a file", []string{"status", "a.mbu"}, nil, true},
 		{"fetch over ssh", []string{"fetch", "--ssh", "a@b"}, nil, true},
+		{"clock over ssh", []string{"clock", "--ssh", "a@b"}, nil, true},
+		{"clock plus a file", []string{"clock", "a.mbu"}, nil, true},
 		{"ssh without user", []string{"--ssh", "board.local", "a.mbu"}, nil, true},
 		{"bad arch", []string{"fetch", "--arch", "armhf"}, nil, true},
 		{"unknown flag", []string{"--hots", "x", "a.mbu"}, nil, true},
@@ -432,7 +437,7 @@ func TestStatus(t *testing.T) {
 		"2026-09-24 to 2026-10-07 (America/Toronto), from a USB stick",
 		"Today is 2026-09-30: 7 days of content left after today.",
 		"10 min behind this laptop (time zone America/Toronto)",
-		"Sending a package with mbpush sets it",
+		"`mbpush clock` sets it to this laptop's time",
 		"RTC         fitted",
 	} {
 		if !strings.Contains(out.String(), want) {

@@ -97,7 +97,7 @@ Every board renders from its own disk: the kiosk always loads the agent's local 
 - **USB stick.** Copy `.mbu` files from the console (setup file, content, or a whole USB kit) to a stick and plug it in. One stick can carry packages for many boards: each takes only its own, and only what is newer. Content covers up to 92 days.
 - **Release channels.** Any board with internet follows the GitHub release channels for new board app and agent versions (no enrollment needed) and installs them overnight. A new agent is installed by a small root updater that checks it again and rolls it back if it does not stay up.
 - **Online boards** (claimed or enrolled) also sync their content from LensBridge every 30 minutes and soon after an admin changes something.
-- **Laptop or phone** on the ethernet service port (`sudo musallahboard-agent service-port on`): open `http://10.77.0.1/`, or `mbpush <file.mbu>...`. An upload also sets the board's clock from the laptop's. Turn it off before plugging the board into a real network. A DS3231 clock module: `bash setup.sh --service-port --rtc`.
+- **Laptop or phone** on the ethernet service port (`sudo musallahboard-agent service-port on`): open `http://10.77.0.1/`, or `mbpush <file.mbu>...`. An upload also sets the board's clock from the laptop's. Turn it off before plugging the board into a real network. A DS3231 clock module: `bash setup.sh --service-port --rtc`. The Android app (`mbpush-android`) does the same from a phone over a USB ethernet adapter, and `mbpush clock` or the app can also just set the board's clock.
 - **On the board:** `sudo musallahboard-agent import <file.mbu>...` and `musallahboard-agent status`.
 
 ### Release signing
