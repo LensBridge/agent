@@ -29,6 +29,13 @@ func runInstallSystem(args []string) {
 	}
 	requireRoot("install-system")
 	files := packaging.System
+	// A board set up --rtc keeps its RTC files current without the flag: the
+	// updater runs install-system after every agent update and cannot know.
+	if !*rtc {
+		if _, err := os.Stat(packaging.RTC[len(packaging.RTC)-1].Path); err == nil {
+			*rtc = true
+		}
+	}
 	if *rtc {
 		files = append(append([]packaging.File{}, files...), packaging.RTC...)
 	}

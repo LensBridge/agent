@@ -869,12 +869,29 @@ files is ignored. The file is written atomically and given the owner of
    `active`) for 4 minutes; and if the board was connected before the update
    (`backend.connected`, or `sync.lastSuccessAt` with no `lastError`), it
    must connect again within 3 minutes. A board that was offline is not
-   asked to be online. If it passes, the outcome is written.
+   asked to be online. A crash is systemd's `NRestarts` going up, or the
+   unit `failed`. A new `MainPID` or a stopped unit with `NRestarts`
+   unchanged is someone's `systemctl` (or a maintainer's reboot), not the
+   new agent's doing: it is judged again from the start, up to 3 times. If
+   it passes, the outcome is written, and the updater has the new binary
+   write its own system files: `systemd-run --wait --collect
+   --unit=musallahboard-install-system /usr/bin/musallahboard-agent
+   install-system`, outside the updater's sandbox, which cannot write them.
+   That keeps the units, udev rules, sudoers and the kiosk's
+   `starting.html` matching the agent that runs. `install-system` keeps a
+   board's RTC files without `--rtc` once they are installed. Boards on
+   1.1.2 or earlier get this from the update after 1.1.3, since the old
+   updater runs the update to 1.1.3: run `sudo musallahboard-agent
+   install-system` once to catch up sooner.
 5. If it fails, the updater restores `agent.prev`, records the outcome in
    `agent/last-update.json`, and only then restarts the previous agent, so it
-   can read it. Not coming up, a restart or crash loop, or a probation cut
-   short 3 times adds the version to `agentVersionsRejected`, so a broken
-   release cannot loop. Not reconnecting only counts a strike
+   can read it. Not coming up, a crash, or a probation cut short 3 times
+   adds the version to `agentVersionsRejected`, so a broken release cannot
+   loop. Restarted or stopped by hand more than 3 times, or not coming back
+   after being stopped by hand, only counts a strike. Root's writes to
+   `state.json` (the rejected list) leave it, and its lock, owned by the
+   state directory's owner, the service user; any file root replaces with
+   `fsutil.WriteAtomic` keeps its owner. Not reconnecting only counts a strike
    (`update-strikes.json`), because the backend or the network may be what
    failed; the second strike rejects the version. If `agent.prev` cannot be
    restored the outcome is `rollback-failed` and the new agent keeps running.

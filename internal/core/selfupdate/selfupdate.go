@@ -438,7 +438,28 @@ func (u *Updater) commit(ctx context.Context, rec *Txn) (Outcome, error) {
 	if rerr := removeDurable(u.Txn); rerr != nil {
 		u.Logf("could not remove %s: %v", u.Txn, rerr)
 	}
+	u.installSystemFiles(ctx)
 	return out, err
+}
+
+// InstallSystemUnit is the transient unit installSystemFiles runs in.
+const InstallSystemUnit = "musallahboard-install-system"
+
+// installSystemFiles has the new agent write its own system files (units,
+// udev rules, sudoers, the kiosk's starting page): `install-system`, run
+// by systemd as a transient unit, because this unit's sandbox cannot write
+// them. Only after a committed update: a rolled-back board runs the binary
+// whose files are already there. Best effort: the update stands either way,
+// and install-system is idempotent, so a later run catches up.
+func (u *Updater) installSystemFiles(ctx context.Context) {
+	o, err := u.Run(ctx, "systemd-run", "--quiet", "--wait", "--collect",
+		"--unit="+InstallSystemUnit, "--description=Install the MusallahBoard agent's system files",
+		u.Binary, "install-system")
+	if err != nil {
+		u.Logf("could not install the new agent's system files: %v %s", err, firstLine(o))
+		return
+	}
+	u.Logf("installed the new agent's system files")
 }
 
 // rollBack restores the previous agent, records the version as rejected (or,

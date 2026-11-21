@@ -270,6 +270,22 @@ func TestApplyOK(t *testing.T) {
 	if o := lastUpdate(t, h.u); o.Status != StatusOK || o.At == "" {
 		t.Errorf("last-update = %+v", o)
 	}
+	if n := h.installSystemRuns(); n != 1 {
+		t.Errorf("install-system ran %d times after a committed update: %q", n, h.cmds)
+	}
+}
+
+// installSystemRuns counts the updater's systemd-run of the new binary's
+// install-system.
+func (h *harness) installSystemRuns() int {
+	n := 0
+	for _, c := range h.cmds {
+		if strings.HasPrefix(c, "systemd-run ") && strings.HasSuffix(c, "musallahboard-agent install-system") &&
+			strings.Contains(c, "--unit="+InstallSystemUnit) {
+			n++
+		}
+	}
+	return n
 }
 
 func TestApplyNoComeUpRollsBack(t *testing.T) {
@@ -311,6 +327,80 @@ func TestApplyCrashLoopRollsBack(t *testing.T) {
 	}
 	if read(t, h.u.Binary) != oldBinary || !rejected(t, h.u, "0.4.0") {
 		t.Error("not rolled back and rejected")
+	}
+	if n := h.installSystemRuns(); n != 0 {
+		t.Errorf("install-system ran after a rollback: %q", h.cmds)
+	}
+	h.settled(t)
+}
+
+// restartByHand makes the harness restart the new agent the way `systemctl
+// restart` does (new MainPID, NRestarts unchanged) at seconds after each
+// start, up to times times.
+func restartByHand(h *harness, after time.Duration, times int) *int {
+	done := 0
+	h.tick = func(h *harness) {
+		if done < times && h.isNew() && h.now.Sub(h.agent.startedAt) >= after {
+			done++
+			h.start()
+		}
+	}
+	return &done
+}
+
+// A maintainer restarting the agent during its probation is not a crash:
+// the new agent is judged again and passes.
+func TestApplyRestartByHandIsJudgedAgain(t *testing.T) {
+	h := newHarness(t, true)
+	done := restartByHand(h, 20*time.Second, 1)
+	h.stage(t, "0.4.0", "arm64", releaseKey)
+	out, err := h.u.Apply(context.Background())
+	if err != nil || out.Status != StatusOK {
+		t.Fatalf("outcome = %+v, err = %v", out, err)
+	}
+	if *done != 1 {
+		t.Fatalf("restarted by hand %d times", *done)
+	}
+	if read(t, h.u.Binary) != "new agent 0.4.0" || rejected(t, h.u, "0.4.0") {
+		t.Error("the new agent was not kept")
+	}
+	h.settled(t)
+}
+
+// A real crash after a restart by hand still rejects the version.
+func TestApplyCrashAfterRestartByHandRejects(t *testing.T) {
+	h := newHarness(t, true)
+	restartByHand(h, 20*time.Second, 1)
+	inner := h.tick
+	h.tick = func(h *harness) {
+		inner(h)
+		if h.isNew() && h.agent.pid >= 300 { // after the hand restart
+			h.agent.crashAfter = 30 * time.Second
+		}
+	}
+	h.stage(t, "0.4.0", "arm64", releaseKey)
+	out, err := h.u.Apply(context.Background())
+	if err == nil || out.Status != StatusRolledBack || !strings.Contains(out.Message, "crashed") {
+		t.Fatalf("outcome = %+v, err = %v", out, err)
+	}
+	if read(t, h.u.Binary) != oldBinary || !rejected(t, h.u, "0.4.0") {
+		t.Error("not rolled back and rejected")
+	}
+	h.settled(t)
+}
+
+// Restarted by hand over and over, the agent cannot be judged: it is rolled
+// back, but only with a strike, never rejected.
+func TestApplyRestartedByHandRepeatedlyIsNotRejected(t *testing.T) {
+	h := newHarness(t, true)
+	restartByHand(h, 20*time.Second, 100)
+	h.stage(t, "0.4.0", "arm64", releaseKey)
+	out, err := h.u.Apply(context.Background())
+	if err == nil || out.Status != StatusRolledBack || !strings.Contains(out.Message, "by hand") {
+		t.Fatalf("outcome = %+v, err = %v", out, err)
+	}
+	if read(t, h.u.Binary) != oldBinary || rejected(t, h.u, "0.4.0") {
+		t.Error("rolled back but rejected, or not rolled back")
 	}
 	h.settled(t)
 }
