@@ -200,7 +200,11 @@ valid_content_key() {
 # ── Pre-flight checks ─────────────────────────────────────────────────────────
 preflight() {
     [[ $EUID -eq 0 ]] && error "Do not run as root. Run as a user with sudo access."
-    sudo -v || error "This script requires sudo access."
+    # Not `sudo -v` alone: it prompts even under NOPASSWD when any other
+    # matching sudoers entry (e.g. %sudo) needs a password, which is a stock
+    # Raspberry Pi OS user, and fails outright with no terminal (curl | bash
+    # over ssh, MB_ASSUME_YES). Only ask for a password when one is needed.
+    sudo -n true 2>/dev/null || sudo -v || error "This script requires sudo access."
 
     if [[ "$IS_VM" == "1" ]]; then
         [[ "$ARCH" == "arm64" || "$ARCH" == "amd64" ]] || \
