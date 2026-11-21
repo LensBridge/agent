@@ -90,7 +90,10 @@ func (f File) Update(fn func(*State) error) (State, error) {
 	if fi, err := os.Stat(f.Path); err == nil {
 		mode = fi.Mode().Perm()
 	}
-	return s, fsutil.WriteAtomic(f.Path, append(raw, '\n'), mode)
+	// The daemon's file, also written by root tools (the updater records a
+	// rejected version here): always the state directory's owner's, so a
+	// root write never locks the daemon out of its own state.
+	return s, fsutil.WriteAtomicOwnedByDir(f.Path, append(raw, '\n'), mode)
 }
 
 // RaiseClockFloor moves the floor up to a remembered wall-clock time unix,

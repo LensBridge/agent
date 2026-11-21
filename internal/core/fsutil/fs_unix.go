@@ -44,6 +44,18 @@ func LockDir(dir string) (unlock func(), err error) {
 	}, nil
 }
 
+// chownLike gives path the owner and group of like, if like exists. Best
+// effort, as ChownToDirOwner.
+func chownLike(path, like string) {
+	fi, err := os.Stat(like)
+	if err != nil {
+		return
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		_ = os.Chown(path, int(st.Uid), int(st.Gid))
+	}
+}
+
 // ChownToDirOwner gives path the owner and group of dir. Root tools (the USB
 // helper, `enroll`, `service-port`) write files the unprivileged daemon must
 // read, into directories the daemon owns. Best effort: not root, it fails

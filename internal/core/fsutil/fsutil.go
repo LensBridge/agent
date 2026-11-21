@@ -57,7 +57,22 @@ func CopyFileSync(path string, r io.Reader, limit int64, mode os.FileMode) (int6
 // WriteAtomic replaces path with data: a temp file beside it is written,
 // fsynced and renamed over it, then the directory is fsynced. Readers see the
 // old content or the new, never a partial file.
+//
+// A replaced file keeps its owner and group: a root tool rewriting a file the
+// unprivileged daemon owns (state.json, written by the root updater) must not
+// take it away from the daemon. A new file belongs to whoever writes it.
 func WriteAtomic(path string, data []byte, mode os.FileMode) error {
+	return writeAtomic(path, data, mode, func(tmp string) { chownLike(tmp, path) })
+}
+
+// WriteAtomicOwnedByDir is WriteAtomic for a file that always belongs to the
+// owner of the directory it is in, new or replaced, whoever writes it: the
+// daemon's own state, which root tools also write.
+func WriteAtomicOwnedByDir(path string, data []byte, mode os.FileMode) error {
+	return writeAtomic(path, data, mode, func(tmp string) { ChownToDirOwner(tmp, filepath.Dir(path)) })
+}
+
+func writeAtomic(path string, data []byte, mode os.FileMode, chown func(tmp string)) error {
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-")
 	if err != nil {
@@ -82,6 +97,7 @@ func WriteAtomic(path string, data []byte, mode os.FileMode) error {
 		os.Remove(tmp)
 		return err
 	}
+	chown(tmp)
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
 		return err
