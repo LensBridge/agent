@@ -228,7 +228,8 @@ func TestUnprovisionedBoardShowsSetupScreen(t *testing.T) {
 	for _, path := range []string{"/", "/some/route"} {
 		rec := httptest.NewRecorder()
 		s.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
-		if rec.Code != 200 || !strings.Contains(rec.Body.String(), "This board is not set up yet") {
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), "This board is not set up yet") ||
+			!strings.Contains(rec.Body.String(), "@keyframes turn") {
 			t.Fatalf("%s: %d %.80q", path, rec.Code, rec.Body.String())
 		}
 	}

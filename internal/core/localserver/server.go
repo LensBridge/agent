@@ -395,39 +395,42 @@ func where(n netinfo.Info) string {
 	return w
 }
 
-const setupHTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
-<title>MusallahBoard</title>
-<style>html,body{height:100%;margin:0;background:#082D5D;color:#fff;font-family:system-ui,sans-serif}
-main{height:100%;display:grid;place-items:center;text-align:center;padding:6vmin;box-sizing:border-box}
-h1{font-weight:300;font-size:5vmin;margin:0 0 2.5vmin}p{font-size:2.8vmin;line-height:1.45;opacity:.85;margin:0}
-#note{margin-top:5vmin;font-size:2.6vmin;min-height:8vmin}#note b{display:block;font-size:3vmin}
-small{position:fixed;bottom:2vmin;left:0;right:0;font-size:1.6vmin;opacity:.45}</style>
-</head><body><main><div><h1>This board is not set up yet</h1>
-<p>Plug in its setup USB stick.</p><div id="note"></div></div></main><small id="where">{{where}}</small>
+// setupHTML is the setup screen in the update screen's style. A notice from
+// an import takes the headline, lines and footer, and its tone picks the mark
+// above them, as on the update screen: the throbber while a stick is read,
+// :) once it worked, the alert on a problem. With no notice it is the gold
+// USB stick and the standing instruction.
+var setupHTML = updateanim.Page("MusallahBoard", "", `<main class="screen" id="screen" data-icon="usb">
+<div class="state"><div class="focal">`+updateanim.USB+updateanim.Throbber+updateanim.Smiley+updateanim.Alert+`</div>
+<h1 class="headline" id="headline">This board is not set up yet</h1>
+<ul class="lines" id="lines"><li>Plug in its setup USB stick.</li></ul>
+<p class="footer-line" id="footer"></p></div></main>
+<p class="where" id="where">{{where}}</p>
 <script>
-function show(n){var e=document.getElementById('note');e.textContent='';if(!n)return;
-var b=document.createElement('b');b.textContent=n.headline;e.appendChild(b);
-(n.lines||[]).concat(n.footer?[n.footer]:[]).forEach(function(l){var d=document.createElement('div');d.textContent=l;e.appendChild(d)});
-if(n.seconds>0)setTimeout(function(){show(null)},n.seconds*1000)}
+var idle={headline:'This board is not set up yet',lines:['Plug in its setup USB stick.'],footer:''},timer=0;
+var icons={progress:'working',ok:'ok',problem:'problem'};
+function show(n){clearTimeout(timer);var s=n||idle;
+document.getElementById('screen').setAttribute('data-icon',(n&&icons[n.tone])||'usb');
+document.getElementById('headline').textContent=s.headline||idle.headline;
+var ul=document.getElementById('lines');ul.textContent='';
+(s.lines||[]).forEach(function(l){var li=document.createElement('li');li.textContent=l;ul.appendChild(li)});
+document.getElementById('footer').textContent=s.footer||'';
+if(n&&n.seconds>0)timer=setTimeout(function(){show(null)},n.seconds*1000)}
 try{new EventSource('/api/local/events').addEventListener('notice',function(ev){show(JSON.parse(ev.data))})}catch(e){}
 setInterval(function(){fetch('/api/local/status',{cache:'no-store'}).then(function(r){return r.json()})
 .then(function(s){if(s&&s.deviceId)location.reload()}).catch(function(){})},3000)
 setInterval(function(){fetch('/api/local/where',{cache:'no-store'}).then(function(r){return r.json()})
 .then(function(w){if(w&&typeof w.where==='string')document.getElementById('where').textContent=w.where}).catch(function(){})},10000)
-</script></body></html>`
+</script>`)
 
 // aliveGIF is a transparent 1x1 GIF.
 var aliveGIF = []byte("GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\x00\x00\x00" +
 	"!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;")
 
-const noAppHTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
-<title>MusallahBoard</title>
-<style>html,body{height:100%;margin:0;background:#082D5D;color:#fff;font-family:system-ui,sans-serif}
-main{height:100%;display:grid;place-items:center;text-align:center;padding:6vmin;box-sizing:border-box}
-h1{font-weight:300;font-size:5vmin;margin:0 0 2.5vmin}p{font-size:2.6vmin;line-height:1.45;opacity:.8;max-width:60ch;margin:0 auto}</style>
-</head><body><main><div><h1>Waiting for the board app</h1>
-<p>This board has no board app installed yet. Online boards download it automatically within a few minutes.
-{{offline}}</p></div></main>
+// noAppHTML is "Waiting for the board app" in the update screen's style.
+var noAppHTML = updateanim.Page("MusallahBoard", "", `<main class="screen" data-icon="working">
+<div class="state"><div class="focal">`+updateanim.Throbber+`</div>
+<h1 class="headline">Waiting for the board app</h1>
+<ul class="lines"><li>Online boards download it automatically within a few minutes.</li><li>{{offline}}</li></ul></div></main>
 <script>setInterval(function(){fetch('/api/local/status',{cache:'no-store'}).then(function(r){return r.json()})
-.then(function(s){if(s&&s.app)location.reload()}).catch(function(){})},5000)</script>
-</body></html>`
+.then(function(s){if(s&&s.app)location.reload()}).catch(function(){})},5000)</script>`)

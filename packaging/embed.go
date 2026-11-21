@@ -7,8 +7,11 @@
 package packaging
 
 import (
+	"bytes"
 	"embed"
 	"io/fs"
+
+	updateanim "github.com/LensBridge/agent/update-anim"
 )
 
 //go:embed *.service *.path start-kiosk.sh starting.html udev sudoers.d modules-load.d rtc
@@ -63,5 +66,16 @@ var Obsolete = []string{
 	"/usr/share/musallahboard/waiting.html",
 }
 
-// Read returns the embedded file named name.
-func Read(name string) ([]byte, error) { return files.ReadFile(name) }
+// screenCSS is the marker in starting.html that Read replaces with the
+// update screen's stylesheet and the shared screen styles.
+const screenCSS = "/*{{screen-css}}*/"
+
+// Read returns the embedded file named name. starting.html comes back with
+// the update screen's style filled in, so the page on disk is complete.
+func Read(name string) ([]byte, error) {
+	b, err := files.ReadFile(name)
+	if err != nil || name != "starting.html" {
+		return b, err
+	}
+	return bytes.Replace(b, []byte(screenCSS), []byte(updateanim.Style+updateanim.SharedCSS), 1), nil
+}
