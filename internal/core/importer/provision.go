@@ -59,6 +59,14 @@ func (im *Importer) provision(pkg *mbu.Package, res Result, show func(mbu.Type, 
 			if c.WebSocketURL == "" {
 				c.ClaimSecret = p.ClaimSecret
 			}
+			// The file states the backend's transport: a development
+			// backend on http turns insecure_dev on, an https one off.
+			if p.InsecureDev {
+				on := true
+				c.InsecureDevSet = &on
+			} else {
+				c.InsecureDevSet = nil
+			}
 		}
 		return nil
 	})
@@ -70,7 +78,7 @@ func (im *Importer) provision(pkg *mbu.Package, res Result, show func(mbu.Type, 
 		return failed(res, "Saving this board's settings failed", err)
 	}
 	im.d.Logger.Info("setup file applied", "deviceId", m.DeviceID, "displayName", p.DisplayName,
-		"sequence", m.Sequence, "backendUrl", p.BackendURL, "first", first)
+		"sequence", m.Sequence, "backendUrl", p.BackendURL, "insecureDev", p.InsecureDev, "first", first)
 	res.Action = ActionInstalled
 	switch {
 	case first && p.DisplayName != "":

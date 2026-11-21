@@ -321,6 +321,11 @@ func TestParseProvision(t *testing.T) {
 		`{"format":1,` + id + `,"claimSecret":"` + secret + `"}`:                                         false,
 		`{"format":1,` + id + `,"backendUrl":"ftp://x","claimSecret":"` + secret + `"}`:                  false,
 		`{"format":1,` + id + `,"backendUrl":"https://api.example.org","claimSecret":"short"}`:           false,
+		// insecureDev: only beside an http:// backend.
+		`{"format":1,` + id + `,"backendUrl":"http://10.0.0.2:8080","claimSecret":"` + secret + `","insecureDev":true}`:    true,
+		`{"format":1,` + id + `,"backendUrl":"http://10.0.0.2:8080","claimSecret":"` + secret + `"}`:                       true,
+		`{"format":1,` + id + `,"backendUrl":"https://api.example.org","claimSecret":"` + secret + `","insecureDev":true}`: false,
+		`{"format":1,` + id + `,"insecureDev":true}`:                                                                       false,
 		`{"format":2,` + id + `}`:                                                     false,
 		`{"format":1,"deviceId":"` + testDevice + `","sequence":6}`:                   false,
 		`{"format":1,"deviceId":"00000000-0000-0000-0000-000000000001","sequence":5}`: false,

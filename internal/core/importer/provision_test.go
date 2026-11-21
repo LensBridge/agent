@@ -241,6 +241,33 @@ func TestProvisionOnlineSettings(t *testing.T) {
 	}
 }
 
+// A setup file for a development backend on http turns insecure_dev on, so
+// the board can claim there; a later one naming an https backend turns it
+// off again.
+func TestProvisionInsecureDev(t *testing.T) {
+	devFile := func(seq int64) string {
+		p := mbu.Provision{Format: 1, DeviceID: dev, Sequence: seq, BackendURL: "http://10.0.0.2:8080", ClaimSecret: secret, InsecureDev: true}
+		raw, _ := json.Marshal(p)
+		return build(t, mbu.Manifest{Type: mbu.TypeProvision, DeviceID: dev, Sequence: seq, CreatedAt: "2026-11-19T12:00:00Z"},
+			[]mbu.Source{{Path: mbu.ProvisionFile, Data: raw}}, contentKey)
+	}
+	im, live, _, _ := newImporter(t, config.Config{})
+	one(t, im.Import(context.Background(), SourceUSB, []string{devFile(5)}))
+	c := live.Get()
+	if !c.InsecureDev() || c.BackendURL != "http://10.0.0.2:8080" || c.ClaimSecret != secret {
+		t.Fatalf("config = %+v", c)
+	}
+	// What the online layer checks before it claims.
+	if err := config.CheckBackendURL(c.BackendURL, c.InsecureDev()); err != nil {
+		t.Fatalf("CheckBackendURL: %v", err)
+	}
+
+	one(t, im.Import(context.Background(), SourceUSB, []string{setupFile(t, dev, 6, "N", "https://api.example.org", contentKey)}))
+	if c := live.Get(); c.InsecureDev() || c.BackendURL != "https://api.example.org" {
+		t.Fatalf("config = %+v", c)
+	}
+}
+
 // provision.json must agree with the signed manifest it travels under.
 func TestProvisionFileMustMatchManifest(t *testing.T) {
 	im, live, _, _ := newImporter(t, config.Config{})

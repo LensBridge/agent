@@ -188,7 +188,12 @@ Per type:
 
   `deviceId` and `sequence` must equal the manifest's. `backendUrl` (a plain
   http(s) base URL) and `claimSecret` are both present (a board that will go
-  online) or both absent (an offline-only board). A setup file never carries
+  online) or both absent (an offline-only board). `insecureDev: true` (optional)
+  says `backendUrl` is a development backend on plain `http://`: the board
+  saves `insecure_dev = true` (section 11) so it can claim there. It is only
+  valid beside an `http://` `backendUrl`; a file with an `https://` one turns
+  `insecure_dev` off again. The backend writes it only when its own backend URL
+  is `http://`, which a production backend's never is. A setup file never carries
   keys, software, SSH keys, wifi or anything that runs: the content key may
   only ever affect content and identity. How a board applies one: section 9.
 
@@ -834,7 +839,7 @@ backend runs.
 | `auto_update` (`true`) | by hand | follow the release channels |
 | `app_channel_url`, `agent_channel_url` | by hand | channel pointers (section 9.4); empty disables one |
 | `update_time` (`"23:00"`) | by hand | when channel software installs, `HH:MM` in the board's zone |
-| `insecure_dev` (`false`) | `enroll --insecure-dev` | development boards only: allow `http://` and `ws://` (same host); warned about at every start |
+| `insecure_dev` (`false`) | `enroll --insecure-dev`, a setup file with `insecureDev` | development boards only: allow `http://` and `ws://` (same host); warned about at every start |
 
 The device key is always `/etc/musallahboard/agent.key`; `key_path` in older
 files is ignored. The file is written atomically and given the owner of

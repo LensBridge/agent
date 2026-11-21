@@ -40,6 +40,12 @@ type Provision struct {
 	// ClaimSecret (base64url, 32 bytes) is present exactly when BackendURL
 	// is.
 	ClaimSecret string `json:"claimSecret,omitempty"`
+	// InsecureDev says the backend is a development one on plain http://
+	// (and ws://): the board saves insecure_dev = true, as enroll
+	// --insecure-dev does. Only valid with an http:// BackendURL, so a file
+	// naming an https backend can never turn TLS off. The file is signed by
+	// the content key, which the board already trusts to name its backend.
+	InsecureDev bool `json:"insecureDev,omitempty"`
 }
 
 func (m *Manifest) checkProvision() error {
@@ -78,6 +84,8 @@ func ParseProvision(raw []byte, m *Manifest) (*Provision, error) {
 		return nil, fmt.Errorf("%s has an unusable displayName", ProvisionFile)
 	case (p.BackendURL == "") != (p.ClaimSecret == ""):
 		return nil, fmt.Errorf("%s must carry backendUrl and claimSecret together, or neither", ProvisionFile)
+	case p.InsecureDev && p.BackendURL == "":
+		return nil, fmt.Errorf("%s has insecureDev without a backendUrl", ProvisionFile)
 	}
 	if p.IssuedAt != "" {
 		if _, err := time.Parse(time.RFC3339, p.IssuedAt); err != nil {
@@ -88,6 +96,9 @@ func ParseProvision(raw []byte, m *Manifest) (*Provision, error) {
 		u, err := url.Parse(p.BackendURL)
 		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 			return nil, fmt.Errorf("%s backendUrl %q is not a plain http(s) base URL", ProvisionFile, p.BackendURL)
+		}
+		if p.InsecureDev && u.Scheme != "http" {
+			return nil, fmt.Errorf("%s has insecureDev with an %s backendUrl; it is only for http:// development backends", ProvisionFile, u.Scheme)
 		}
 		p.BackendURL = strings.TrimRight(p.BackendURL, "/")
 		if _, err := DecodeClaimSecret(p.ClaimSecret); err != nil {
