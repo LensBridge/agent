@@ -15,8 +15,18 @@ provisioned board with whichever agent version you want.
   Debian/Ubuntu: `sudo apt install qemu-system qemu-system-gui qemu-utils mtools xorriso`.
   For an arm64 VM you also need `qemu-efi-aarch64`. Your user needs access to
   `/dev/kvm`, for example via the `kvm` group.
-- On both: `curl`, `ssh` and `python3`. Go and make are needed only for
-  `agent local`.
+- **Windows 10/11 (x86):** QEMU, Git for Windows (for its bash, `ssh`
+  and `curl`) and Python 3:
+  `winget install SoftwareFreedomConservancy.QEMU Git.Git Python.Python.3.12`,
+  then add `C:\Program Files\qemu` to `PATH`. Turn on the **Windows
+  Hypervisor Platform** (Windows features, or
+  `Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform`) so
+  QEMU runs the VM with hardware virtualisation (WHPX). Run mbvm from Git Bash
+  (`vm/mbvm ...`) or from PowerShell or cmd (`vm\mbvm ...`, through
+  `vm\mbvm.cmd`). No ISO tool or mtools is needed: the cloud-init seed is
+  served over HTTP, and USB sticks are QEMU's virtual FAT drives.
+- Everywhere: `curl`, `ssh` and Python 3. Go is needed only for
+  `agent local`, and Node.js for `app local` and `app dev`.
 
 The VM uses your computer's architecture: arm64 on Apple Silicon, amd64 on
 most PCs. That way it runs with hardware virtualisation. Any other
@@ -25,9 +35,10 @@ architecture is emulated, which works but is very slow.
 ## Getting started
 
 ```sh
-# first time: downloads Debian, runs setup.sh (a few minutes). The key is
-# the backend's content signing public key (GET /api/agent/signing-keys).
-MBVM_CONTENT_KEY=<base64> vm/mbvm create
+# first time: downloads Debian, runs setup.sh (a few minutes). setup.sh pins
+# the backend's content signing key: mbvm reads it from LensBridge at
+# http://localhost:8080 (MBVM_BACKEND), or set MBVM_CONTENT_KEY=<base64>.
+vm/mbvm create
 # set it up like a Pi: plug in a "USB stick" with its setup file and content
 vm/mbvm usb setup-xxxxxxxx.mbu content-xxxxxxxx.mbu
 ```
@@ -50,6 +61,39 @@ a `wss://` socket on the same host). A local backend on plain http needs
 the backend's `musallahboard.agent.websocketUrl` must then be a `ws://` URL
 on `10.0.2.2`.
 
+## Working against a backend on this computer
+
+The VM reaches this computer at `10.0.2.2`, and through it anything this
+computer reaches, including its own LAN address. So with LensBridge running
+locally:
+
+- `create` reads the content key from it.
+- A setup file or USB kit exported from its console works as is. With its
+  `musallahboard.agent.backendUrl` set to this computer's LAN address (for
+  example `http://10.0.0.206:8080`), the VM, a real Pi and a phone all reach
+  it, and its online setup files carry `insecureDev` for that plain-http URL,
+  so the board claims itself with no token.
+- `enroll --backend=http://localhost:8080 --insecure-dev` also works.
+
+## The board app, live
+
+With a checkout of the board app beside this one (`../frontend`, or
+`MBVM_APP_DIR`):
+
+- `vm/mbvm app dev` runs the board app's dev server and opens it in your
+  browser, with `/api` and `/media` going to this VM's agent through an SSH
+  tunnel. Edits reload at once, against the board's real payload, content and
+  events. The VM's own screen keeps showing the installed build.
+- `vm/mbvm app local` builds it and installs it on the VM as a real update:
+  the update screen, the agent's checks, then the board in the VM's window.
+  It is signed with a release key made for this computer
+  (`$MBVM_HOME/dev-release.key`), which every mbvm board trusts, and stamped
+  with a version newer than the board has, so it always installs. `reset`
+  (or a newer release from the channel) takes the board back.
+- `vm/mbvm agent local` builds this checkout's agent and swaps it in, in
+  seconds. It is built trusting the release key the board's agent was built
+  with, so it still takes the board app and agent from the channels.
+
 ## Commands
 
 | Command | What it does |
@@ -58,6 +102,8 @@ on `10.0.2.2`.
 | `start [--headless]` / `stop` | Boot or shut down; the board keeps its state |
 | `reset [--agent=V]` | Back to a freshly installed board that is not set up yet |
 | `agent V` | Install agent `V` on the running board, keeping its state |
+| `app local` | Build the board app, sign it with the dev release key and install it |
+| `app dev` | The board app's dev server with live reload, talking to this board's agent |
 | `enroll --token=T --backend=URL` | Enroll the board |
 | `usb FILE.mbu...` / `usb --remove` | Plug in, or pull out, a USB stick holding these files |
 | `status` | VM state and `musallahboard-agent status` |
@@ -107,12 +153,12 @@ vm/mbvm stop && vm/mbvm snapshot restore enrolled && vm/mbvm start
 **Try agent changes from this checkout.**
 
 ```sh
-MB_RELEASE_PUBLIC_KEYS=<the repository variable> vm/mbvm agent local
+vm/mbvm agent local
 ```
 
 A local build reports version `dev`, so it does not follow the agent release
-channel and is not replaced overnight. Without `MB_RELEASE_PUBLIC_KEYS` it
-trusts no release key, and so it refuses the signed board app. Set
+channel and is not replaced overnight. It trusts the release key the board's
+running agent was built with (or `MB_RELEASE_PUBLIC_KEYS`, if set). Set
 `MBVM_LOCAL_VERSION=0.3.1` (for example) to build with a real version
 instead.
 
@@ -134,8 +180,11 @@ All are environment variables:
 | `MBVM_MEMORY`, `MBVM_CPUS` | `2048`, `2` | |
 | `MBVM_RESOLUTION` | `1920x1080` | The board is designed for 1080p. The window scales to fit |
 | `MBVM_TIMEZONE` | `America/Toronto` | Passed to `setup.sh` |
-| `MBVM_CONTENT_KEY` | (required for `create`/`rebuild`) | The backend's content signing public key, which `setup.sh` pins |
-| `MBVM_DISPLAY` | cocoa or gtk | A raw QEMU `-display` value, such as `vnc=127.0.0.1:1` |
+| `MBVM_CONTENT_KEY` | read from `MBVM_BACKEND` | The backend's content signing public key, which `setup.sh` pins |
+| `MBVM_BACKEND` | `http://localhost:8080` | The LensBridge `create` reads the content key from |
+| `MBVM_APP_DIR` | `../frontend` | The board app checkout, for `app local` and `app dev` |
+| `MBVM_MONITOR_PORT` | SSH port + 1000 | Windows only: QEMU's monitor, on loopback |
+| `MBVM_DISPLAY` | cocoa (macOS), gtk | A raw QEMU `-display` value, such as `sdl` or `vnc=127.0.0.1:1` |
 | `MBVM_QEMU_ARGS` | | Extra QEMU arguments |
 | `MBVM_IMAGE_URL` | Debian 13 generic cloud image | |
 | `MBVM_HOME` | `~/.local/share/musallahboard-vm` | Where VMs and images live |
@@ -143,7 +192,8 @@ All are environment variables:
 ## How it works
 
 - **The base image.** `create` boots the Debian cloud image with a cloud-init
-  seed that adds the `mbadmin` user and the VM's own SSH key. It then runs
+  seed that adds the `mbadmin` user and the VM's own SSH key (an ISO, or on
+  Windows served over HTTP to the VM). It then runs
   `setup.sh` over SSH and shuts down. The result, `base.qcow2`, is never booted
   again.
 - **The board's disk.** `disk.qcow2` is a copy-on-write layer on top of the

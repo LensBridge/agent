@@ -4,3 +4,5 @@
 *.toml  text eol=lf
 *.go    text eol=lf
 Makefile text eol=lf
+vm/mbvm text eol=lf
+*.cmd   text eol=crlf

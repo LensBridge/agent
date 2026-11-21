@@ -17,7 +17,8 @@
 # from the freshly provisioned base, with the agent version you ask for.
 #
 # Run `vm/mbvm help` for the commands; vm/README.md has more.
-# Works on Linux (KVM) and macOS (HVF); bash 3.2 compatible.
+# Works on Linux (KVM), macOS (HVF) and Windows (WHPX, from Git Bash or
+# vm\mbvm.cmd); bash 3.2 compatible.
 
 set -euo pipefail
 
@@ -35,18 +36,29 @@ CPUS="${MBVM_CPUS:-2}"
 DISK_SIZE="${MBVM_DISK_SIZE:-16G}"
 RESOLUTION="${MBVM_RESOLUTION:-1920x1080}"
 TIMEZONE="${MBVM_TIMEZONE:-America/Toronto}"
-# LensBridge's content signing public key, which setup.sh pins.
+# LensBridge's content signing public key, which setup.sh pins. Unset, it is
+# read from the backend at MBVM_BACKEND (a LensBridge running on this
+# computer, by default).
 CONTENT_KEY="${MBVM_CONTENT_KEY:-}"
+BACKEND="${MBVM_BACKEND:-http://localhost:8080}"
 # Host ports for `tunnel`: the board's local server and Chromium's DevTools.
 TUNNEL_BOARD_PORT="${MBVM_BOARD_PORT:-18080}"
 TUNNEL_CDP_PORT="${MBVM_CDP_PORT:-19222}"
+# The board app's checkout, for `app local` and `app dev`.
+APP_DIR="${MBVM_APP_DIR:-$REPO_DIR/../frontend}"
+# A release signing key for this computer's test boards only: every mbvm
+# board trusts it, so `app local` builds install like a release.
+DEV_KEY="$MBVM_HOME/dev-release.key"
 
 BASE="$DIR/base.qcow2"
 DISK="$DIR/disk.qcow2"
 KEY="$DIR/id_ed25519"
 PIDFILE="$DIR/qemu.pid"
 MONITOR="$DIR/monitor.sock"
+# Windows has no Unix sockets for QEMU: the monitor is a loopback TCP port.
+MONITOR_PORT="${MBVM_MONITOR_PORT:-$(( SSH_PORT + 1000 ))}"
 STICK="$DIR/usb-stick.img"
+STICK_DIR="$DIR/usb-stick"
 
 RED='\033[0;31m'; YELLOW='\033[1;33m'; GREEN='\033[0;32m'; NC='\033[0m'
 info()  { echo -e "${GREEN}==>${NC} $*"; }
@@ -62,6 +74,10 @@ mbvm: a MusallahBoard test board in a QEMU virtual machine
   mbvm stop                   shut it down; the disk is kept
   mbvm reset [--agent=V]      back to a freshly provisioned, unenrolled board
   mbvm agent V                install agent V on this board, keeping its state
+  mbvm app local              build the board app from $( [[ -n "${MBVM_APP_DIR:-}" ]] && echo "\$MBVM_APP_DIR" || echo ../frontend ), sign it with
+                              this computer's dev release key and install it
+  mbvm app dev                the board app's dev server (live reload) in your
+                              browser, talking to this board's agent
   mbvm enroll --token=T --backend=URL
                               enroll; localhost in URL means this computer
   mbvm usb FILE.mbu...        plug in a USB stick holding these files
@@ -83,19 +99,63 @@ checkout), or the path to an agent binary.
 
 Settings (environment): MBVM_NAME (several VMs side by side; give each its own
 MBVM_SSH_PORT), MBVM_ARCH (amd64|arm64, default: this computer's),
-MBVM_MEMORY, MBVM_CPUS, MBVM_RESOLUTION, MBVM_TIMEZONE, MBVM_CONTENT_KEY, MBVM_DISPLAY (a raw
-QEMU -display value), MBVM_QEMU_ARGS (extra QEMU arguments), MBVM_HOME.
+MBVM_MEMORY, MBVM_CPUS, MBVM_RESOLUTION, MBVM_TIMEZONE, MBVM_CONTENT_KEY (unset:
+read from MBVM_BACKEND, default http://localhost:8080), MBVM_APP_DIR (the board
+app checkout), MBVM_DISPLAY (a raw QEMU -display value), MBVM_QEMU_ARGS (extra
+QEMU arguments), MBVM_HOME.
 EOF
 }
 
 # ── Host and QEMU ─────────────────────────────────────────────────────────────
 
 HOST_OS="$(uname -s)"
+case "$HOST_OS" in
+    MINGW*|MSYS*|CYGWIN*) HOST_OS=Windows ;;
+esac
 case "$(uname -m)" in
     arm64|aarch64) HOST_ARCH=arm64 ;;
     x86_64|amd64)  HOST_ARCH=amd64 ;;
     *)             HOST_ARCH="$(uname -m)" ;;
 esac
+
+is_windows() { [[ "$HOST_OS" == Windows ]]; }
+
+# hostpath PATH: PATH as the programs mbvm runs see it. On Windows those are
+# native programs (QEMU, Python, Go), which want C:/... rather than /c/...
+hostpath() {
+    if is_windows; then cygpath -m "$1"; else echo "$1"; fi
+}
+
+# python_cmd: a Python 3 that runs. On Windows `python3` is often the
+# Microsoft Store stub, which only prints "Python was not found".
+python_cmd() {
+    local c
+    for c in python3 python; do
+        if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import sys; sys.exit(sys.version_info[0] != 3)' >/dev/null 2>&1; then
+            echo "$c"; return
+        fi
+    done
+    die "Python 3 is not installed. $(install_hint python3)"
+}
+
+# pid_alive PID / pid_kill PID: QEMU's own process id, from its pidfile. On
+# Windows that is a Windows process id, which bash's kill does not know.
+pid_alive() {
+    [[ -n "$1" ]] || return 1
+    if is_windows; then
+        tasklist //FI "PID eq $1" //NH 2>/dev/null | grep -qi "^qemu"
+    else
+        kill -0 "$1" 2>/dev/null
+    fi
+}
+pid_kill() {
+    [[ -n "$1" ]] || return 1
+    if is_windows; then
+        taskkill //PID "$1" //F >/dev/null 2>&1
+    else
+        kill "$1" 2>/dev/null
+    fi
+}
 
 # The architecture is fixed when the VM is created (it is baked into its disk).
 vm_arch() {
@@ -121,8 +181,12 @@ accel() {
     if [[ "$arch" == "$HOST_ARCH" ]]; then
         if [[ "$HOST_OS" == "Darwin" ]]; then
             echo hvf; return
-        elif [[ "$HOST_OS" == "Linux" && -w /dev/kvm ]]; then
+        elif [[ "$HOST_OS" == "Linux" && -w /dev/kvm ]] && { : <> /dev/kvm; } 2>/dev/null; then
             echo kvm; return
+        elif is_windows && [[ "$arch" == amd64 ]]; then
+            # The Windows Hypervisor Platform (Windows features: "Windows
+            # Hypervisor Platform"). QEMU says so if it is off.
+            echo whpx; return
         fi
     fi
     echo tcg
@@ -155,16 +219,16 @@ need() {
 
 install_hint() {
     case "$1" in
-        qemu-*)  echo "Install QEMU (macOS: brew install qemu; Debian/Ubuntu: apt install qemu-system qemu-utils)." ;;
+        qemu-*)  echo "Install QEMU (macOS: brew install qemu; Debian/Ubuntu: apt install qemu-system qemu-utils; Windows: winget install SoftwareFreedomConservancy.QEMU and add C:/Program Files/qemu to PATH)." ;;
         mformat|mcopy) echo "Install mtools (macOS: brew install mtools; Debian/Ubuntu: apt install mtools)." ;;
-        python3) echo "Install Python 3." ;;
+        python3) echo "Install Python 3 (Windows: winget install Python.Python.3.12)." ;;
         go)      echo "Install Go to build the agent from this checkout." ;;
         *)       echo "" ;;
     esac
 }
 
 running() {
-    [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
+    [[ -f "$PIDFILE" ]] && pid_alive "$(tr -d '[:space:]' < "$PIDFILE" 2>/dev/null)"
 }
 
 require_vm() {
@@ -190,7 +254,8 @@ display_args() {
     fi
 }
 
-# launch DISK HEADLESS [SEED]: start QEMU in the background.
+# launch DISK HEADLESS [SEED]: start QEMU in the background. SEED is a
+# cloud-init ISO, or http:PORT for one served from this computer.
 launch() {
     local disk="$1" headless="$2" seed="${3:-}" arch qemu acc cpu xres yres
     arch="$(vm_arch)"
@@ -200,6 +265,9 @@ launch() {
     if [[ "$acc" == "tcg" ]]; then
         cpu=max
         warn "no hardware virtualisation for an $arch VM on this computer: running emulated, which is slow"
+    elif [[ "$acc" == "whpx" ]]; then
+        # WHPX has no "host" CPU model; max is what it can pass through.
+        cpu=max
     else
         cpu=host
     fi
@@ -209,23 +277,39 @@ launch() {
     local args=(
         -name "musallahboard-$NAME"
         -m "$MEMORY" -smp "$CPUS" -cpu "$cpu"
-        -drive "if=virtio,format=qcow2,file=$disk"
+        -drive "if=virtio,format=qcow2,file=$(hostpath "$disk")"
         -netdev "user,id=net0,hostname=musallahboard-vm,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22"
         -device virtio-net-pci,netdev=net0
         -device virtio-rng-pci
         -device qemu-xhci,id=xhci -device usb-kbd -device usb-tablet
-        -monitor "unix:$MONITOR,server,nowait"
-        -serial "file:$DIR/serial.log"
-        -pidfile "$PIDFILE"
+        -serial "file:$(hostpath "$DIR/serial.log")"
+        -pidfile "$(hostpath "$PIDFILE")"
         -rtc base=utc
     )
-    if [[ "$arch" == "amd64" ]]; then
+    if is_windows; then
+        args+=(-monitor "tcp:127.0.0.1:$MONITOR_PORT,server,nowait")
+    else
+        args+=(-monitor "unix:$MONITOR,server,nowait")
+    fi
+    if [[ "$acc" == "whpx" ]]; then
+        # kernel-irqchip off: WHPX's in-hypervisor interrupt controller is
+        # not reliable on every CPU (AMD in particular); this always works.
+        # Standard VGA, not virtio-vga: QEMU's window on Windows hands its
+        # own size to a virtio GPU, and the board would then render at
+        # whatever size the window is. This one keeps the board's mode
+        # (its EDID's preferred one); the window only scales it.
+        args+=(-machine q35 -accel whpx,kernel-irqchip=off -vga none -device "VGA,xres=$xres,yres=$yres,edid=on,vgamem_mb=64")
+    elif [[ "$arch" == "amd64" ]]; then
         args+=(-machine "q35,accel=$acc" -vga none -device "virtio-vga,xres=$xres,yres=$yres")
     else
         args+=(-machine "virt,accel=$acc" -bios "$(aarch64_firmware)" -device "virtio-gpu-pci,xres=$xres,yres=$yres")
     fi
-    if [[ -n "$seed" ]]; then
-        args+=(-drive "if=virtio,format=raw,readonly=on,file=$seed")
+    if [[ "$seed" == http:* ]]; then
+        # cloud-init's NoCloud source, read over HTTP from this computer
+        # (10.0.2.2 to the VM): no ISO tool needed.
+        args+=(-smbios "type=1,serial=ds=nocloud;s=http://10.0.2.2:${seed#http:}/")
+    elif [[ -n "$seed" ]]; then
+        args+=(-drive "if=virtio,format=raw,readonly=on,file=$(hostpath "$seed")")
     fi
     # shellcheck disable=SC2207 # word splitting is the point
     args+=($(display_args "$headless"))
@@ -238,8 +322,8 @@ launch() {
     nohup "$qemu" "${args[@]}" >"$DIR/qemu.log" 2>&1 &
     local pid=$! _
     # QEMU writes the pidfile once it is up; a bad argument ends it at once.
-    for _ in $(seq 1 50); do
-        [[ -f "$PIDFILE" ]] && return 0
+    for _ in $(seq 1 75); do
+        [[ -s "$PIDFILE" ]] && return 0
         kill -0 "$pid" 2>/dev/null || break
         sleep 0.2
     done
@@ -251,12 +335,18 @@ launch() {
 
 # monitor CMD: one QEMU monitor command, printing its reply.
 monitor() {
-    need python3
-    python3 - "$MONITOR" "$*" <<'PY'
+    local where="$MONITOR"
+    is_windows && where="tcp:127.0.0.1:$MONITOR_PORT"
+    "$(python_cmd)" - "$where" "$*" <<'PY'
 import socket, sys
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.settimeout(30)
-s.connect(sys.argv[1])
+where = sys.argv[1]
+if where.startswith("tcp:"):
+    _, host, port = where.split(":")
+    s = socket.create_connection((host, int(port)), timeout=30)
+else:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(30)
+    s.connect(where)
 def until_prompt():
     buf = b""
     while not buf.endswith(b"(qemu) "):
@@ -304,6 +394,11 @@ wait_for_exit() {
     rm -f "$PIDFILE" "$MONITOR"
 }
 
+# stop_qemu: QEMU's quit, or end the process.
+stop_qemu() {
+    monitor quit >/dev/null 2>&1 || pid_kill "$(tr -d '[:space:]' < "$PIDFILE" 2>/dev/null)" || true
+}
+
 # ── Agent versions ────────────────────────────────────────────────────────────
 
 latest_release() {
@@ -321,14 +416,19 @@ fetch_agent() {
     arch="$(vm_arch)"
     case "$v" in
         local)
-            need go make
-            local ver="${MBVM_LOCAL_VERSION:-dev}"
-            info "Building the agent from $REPO_DIR (version $ver)"
-            if [[ -z "${MB_RELEASE_PUBLIC_KEYS:-}" ]]; then
-                warn "MB_RELEASE_PUBLIC_KEYS is not set: this build trusts no release key, so it refuses signed app and agent packages. Set it to the repository variable's value."
+            need go
+            local ver="${MBVM_LOCAL_VERSION:-dev}" keys="${MB_RELEASE_PUBLIC_KEYS:-}" pkg
+            if [[ -z "$keys" ]] && running; then
+                # The release key the board's agent was built with, so this
+                # build still takes the board app and agent from the channels.
+                keys="$(vm_ssh 'sudo musallahboard-agent trust show' 2>/dev/null | awk '/compiled into this agent/ {print $2}' | paste -sd, -)"
             fi
-            make -s -C "$REPO_DIR" "build-$arch" VERSION="$ver" RELEASE_KEYS="${MB_RELEASE_PUBLIC_KEYS:-}" >/dev/null
-            cp "$REPO_DIR/build/musallahboard-agent-$arch" "$out"
+            [[ -n "$keys" ]] || warn "no release key known (MB_RELEASE_PUBLIC_KEYS): this build refuses the channels' signed app and agent packages"
+            info "Building the agent from $REPO_DIR (version $ver)"
+            pkg="$(cd "$REPO_DIR" && go list -m)"
+            (cd "$REPO_DIR" && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath \
+                -ldflags "-s -w -X $pkg/internal/version.Version=$ver -X $pkg/internal/core/trust.BuiltinReleaseKeys=$keys" \
+                -o "$(hostpath "$out")" ./cmd/agent) || die "the agent did not build"
             ;;
         */*)
             [[ -f "$v" ]] || die "no such file: $v"
@@ -384,9 +484,13 @@ cloud_image() {
     echo "$file"
 }
 
+# make_seed OUT: write cloud-init's seed and print what launch takes: the ISO
+# OUT, or http:PORT when there is no ISO tool (always on Windows), with the
+# seed's files served from this computer until stop_seed_server.
 make_seed() {
     local out="$1" tmp
-    tmp="$(mktemp -d "${TMPDIR:-/tmp}/mbvm-seed.XXXXXX")"
+    tmp="$DIR/seed"
+    rm -rf "$tmp"; mkdir -p "$tmp"
     cat > "$tmp/meta-data" <<EOF
 instance-id: musallahboard-$NAME-$(date +%s)
 local-hostname: musallahboard-vm
@@ -404,6 +508,10 @@ ssh_pwauth: false
 disable_root: true
 EOF
     rm -f "$out"
+    if is_windows || ! has_iso_tool; then
+        serve_seed "$tmp"
+        return
+    fi
     if command -v cloud-localds >/dev/null 2>&1; then
         cloud-localds "$out" "$tmp/user-data" "$tmp/meta-data"
     elif command -v xorriso >/dev/null 2>&1; then
@@ -418,6 +526,35 @@ EOF
         die "no tool to build the cloud-init seed: install xorriso (or genisoimage, or cloud-image-utils)"
     fi
     rm -rf "$tmp"
+    echo "$out"
+}
+
+has_iso_tool() {
+    local t
+    for t in cloud-localds xorriso genisoimage mkisofs hdiutil; do
+        command -v "$t" >/dev/null 2>&1 && return 0
+    done
+    return 1
+}
+
+# serve_seed DIR: serve DIR on a free loopback port (the VM reaches it at
+# 10.0.2.2) and print http:PORT. stop_seed_server ends it.
+SEED_SERVER_PID=""
+serve_seed() {
+    local dir="$1" py port
+    py="$(python_cmd)"
+    port="$("$py" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+    "$py" -m http.server "$port" --bind 127.0.0.1 --directory "$(hostpath "$dir")" >"$DIR/seed-server.log" 2>&1 &
+    SEED_SERVER_PID=$!
+    echo "$SEED_SERVER_PID" > "$DIR/seed-server.pid"
+    echo "http:$port"
+}
+stop_seed_server() {
+    local pid
+    pid="$(cat "$DIR/seed-server.pid" 2>/dev/null || true)"
+    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+    rm -f "$DIR/seed-server.pid"
+    rm -rf "$DIR/seed"
 }
 
 # provision: a fresh Debian, set up by this checkout's setup.sh exactly as a
@@ -430,11 +567,12 @@ provision() {
     echo "$arch" > "$DIR/arch"
     [[ -f "$KEY" ]] || ssh-keygen -q -t ed25519 -N "" -C "mbvm-$NAME" -f "$KEY"
 
+    [[ -n "$CONTENT_KEY" ]] || CONTENT_KEY="$(backend_content_key)"
     image="$(cloud_image "$arch")"
     rm -f "$BASE" "$BASE.tmp"
-    qemu-img create -q -f qcow2 -F qcow2 -b "$image" "$BASE.tmp" "$DISK_SIZE"
-    seed="$DIR/seed.iso"
-    make_seed "$seed"
+    qemu-img create -q -f qcow2 -F qcow2 -b "$(hostpath "$image")" "$(hostpath "$BASE.tmp")" "$DISK_SIZE"
+    seed="$(make_seed "$DIR/seed.iso")"
+    trap stop_seed_server EXIT
 
     info "Booting Debian to provision it (headless)"
     launch "$BASE.tmp" 1 "$seed"
@@ -442,34 +580,46 @@ provision() {
     [[ "$(accel "$arch")" == tcg ]] && limit=1800
     wait_for_ssh "$limit"
     vm_ssh 'cloud-init status --wait >/dev/null 2>&1 || true'
-
-    [[ -n "$CONTENT_KEY" ]] || die "set MBVM_CONTENT_KEY to the backend's content signing public key (base64; GET /api/agent/signing-keys)"
+    stop_seed_server
+    trap - EXIT
     info "Running setup.sh from $REPO_DIR"
     vm_scp "$REPO_DIR/setup.sh" /tmp/setup.sh
     if ! vm_ssh "MB_ASSUME_YES=1 MB_REBOOT=never MB_HOSTNAME=musallahboard-vm \
             MB_ADMIN_USER=$ADMIN_USER MB_TIMEZONE='$TIMEZONE' \
             MB_ADMIN_SSH_KEY='$(cat "$KEY.pub")' MB_CONTENT_KEY='$CONTENT_KEY' bash /tmp/setup.sh"; then
         vm_ssh 'sudo poweroff' >/dev/null 2>&1 || true
-        wait_for_exit 60 || kill "$(cat "$PIDFILE")" 2>/dev/null || true
+        wait_for_exit 60 || stop_qemu
         die "setup.sh failed (its output is above). The VM was not saved; fix it and run: vm/mbvm rebuild"
     fi
     # Later boots have no seed: cloud-init would only slow them down.
     vm_ssh 'sudo touch /etc/cloud/cloud-init.disabled; rm -f /tmp/setup.sh'
     vm_ssh musallahboard-agent version 2>/dev/null | head -1 > "$DIR/base-agent" || true
+    trust_dev_release_key
     (cd "$REPO_DIR" && git rev-parse --short HEAD 2>/dev/null || echo unknown) > "$DIR/base-setup"
 
     info "Provisioned. Shutting down to save the base image"
     vm_ssh 'sudo poweroff' >/dev/null 2>&1 || true
     wait_for_exit 120 || die "the VM did not shut down"
-    rm -f "$seed"
+    rm -f "$DIR/seed.iso"
     mv "$BASE.tmp" "$BASE"
     chmod a-w "$BASE"
+}
+
+# backend_content_key: the content key LensBridge at BACKEND publishes.
+backend_content_key() {
+    local json key
+    json="$(curl -fsS --max-time 5 "$BACKEND/api/agent/signing-keys" 2>/dev/null)" ||
+        die "set MBVM_CONTENT_KEY to the backend's content signing public key, or start LensBridge at $BACKEND (MBVM_BACKEND) so mbvm can read it from /api/agent/signing-keys"
+    key="$(printf '%s' "$json" | "$(python_cmd)" -c 'import json,sys; k=json.load(sys.stdin).get("content") or []; print(k[0]["publicKey"] if k else "")')"
+    [[ -n "$key" ]] || die "$BACKEND has no content signing key configured (musallahboard.content-signing.private-key); set one, or MBVM_CONTENT_KEY"
+    info "Content key from $BACKEND: $key" >&2
+    echo "$key"
 }
 
 # new_disk: a clean board on top of the base.
 new_disk() {
     rm -f "$DISK"
-    qemu-img create -q -f qcow2 -F qcow2 -b "$BASE" "$DISK"
+    qemu-img create -q -f qcow2 -F qcow2 -b "$(hostpath "$BASE")" "$(hostpath "$DISK")"
     cp "$DIR/base-agent" "$DIR/agent" 2>/dev/null || true
 }
 
@@ -505,7 +655,9 @@ ready() {
   The board is running$( [[ "$HEADLESS" == 1 ]] && echo " (headless: vm/mbvm screenshot shows the screen)" ).
   Agent: $(cat "$DIR/agent" 2>/dev/null || echo unknown)
 
-  Enroll it:     vm/mbvm enroll --token=<token> --backend=<url>
+  Set it up:     vm/mbvm usb setup-xxxxxxxx.mbu content-xxxxxxxx.mbu
+                 (or vm/mbvm enroll --token=<token> --backend=http://localhost:8080 --insecure-dev)
+  Board app:     vm/mbvm app dev    (live reload)   vm/mbvm app local   (install a build)
   Shell:         vm/mbvm ssh
   Agent log:     vm/mbvm logs
   Stop it:       vm/mbvm stop   (the board keeps its state; vm/mbvm reset starts over)
@@ -549,7 +701,7 @@ cmd_stop() {
     vm_ssh 'sudo poweroff' >/dev/null 2>&1 || monitor system_powerdown >/dev/null 2>&1 || true
     if ! wait_for_exit 90; then
         warn "no clean shutdown after 90s; stopping QEMU"
-        monitor quit >/dev/null 2>&1 || kill "$(cat "$PIDFILE")" 2>/dev/null || true
+        stop_qemu
         wait_for_exit 10 || true
     fi
     info "Stopped. The board's disk is kept."
@@ -576,6 +728,98 @@ cmd_agent() {
     [[ $# -eq 1 ]] || die "usage: vm/mbvm agent latest|X.Y.Z|local|PATH"
     require_running
     install_agent "$1"
+}
+
+# dev_release_key: this computer's test release key (made once with mbpack
+# keygen); prints its public half.
+dev_release_key() {
+    if [[ ! -s "$DEV_KEY" || ! -s "$DEV_KEY.pub" ]]; then
+        need go
+        mkdir -p "$MBVM_HOME"
+        local out
+        out="$(cd "$REPO_DIR" && go run ./cmd/mbpack keygen 2>&1)" || die "mbpack keygen failed: $out"
+        printf '%s\n' "$out" | awk -F': *' '/rivate seed/ {print $2}' | tr -d '[:space:]' > "$DEV_KEY"
+        printf '%s\n' "$out" | awk -F': *' '/^public key/ {print $2}' | tr -d '[:space:]' > "$DEV_KEY.pub"
+        chmod 600 "$DEV_KEY"
+        [[ -s "$DEV_KEY" && -s "$DEV_KEY.pub" ]] || die "could not read mbpack keygen's output: $out"
+        info "Made this computer's dev release key ($DEV_KEY.pub)" >&2
+    fi
+    cat "$DEV_KEY.pub"
+}
+
+# trust_dev_release_key: the running board accepts packages signed with it.
+trust_dev_release_key() {
+    local pub
+    pub="$(dev_release_key)"
+    vm_ssh "sudo musallahboard-agent trust show | grep -q -- '$pub' || sudo musallahboard-agent trust add release '$pub'" >/dev/null ||
+        warn "could not add the dev release key to the board's trust store"
+}
+
+cmd_app() {
+    case "${1:-}" in
+        local) app_local ;;
+        dev)   app_dev ;;
+        *)     die "usage: vm/mbvm app local|dev" ;;
+    esac
+}
+
+require_app_dir() {
+    [[ -f "$APP_DIR/package.json" ]] || die "no board app checkout at $APP_DIR (set MBVM_APP_DIR)"
+    need npm node
+    if [[ ! -d "$APP_DIR/node_modules" ]]; then
+        info "Installing the board app's dependencies"
+        (cd "$APP_DIR" && npm ci) || die "npm ci failed in $APP_DIR"
+    fi
+}
+
+# app_local: build the board app, sign it as a release with the dev key, and
+# install it through the agent like any update. Its version is package.json's
+# with the patch number replaced by a timestamp, so it is newer than what the
+# board has; `reset` (or a newer release) takes the board back.
+app_local() {
+    require_running
+    require_app_dir
+    trust_dev_release_key
+    local base ver out seed
+    base="$(cd "$APP_DIR" && node -p "require('./package.json').version")"
+    # Seconds since 2026: newer every build, and within the 9 digits a
+    # version part may have.
+    ver="${base%.*}.$(( $(date +%s) - 1767225600 ))"
+    seed="$(cat "$DEV_KEY")"
+    out="$DIR/app-build"
+    rm -rf "$out"
+    info "Building the board app $ver from $APP_DIR"
+    (cd "$APP_DIR" && MB_APP_VERSION="$ver" npx vite build --logLevel warn) || die "the board app did not build"
+    (cd "$APP_DIR" && MB_APP_VERSION="$ver" MB_RELEASE_SIGNING_KEY="$seed" \
+        node scripts/package-mbu.mjs --out-dir "$(hostpath "$out")" >/dev/null) || die "the board app did not package"
+    vm_scp "$out/musallahboard-app-$ver.mbu" /tmp/mbvm-app.mbu
+    vm_ssh 'sudo musallahboard-agent import /tmp/mbvm-app.mbu; rc=$?; rm -f /tmp/mbvm-app.mbu; exit $rc'
+}
+
+# app_dev: the board app's Vite dev server, its /api and /media proxied to
+# this board's agent through an SSH tunnel. Edits show at once in the browser
+# it opens; the board's own screen keeps the installed build.
+app_dev() {
+    require_running
+    require_app_dir
+    if curl -fs -m 2 -o /dev/null "http://127.0.0.1:$TUNNEL_BOARD_PORT/api/local/status"; then
+        # A tunnel left open (by a session that was killed, or `mbvm tunnel`).
+        info "Using the board's agent already open at http://127.0.0.1:$TUNNEL_BOARD_PORT/"
+    else
+        info "Opening this board's agent at http://127.0.0.1:$TUNNEL_BOARD_PORT/"
+        vm_ssh -N -L "127.0.0.1:$TUNNEL_BOARD_PORT:127.0.0.1:8080" &
+        local tunnel=$!
+        # shellcheck disable=SC2064 # expand now: the tunnel's pid
+        trap "kill $tunnel 2>/dev/null || true" EXIT INT TERM
+        local _
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            curl -fs -m 2 -o /dev/null "http://127.0.0.1:$TUNNEL_BOARD_PORT/api/local/status" && break
+            kill -0 "$tunnel" 2>/dev/null || die "the SSH tunnel to the board did not open (is port $TUNNEL_BOARD_PORT in use? MBVM_BOARD_PORT picks another)"
+            sleep 1
+        done
+    fi
+    info "Board app dev server (Ctrl-C to stop): edits reload in the browser"
+    (cd "$APP_DIR" && VITE_DEV_AGENT="http://127.0.0.1:$TUNNEL_BOARD_PORT" npm run dev)
 }
 
 cmd_enroll() {
@@ -610,25 +854,30 @@ cmd_usb() {
         return
     fi
     [[ $# -gt 0 ]] || die "usage: vm/mbvm usb FILE.mbu... | vm/mbvm usb --remove"
-    need mformat mcopy
-    local f total=0 size
+    local f
     for f in "$@"; do
         [[ -f "$f" ]] || die "no such file: $f"
+    done
+    if monitor info usb | grep -q "mbstick"; then
+        monitor device_del mbstickdev >/dev/null
+        sleep 1
+    fi
+    if ! command -v mformat >/dev/null 2>&1 || ! command -v mcopy >/dev/null 2>&1; then
+        usb_vvfat "$@"
+        return
+    fi
+    local total=0 size
+    for f in "$@"; do
         size=$(( ($(wc -c < "$f") + 1048575) / 1048576 ))
         total=$(( total + size ))
     done
     # FAT32, with room to spare, like a real stick.
     local mb=$(( total + 64 ))
     (( mb < 64 )) && mb=64
-    if monitor info usb | grep -q "mbstick"; then
-        monitor device_del mbstickdev >/dev/null
-        sleep 1
-    fi
     # A partition table with one FAT32 partition from 1 MiB, as a stick comes
     # from the shop. (A bare filesystem shows up as both sda and sda1.)
     rm -f "$STICK"
-    need python3
-    python3 - "$STICK" "$mb" <<'PY'
+    "$(python_cmd)" - "$(hostpath "$STICK")" "$mb" <<'PY'
 import struct, sys
 path, mb = sys.argv[1], int(sys.argv[2])
 sectors = mb * 2048
@@ -650,6 +899,23 @@ PY
     info "USB stick plugged in with $# file(s). Watch the board; then: vm/mbvm usb --remove"
 }
 
+# usb_vvfat FILE...: the stick as QEMU's virtual FAT drive of a folder, for
+# hosts without mtools (Windows). It has a partition table like a real stick;
+# read-only, which is all the board needs.
+usb_vvfat() {
+    local f
+    rm -rf "$STICK_DIR"; mkdir -p "$STICK_DIR"
+    for f in "$@"; do
+        cp "$f" "$STICK_DIR/"
+    done
+    local out
+    out="$(monitor drive_add 0 "if=none,id=mbstick,driver=vvfat,dir=$(hostpath "$STICK_DIR"),fat-type=16,label=MBSTICK,read-only=on")"
+    case "$out" in *rror*|*nvalid*) die "could not make the stick: $out" ;; esac
+    out="$(monitor device_add "usb-storage,bus=xhci.0,drive=mbstick,id=mbstickdev,removable=on")"
+    [[ -z "$out" ]] || die "could not plug in the stick: $out"
+    info "USB stick plugged in with $# file(s). Watch the board; then: vm/mbvm usb --remove"
+}
+
 cmd_status() {
     require_vm
     echo "VM:        $NAME ($(vm_arch)), $DIR"
@@ -666,9 +932,9 @@ cmd_status() {
 cmd_screenshot() {
     require_running
     local out="${1:-musallahboard-$(date +%Y%m%d-%H%M%S).png}"
-    case "$out" in /*) ;; *) out="$PWD/$out" ;; esac
+    case "$out" in /*|[A-Za-z]:*) ;; *) out="$PWD/$out" ;; esac
     local reply
-    reply="$(monitor screendump "$out" -f png)"
+    reply="$(monitor screendump "$(hostpath "$out")" -f png)"
     [[ -z "$reply" ]] || die "screendump failed: $reply"
     info "Saved $out"
 }
@@ -745,7 +1011,7 @@ cmd_rebuild() {
 cmd_destroy() {
     [[ -d "$DIR" ]] || { info "There is no VM '$NAME'"; return; }
     if running; then
-        monitor quit >/dev/null 2>&1 || kill "$(cat "$PIDFILE")" 2>/dev/null || true
+        stop_qemu
         wait_for_exit 10 || true
     fi
     chmod -R u+w "$DIR"
@@ -762,6 +1028,7 @@ main() {
         stop)       cmd_stop ;;
         reset)      cmd_reset "$@" ;;
         agent)      cmd_agent "$@" ;;
+        app)        cmd_app "$@" ;;
         enroll)     cmd_enroll "$@" ;;
         usb)        cmd_usb "$@" ;;
         status)     cmd_status ;;
