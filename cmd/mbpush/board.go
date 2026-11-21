@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -63,15 +64,19 @@ type importResult struct {
 	Message string `json:"message"`
 }
 
+// clockReport is what the board says about this laptop's time, after an
+// upload or a clock-only request.
+type clockReport struct {
+	// Board minus uploader, before any correction: positive means the
+	// board was ahead.
+	DriftSeconds int64  `json:"driftSeconds"`
+	Adjusted     bool   `json:"adjusted"`
+	Note         string `json:"note"`
+}
+
 type importResponse struct {
 	Results []importResult `json:"results"`
-	Clock   *struct {
-		// Board minus uploader, before any correction: positive means the
-		// board was ahead.
-		DriftSeconds int64  `json:"driftSeconds"`
-		Adjusted     bool   `json:"adjusted"`
-		Note         string `json:"note"`
-	} `json:"clock"`
+	Clock   *clockReport   `json:"clock"`
 }
 
 // runPush uploads files as one batch and prints what the board did with each.
@@ -134,7 +139,7 @@ func runPush(c *boardClient, files []string, out io.Writer) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return c.statusError(resp)
+		return c.statusError(resp, opUpload)
 	}
 	var ir importResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&ir); err != nil {
@@ -201,10 +206,7 @@ func printImport(out io.Writer, ir importResponse) error {
 
 	if ir.Clock != nil {
 		step(out, "Clock")
-		fmt.Fprintf(out, "    %s\n", describeClockReport(ir.Clock.DriftSeconds, ir.Clock.Adjusted))
-		if ir.Clock.Note != "" {
-			fmt.Fprintf(out, "    (%s)\n", ir.Clock.Note)
-		}
+		printClockReport(out, *ir.Clock)
 	}
 
 	fmt.Fprintln(out)
@@ -232,6 +234,56 @@ func describeClockReport(driftSeconds int64, adjusted bool) string {
 	}
 }
 
+func printClockReport(out io.Writer, r clockReport) {
+	fmt.Fprintf(out, "    %s\n", describeClockReport(r.DriftSeconds, r.Adjusted))
+	if r.Note != "" {
+		fmt.Fprintf(out, "    (%s)\n", r.Note)
+	}
+}
+
+// ── Clock ────────────────────────────────────────────────────────────────────
+
+// requestTimeout bounds the short requests (status, clock); uploads use the
+// client's own, much longer, timeout.
+const requestTimeout = 30 * time.Second
+
+// runClock sets the board's clock from this laptop's, sending no package
+// (POST /api/clock). The board applies the time only within its limits
+// (docs/architecture.md, section 10); mbpush fails if the board's clock is
+// off and was not changed.
+func runClock(c *boardClient, out io.Writer) error {
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/api/clock", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-MB-Client-Time", strconv.FormatInt(c.now().Unix(), 10))
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return c.connectError(err, false)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return c.statusError(resp, opClock)
+	}
+	var cr struct {
+		Clock *clockReport `json:"clock"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&cr); err != nil {
+		return fmt.Errorf("the board sent an answer mbpush does not understand (%v)", err)
+	}
+	if cr.Clock == nil {
+		return errors.New("the board's answer has no clock report")
+	}
+	step(out, "Clock of the board at %s", c.hostName())
+	printClockReport(out, *cr.Clock)
+	if !cr.Clock.Adjusted && (time.Duration(cr.Clock.DriftSeconds)*time.Second).Abs() > clockTolerance {
+		return errors.New("the board's clock is off and was not changed (see above)")
+	}
+	return nil
+}
+
 // ── Status ───────────────────────────────────────────────────────────────────
 
 type boardStatus struct {
@@ -253,6 +305,10 @@ type boardStatus struct {
 	Clock         struct {
 		Unix     int64  `json:"unix"`
 		Timezone string `json:"timezone"`
+		// Source and Trusted say whether the board believes its clock
+		// (section 10). An older agent sends neither.
+		Source  string `json:"source"`
+		Trusted *bool  `json:"trusted"`
 	} `json:"clock"`
 	RTC    bool `json:"rtc"`
 	Update struct {
@@ -261,15 +317,21 @@ type boardStatus struct {
 }
 
 func runStatus(c *boardClient, out io.Writer) error {
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/status", nil)
+	if err != nil {
+		return err
+	}
 	sent := c.now()
-	resp, err := c.hc.Get(c.base + "/api/status")
+	resp, err := c.hc.Do(req)
 	got := c.now()
 	if err != nil {
 		return c.connectError(err, false)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return c.statusError(resp)
+		return c.statusError(resp, opStatus)
 	}
 	var st boardStatus
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&st); err != nil {
@@ -314,8 +376,11 @@ func printStatus(out io.Writer, host string, st boardStatus, sent, got time.Time
 			zone = " (time zone " + st.Clock.Timezone + ")"
 		}
 		row("Clock", "%s%s", describeDrift(cc.Drift), zone)
-		if cc.NeedsSet {
-			row("", "Sending a package with mbpush sets it to this laptop's time.")
+		if st.Clock.Trusted != nil && !*st.Clock.Trusted {
+			row("", "NOT CONFIRMED since the board started: it may be wrong.")
+		}
+		if cc.NeedsSet || (st.Clock.Trusted != nil && !*st.Clock.Trusted) {
+			row("", "`mbpush clock` sets it to this laptop's time (so does sending a package).")
 		}
 	}
 	if st.RTC {
@@ -387,14 +452,25 @@ func (c *boardClient) connectError(err error, duringUpload bool) error {
 	return fmt.Errorf("lost the connection to the board (%v)", err)
 }
 
-// statusError turns a non-200 answer into plain English.
-func (c *boardClient) statusError(resp *http.Response) error {
+// What a request was doing, for statusError.
+const (
+	opUpload = "upload"
+	opClock  = "clock"
+	opStatus = "status"
+)
+
+// statusError turns a non-200 answer to an op request into plain English.
+func (c *boardClient) statusError(resp *http.Response, op string) error {
 	var body struct {
 		Message string `json:"message"`
 	}
 	_ = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&body)
 	switch resp.StatusCode {
 	case http.StatusConflict:
+		if op == opClock {
+			return errors.New("the board is installing an update right now, so its clock was not changed.\n" +
+				"Wait until its screen says \"Update complete\", then run `mbpush clock` again")
+		}
 		return errors.New("the board is already installing another upload (from a browser, a phone or another mbpush).\n" +
 			"Wait until its screen says \"Update complete\", then try again. Nothing from this upload was installed")
 	case http.StatusMisdirectedRequest:
@@ -403,7 +479,11 @@ func (c *boardClient) statusError(resp *http.Response) error {
 	case http.StatusRequestEntityTooLarge:
 		return fmt.Errorf("the board says the upload is too large: %s", orDefault(body.Message, resp.Status))
 	case http.StatusNotFound, http.StatusMethodNotAllowed:
-		return fmt.Errorf("%s answered %s. Is that a MusallahBoard on the service port, with agent v2 or later?", c.hostName(), resp.Status)
+		if op == opClock {
+			return fmt.Errorf("%s answered %s: its agent is too old to set its clock on its own.\n"+
+				"Send any update package instead (mbpush <file.mbu>); that sets the clock too", c.hostName(), resp.Status)
+		}
+		return fmt.Errorf("%s answered %s. Is that a MusallahBoard on the service port, with a current agent?", c.hostName(), resp.Status)
 	default:
 		return fmt.Errorf("the board answered %s: %s", resp.Status, orDefault(body.Message, "no details"))
 	}

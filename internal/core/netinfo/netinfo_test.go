@@ -1,0 +1,51 @@
+package netinfo
+
+import (
+	"slices"
+	"testing"
+)
+
+func TestRoutableIPv4DropsLinkLocal(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{
+			name: "keeps private lan addresses",
+			in:   []string{"192.168.1.42", "10.0.0.7", "172.16.3.1"},
+			want: []string{"192.168.1.42", "10.0.0.7", "172.16.3.1"},
+		},
+		{
+			// A 169.254.x address means DHCP never answered. Nothing on the LAN
+			// can reach it, so it must never reach the setup screen.
+			name: "drops apipa",
+			in:   []string{"169.254.11.9", "192.168.1.42"},
+			want: []string{"192.168.1.42"},
+		},
+		{
+			name: "apipa only yields nothing",
+			in:   []string{"169.254.11.9"},
+			want: nil,
+		},
+		{
+			name: "drops unparseable",
+			in:   []string{"not-an-ip", "192.168.1.42"},
+			want: []string{"192.168.1.42"},
+		},
+		{
+			name: "empty input",
+			in:   nil,
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := routableIPv4(tt.in)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("routableIPv4(%v) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}

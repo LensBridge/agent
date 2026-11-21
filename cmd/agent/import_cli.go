@@ -10,10 +10,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/LensBridge/agent/internal/fsutil"
-	"github.com/LensBridge/agent/internal/importer"
-	"github.com/LensBridge/agent/internal/mbu"
-	"github.com/LensBridge/agent/internal/store"
+	"github.com/LensBridge/agent/internal/core/fsutil"
+	"github.com/LensBridge/agent/internal/core/importer"
+	"github.com/LensBridge/agent/internal/core/mbu"
+	"github.com/LensBridge/agent/internal/core/store"
 )
 
 // importWait is how long `import` waits for the daemon's verdict. An agent

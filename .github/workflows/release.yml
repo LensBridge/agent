@@ -58,11 +58,6 @@ jobs:
       - name: Test
         run: go test ./...
 
-      - name: Build release tarballs
-        run: |
-          make package
-          make package-amd64
-
       - name: Build and sign agent packages
         run: |
           make package-mbu
@@ -84,8 +79,6 @@ jobs:
         with:
           fail_on_unmatched_files: true
           files: |
-            build/musallahboard-agent-${{ env.VERSION }}-arm64.tar.gz
-            build/musallahboard-agent-${{ env.VERSION }}-amd64.tar.gz
             build/musallahboard-agent-${{ env.VERSION }}-arm64.mbu
             build/musallahboard-agent-${{ env.VERSION }}-amd64.mbu
             build/agent-channel-arm64.json

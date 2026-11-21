@@ -4,6 +4,7 @@
 //
 //	mbpush musallahboard-content-3f2a1b4c-2026-09-24.mbu musallahboard-app-2.1.0.mbu
 //	mbpush status
+//	mbpush clock
 //
 // and, the day before a visit, while the laptop has internet:
 //
@@ -50,7 +51,7 @@ type options struct {
 	appChannel   string
 	agentChannel string
 
-	command string   // "push", "status" or "fetch"
+	command string   // "push", "status", "clock" or "fetch"
 	files   []string // for push
 }
 
@@ -60,6 +61,7 @@ func usage(w io.Writer) {
 Usage:
   mbpush <file.mbu>...        Send update packages to the board and install them
   mbpush status               Show what the board has installed and its clock
+  mbpush clock                Set the board's clock from this laptop's, sending nothing else
   mbpush fetch                Download the latest board app and agent packages
                               (do this before a visit, while you have internet)
 
@@ -112,8 +114,8 @@ func parseArgs(args []string) (options, error) {
 
 	switch {
 	case len(pos) == 0:
-		return o, errors.New("give one or more .mbu files, status, or fetch")
-	case pos[0] == "status" || pos[0] == "fetch":
+		return o, errors.New("give one or more .mbu files, status, clock, or fetch")
+	case pos[0] == "status" || pos[0] == "clock" || pos[0] == "fetch":
 		if len(pos) > 1 {
 			return o, fmt.Errorf("%s takes no other arguments", pos[0])
 		}
@@ -127,8 +129,11 @@ func parseArgs(args []string) (options, error) {
 		return o, errors.New("--host cannot be empty")
 	}
 	if o.ssh != "" {
-		if o.command == "fetch" {
+		switch o.command {
+		case "fetch":
 			return o, errors.New("fetch downloads to this laptop; --ssh does not apply")
+		case "clock":
+			return o, errors.New("clock goes to the board's upload server on the service port; leave out --ssh")
 		}
 		if !strings.Contains(o.ssh, "@") || strings.HasPrefix(o.ssh, "@") || strings.HasSuffix(o.ssh, "@") {
 			return o, errors.New("--ssh needs user@host, e.g. --ssh ibra@board.local")
@@ -170,6 +175,8 @@ func main() {
 		err = runSSH(o, out, os.Stderr)
 	case o.command == "status":
 		err = runStatus(newBoardClient(o.host), out)
+	case o.command == "clock":
+		err = runClock(newBoardClient(o.host), out)
 	default:
 		err = runPush(newBoardClient(o.host), o.files, out)
 	}

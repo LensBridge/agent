@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LensBridge/agent/internal/config"
-	"github.com/LensBridge/agent/internal/enroll"
-	"github.com/LensBridge/agent/internal/trust"
+	"github.com/LensBridge/agent/internal/core/config"
+	"github.com/LensBridge/agent/internal/core/trust"
+	"github.com/LensBridge/agent/internal/online/enroll"
 )
 
 // runTrust is `trust show|add|remove|fetch` (docs/architecture.md, section
@@ -152,17 +152,24 @@ func trustRemove(keyID string) {
 func trustFetch(args []string) {
 	fs := flag.NewFlagSet("trust fetch", flag.ExitOnError)
 	backend := fs.String("backend", "", "backend base URL, for a board that is not enrolled (default: backend_url from "+defaultConfigPath+")")
+	insecureDev := fs.Bool("insecure-dev", false, "development only: allow a plaintext http:// --backend")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
 		trustUsage()
 	}
 	requireRoot("trust fetch")
 	url := *backend
+	insecure := *insecureDev
 	if url == "" {
 		cfg, err := config.Load(defaultConfigPath)
 		if err != nil {
 			fail("cannot tell which backend to ask: %v\n       Pass it explicitly: sudo musallahboard-agent trust fetch --backend https://<backend>", err)
 		}
-		url = cfg.BackendURL
+		url, insecure = cfg.BackendURL, cfg.InsecureDev()
+	}
+	// The keys fetched here decide which content this board accepts; over
+	// plain http anyone on the network could choose them.
+	if err := config.CheckBackendURL(url, insecure); err != nil {
+		fail("%v\n       Nothing has changed.", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

@@ -1,13 +1,8 @@
 [Unit]
 Description=MusallahBoard kiosk (cage + Chromium)
 Documentation=https://github.com/LensBridge/agent
-# The kiosk launches IMMEDIATELY and shows the local "waiting for enrollment"
-# splash (start-kiosk.sh falls back to waiting.html when /etc/musallahboard/
-# kiosk-url is absent/empty). There is deliberately NO ExecStartPre gate any
-# more — gating before ExecStart left tty1 black until enrollment. Instead,
-# musallahboard-kiosk-watch.path watches kiosk-url and restarts this unit the
-# moment the agent writes it on enrollment, so the board replaces the splash
-# within ~2s with no operator action.
+# The kiosk always shows the agent's local server (start-kiosk.sh), on every
+# board, provisioned or not.
 After=systemd-user-sessions.service
 # The kiosk loads http://127.0.0.1:8080/, served by the agent, and the agent
 # reports READY=1 (Type=notify) only once that server is listening. So ordering
@@ -44,8 +39,6 @@ UtmpMode=user
 # Leading '-' = don't fail if the file is missing.
 EnvironmentFile=-/etc/musallahboard/kiosk.env
 
-# No enrollment gate: start-kiosk.sh shows waiting.html until kiosk-url exists,
-# then the .path watcher cycles us onto the real board.
 ExecStart=/usr/bin/start-kiosk.sh
 
 # cage exits when the browser dies; always bring the board back. ExecStopPost

@@ -5,9 +5,10 @@ After=network-online.target
 Wants=network-online.target
 # Never give up on the agent: without it the screen has nothing to show, and a
 # board nobody is standing at cannot be restarted by hand. A crash loop backs
-# off instead (RestartSteps below) so it costs little while it lasts. A bad
-# self-update is caught earlier by the updater's health check and rollback
-# (musallahboard-agent-update.service).
+# off instead (RestartSteps below) so it costs little while it lasts. A new
+# agent that restarts during its first minutes after a self-update is rolled
+# back by the updater's probation (musallahboard-agent-update.service); one
+# that starts crashing later is not, and loops here.
 StartLimitIntervalSec=0
 
 [Service]
@@ -23,9 +24,13 @@ RestartSec=5
 RestartSteps=6
 RestartMaxDelaySec=120
 
-# sd_notify watchdog: agent must call WATCHDOG=1 every 30s or systemd
-# kills it. Catches goroutine deadlocks where the process is alive but
-# not making progress.
+# sd_notify watchdog: the agent sends WATCHDOG=1 every 15 s, but only while
+# it is live: while it waits for enrollment its poll loop must have run, and
+# once enrolled its own local server must have answered /api/local/status
+# (which takes the locks of the sync, backend, update and clock state) within
+# the last 60 s. A wedged local server or a deadlock in that state stops the
+# pings and systemd kills and restarts it about two minutes later. An idle or
+# offline board answers the same as a busy one, so that is never a reason.
 WatchdogSec=60s
 
 # Capabilities (docs/architecture.md sections 9.5 and 10). The daemon runs as
@@ -50,8 +55,8 @@ PrivateTmp=yes
 
 # systemd creates and chowns these to User= on every start, so the installer
 # does not have to. /etc/musallahboard is NOT listed here on purpose: these
-# directories appear only when the service first starts, and `enroll` has to
-# be able to write agent.toml/agent.key before that has ever happened. The
+# directories appear only when the service first starts, and `enroll` or
+# `service-port` may write agent.toml before that has ever happened. The
 # installer creates the config dir itself for that reason.
 StateDirectory=musallahboard
 StateDirectoryMode=0750
@@ -60,8 +65,9 @@ LogsDirectoryMode=0750
 
 # Redundant with the two directives above (systemd makes those writable even
 # under ProtectSystem=strict) but kept explicit for /etc/musallahboard, which
-# is not managed by a *Directory= directive. The daemon writes kiosk-url there
-# (write .tmp, rename), so the directory has to stay writable.
+# is not managed by a *Directory= directive. The daemon writes agent.toml there
+# when it applies a setup file or completes a claim, and agent.key when it
+# claims (write .tmp, rename), so the directory has to stay writable.
 #
 # Writable here means "not read-only mounted", nothing more: ordinary
 # permissions still apply. trust.json in the same directory is root:root 0644,

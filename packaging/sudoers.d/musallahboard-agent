@@ -19,3 +19,12 @@
 
 musallahdaemon ALL=(root) NOPASSWD: /bin/systemctl restart musallahboard-kiosk.service
 musallahdaemon ALL=(root) NOPASSWD: /bin/systemctl reboot
+
+# The service-port guard (internal/core/portguard): when eth0 turns out to be
+# a network rather than a phone or laptop, stop handing out addresses there,
+# and arm the service port again once the cable is unplugged. Only these
+# argument sets, on this one connection.
+musallahdaemon ALL=(root) NOPASSWD: /usr/bin/nmcli connection modify musallahboard-service-port connection.autoconnect no
+musallahdaemon ALL=(root) NOPASSWD: /usr/bin/nmcli connection modify musallahboard-service-port connection.autoconnect yes
+musallahdaemon ALL=(root) NOPASSWD: /usr/bin/nmcli connection down musallahboard-service-port
+musallahdaemon ALL=(root) NOPASSWD: /usr/bin/nmcli connection modify musallahboard-lan connection.autoconnect-retries 1

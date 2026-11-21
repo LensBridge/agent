@@ -11,11 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LensBridge/agent/internal/cdp"
-	"github.com/LensBridge/agent/internal/clock"
-	"github.com/LensBridge/agent/internal/localserver"
-	"github.com/LensBridge/agent/internal/store"
-	"github.com/LensBridge/agent/internal/trust"
+	"github.com/LensBridge/agent/internal/core/clock"
+	"github.com/LensBridge/agent/internal/core/kiosk"
+	"github.com/LensBridge/agent/internal/core/localserver"
+	"github.com/LensBridge/agent/internal/core/store"
+	"github.com/LensBridge/agent/internal/core/trust"
 	"github.com/LensBridge/agent/internal/version"
 )
 
@@ -137,7 +137,7 @@ func localTime(v any) string {
 func kioskShowing() string {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	t, err := cdp.New("").FirstPageTarget(ctx)
+	t, err := kiosk.NewClient("").FirstPageTarget(ctx)
 	if err != nil {
 		return "NOTHING: the kiosk browser is not running (systemctl status musallahboard-kiosk)"
 	}
@@ -148,8 +148,6 @@ func kioskShowing() string {
 		return "MusallahBoard"
 	case strings.Contains(u, "starting.html"):
 		return "the starting page, waiting for the agent"
-	case strings.Contains(u, "waiting.html"):
-		return "the enrollment screen"
 	case strings.HasPrefix(u, "chrome-error:"):
 		return "A BROWSER ERROR PAGE (the agent recovers it within a minute)"
 	default:
@@ -161,7 +159,14 @@ func printStatus(st cliStatus) {
 	row := func(k, format string, args ...any) {
 		fmt.Printf("  %-18s %s\n", k+":", fmt.Sprintf(format, args...))
 	}
-	row("Device", "%s", st.DeviceID)
+	switch {
+	case st.DeviceID == "":
+		row("Device", "NOT SET UP YET: plug in its setup USB stick (from LensBridge, Devices, Setup file)")
+	case st.DisplayName != "":
+		row("Device", "%s (%s)", st.DisplayName, st.DeviceID)
+	default:
+		row("Device", "%s", st.DeviceID)
+	}
 	if st.Daemon {
 		row("Agent", "%s (running)", st.AgentVersion)
 	} else {
@@ -171,7 +176,7 @@ func printStatus(st cliStatus) {
 		row("Screen", "%s", kioskShowing())
 		switch b, _ := st.Backend.(map[string]any); {
 		case b == nil:
-			row("LensBridge", "not connected: no device key")
+			row("LensBridge", "offline board (no backend in its setup file)")
 		case b["connected"] == true:
 			row("LensBridge", "connected since %s", localTime(b["since"]))
 		case b["lastError"] != nil && b["lastError"] != "":
@@ -267,7 +272,7 @@ func printStatus(st cliStatus) {
 			row("", "not confirmed yet (just booted)")
 		default:
 			row("", "NOT CONFIRMED since boot: it may be wrong. Connect the board to the internet,")
-			row("", "fit an RTC (setup.sh --rtc), or send an update from http://10.77.0.1/")
+			row("", "fit an RTC (setup.sh --rtc), or set it from http://10.77.0.1/ or `mbpush clock`")
 		}
 	}
 	if st.RTC {
