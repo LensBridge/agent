@@ -124,6 +124,11 @@ type Scheduler struct {
 	installing   bool
 	lastCheckAt  time.Time
 	lastCheckErr string
+	// batches counts finished InstallNow batches; lastBatch is the newest.
+	// CheckAndInstall reports a batch the schedule installed while it was
+	// checking, instead of "nothing to install".
+	batches   int
+	lastBatch importer.Batch
 }
 
 // New returns a Scheduler holding whatever an earlier run left waiting.
@@ -301,12 +306,25 @@ func (s *Scheduler) CheckDone(err error) {
 // started always finishes, because stopping one halfway helps nobody.
 func (s *Scheduler) CheckAndInstall(ctx context.Context) Outcome {
 	var out Outcome
+	s.mu.Lock()
+	before := s.batches
+	s.mu.Unlock()
 	err := s.CheckChannels(ctx)
 	s.CheckDone(err)
 	if err != nil {
 		out.CheckError = err.Error()
 	}
-	b, _ := s.InstallNow(context.WithoutCancel(ctx))
+	b, ok := s.InstallNow(context.WithoutCancel(ctx))
+	if !ok {
+		// The check can make what it found due at once (inside the install
+		// window), and the schedule then installs it before this call gets
+		// the install lock: that batch is this request's answer.
+		s.mu.Lock()
+		if s.batches > before {
+			b = s.lastBatch
+		}
+		s.mu.Unlock()
+	}
 	out.Results = b.Results
 	if out.Results == nil {
 		out.Results = []importer.Result{}
@@ -354,6 +372,8 @@ func (s *Scheduler) InstallNow(ctx context.Context) (importer.Batch, bool) {
 	s.mu.Lock()
 	s.pending = map[mbu.Type]*mbu.Manifest{}
 	s.installing = false
+	s.batches++
+	s.lastBatch = b
 	s.mu.Unlock()
 	s.changed(s.Info())
 	return b, true

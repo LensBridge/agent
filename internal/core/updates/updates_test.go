@@ -261,6 +261,28 @@ func TestCheckAndInstall(t *testing.T) {
 	}
 }
 
+// `update now` inside the install window: the check makes the waiting agent
+// due and the schedule installs it before CheckAndInstall gets the install
+// lock. That batch is the answer, not "nothing to install".
+func TestCheckAndInstallReportsWhatTheScheduleInstalled(t *testing.T) {
+	e := newEnv(t)
+	if err := e.s.Offer(e.agent(t, "0.4.0")); err != nil {
+		t.Fatal(err)
+	}
+	var s *Scheduler
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.InstallNow(context.Background()) // the schedule, mid-check
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(ts.Close)
+	s = e.newScheduler(func(d *Deps) { d.AppChannel = ts.URL + "/channel.json" })
+	e.s = s
+	out := s.CheckAndInstall(context.Background())
+	if len(out.Results) != 1 || out.Results[0].Action != importer.ActionStaged {
+		t.Fatalf("outcome = %+v", out)
+	}
+}
+
 func TestInfoReportsTheLastCheck(t *testing.T) {
 	e := newEnv(t)
 	if i := e.s.Info(); i.LastCheckAt != nil || i.LastCheckError != "" {
