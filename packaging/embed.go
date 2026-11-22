@@ -71,8 +71,12 @@ var Obsolete = []string{
 const screenCSS = "/*{{screen-css}}*/"
 
 // Read returns the embedded file named name. starting.html comes back with
-// the update screen's style filled in, so the page on disk is complete.
+// the update screen's style filled in, so the page on disk is complete; the
+// cursor theme's files are generated (cursors.go).
 func Read(name string) ([]byte, error) {
+	if b, ok := generated(name); ok {
+		return b, nil
+	}
 	b, err := files.ReadFile(name)
 	if err != nil || name != "starting.html" {
 		return b, err

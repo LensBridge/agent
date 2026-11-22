@@ -68,6 +68,16 @@ PROFILE_DIR="${HOME:-/home/$(id -un)}/.musallahboard-kiosk"
 mkdir -p "$PROFILE_DIR"
 
 # cage -d: don't draw client-side decorations (we want a bare fullscreen page).
+# No cursor (packaging/cursors.go): every cursor in this theme is one
+# transparent pixel. cage asks wlroots for the "default" theme on XCURSOR_PATH,
+# Chromium reads XCURSOR_THEME. A Pi's HDMI CEC inputs look like a mouse, so
+# without this a cursor sits on the board. kiosk.env can set either to override.
+CURSORS=/usr/share/musallahboard/cursors
+if [[ -d "$CURSORS/default/cursors" ]]; then
+    export XCURSOR_PATH="${XCURSOR_PATH:-$CURSORS}"
+    export XCURSOR_THEME="${XCURSOR_THEME:-default}"
+fi
+
 # VT switching is already disabled by default (cage needs -s to ALLOW it).
 # --remote-debugging-port=9222 on localhost is the channel the agent's CDP
 # commands (chrome.reload, chrome.screenshot, config.refresh) attach to —
