@@ -264,7 +264,7 @@ mount_image() {
             BOOT_FALLBACK="$BOOT_FALLBACK/firmware"
         fi
         [[ -f "$BOOT_FALLBACK/config.txt" ]] || die "Could not copy the boot partition out with mtools"
-        (cd "$BOOT_FALLBACK" && find . -type f -exec sha256sum {} + | sort -k2) > "$WORK/bootfs.before"
+        (cd "$BOOT_FALLBACK" && find . -type f -exec sha256sum {} + | LC_ALL=C sort) > "$WORK/bootfs.before"
         mount_on --bind "$BOOT_FALLBACK" "$ROOT/boot/firmware"
         info "Boot partition copied out with mtools (this kernel cannot mount vfat)"
     fi
@@ -401,20 +401,20 @@ close_image() {
     section "Closing"
     if [[ -n "$BOOT_FALLBACK" ]]; then
         # Write back what the build changed on the boot partition.
-        (cd "$BOOT_FALLBACK" && find . -type f -exec sha256sum {} + | sort -k2) > "$WORK/bootfs.after"
+        (cd "$BOOT_FALLBACK" && find . -type f -exec sha256sum {} + | LC_ALL=C sort) > "$WORK/bootfs.after"
         local f
         while read -r f; do
             f="${f#./}"
             [[ "$f" == */* ]] && mmd -D s -i "$IMG@@$BOOT_OFFSET" "::/$(dirname "$f")" 2>/dev/null || true
             mcopy -o -p -m -i "$IMG@@$BOOT_OFFSET" "$BOOT_FALLBACK/$f" "::/$f"
             info "boot: wrote $f"
-        done < <(comm -13 "$WORK/bootfs.before" "$WORK/bootfs.after" | awk '{print $2}')
+        done < <(LC_ALL=C comm -13 "$WORK/bootfs.before" "$WORK/bootfs.after" | awk '{print $2}')
         while read -r f; do
             f="${f#./}"
             [[ -e "$BOOT_FALLBACK/$f" ]] && continue
             mdel -i "$IMG@@$BOOT_OFFSET" "::/$f"
             info "boot: removed $f"
-        done < <(comm -23 "$WORK/bootfs.before" "$WORK/bootfs.after" | awk '{print $2}')
+        done < <(LC_ALL=C comm -23 "$WORK/bootfs.before" "$WORK/bootfs.after" | awk '{print $2}')
     fi
     sync
     cleanup
