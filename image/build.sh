@@ -289,11 +289,19 @@ mount_image() {
     chroot "$ROOT" /bin/true || die "Cannot run the image's programs here (arm64 emulation?)"
 }
 
-# in_root CMD...: run in the image, with a clean environment.
+# in_root CMD...: run in the image, with a clean environment. The host's
+# proxy settings go through, so apt in the image works behind a proxy (or an
+# apt-cacher-ng: http_proxy=http://<host>:3142). Run with `sudo -E` (or set
+# them after sudo) for them to reach this script.
 in_root() {
+    local proxy=() v
+    for v in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY; do
+        [[ -n "${!v-}" ]] && proxy+=("$v=${!v}")
+    done
     chroot "$ROOT" /usr/bin/env -i \
         PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
         HOME=/root TERM=dumb LANG=C.UTF-8 DEBIAN_FRONTEND=noninteractive \
+        "${proxy[@]}" \
         "$@"
 }
 
