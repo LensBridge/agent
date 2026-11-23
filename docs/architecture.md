@@ -1087,7 +1087,97 @@ per-day payloads from installed content, and weather comes through the agent.
 | DNS rebinding against the upload server | `Host` allow-list. |
 | Enrollment, claim or backend impersonated on the LAN | `https://` backend and `wss://` socket on the backend's host, enforced before an enrollment or claim is sent, on its reply, and at every start of the online layer; plaintext only with the explicit `insecure_dev` opt-in (section 11). |
 
-## 17. Out of scope
+## 17. Pre-built image
+
+`image/build.sh` makes `musallahboard-<agent version>-arm64.img.xz`:
+Raspberry Pi OS Lite (trixie, arm64, a pinned release checked by SHA-256)
+with the agent, the kiosk and the current board app already on it. Flashed
+to a card, a board boots to the setup screen like one installed with
+`setup.sh`, and needs no internet, then or later. Each agent release carries
+its image (`.github/workflows/image.yml`, called by `release.yml`, on an arm64
+runner); pull requests that touch `setup.sh`, `image/` or `packaging/` build
+one as a check and keep it for a week as a workflow artifact.
+
+**One copy of every step.** The builder only mounts the image (root and boot
+partitions, by byte offset, so no partition device nodes are needed; the boot
+partition through mtools where the kernel has no vfat) and runs `setup.sh`
+in it. `setup.sh` has two halves, and a normal `curl | bash` install runs
+the steps of both:
+
+| | `setup.sh --image` (in the chroot, at build time) | `setup.sh --firstboot` (on the board, `musallahboard-firstboot.service`) |
+|---|---|---|
+| does | packages (also the service port's), the service and kiosk accounts, display stack, tty1, logind, journal, unattended upgrades, watchdog, agent binary, state directories and empty `trust.json`, `install-system`, boot target; masks `userconfig.service`; default hostname `musallahboard` and time zone; queues the board app in the inbox; installs a copy of itself and the first-boot unit | SSH lockdown for the admins cloud-init made, ufw, the service-port profiles and `service-port on`, and pins the content key from `musallahboard.txt` |
+| needs | no answers, nothing running | no internet |
+
+In the chroot nothing runs, so `--image` skips `systemctl`
+start/stop/restart/reload/daemon-reload itself (systemctl only does that in a
+chroot it can recognise, which a container that hides `/proc/1` prevents);
+enable, mask and set-default work on the files. `--image` refuses to run on a
+booted system (`/run/systemd/system` exists) and `--firstboot` refuses
+anywhere else.
+
+**What each board brings.** Hostname, admin account and SSH key, time zone,
+Wi-Fi and keyboard come from cloud-init, which Raspberry Pi OS reads from the
+boot partition (`user-data`, `network-config`, `meta-data`) and which
+Raspberry Pi Imager writes from its customisation screen. The first user
+cloud-init makes takes over the image's placeholder `pi` (uid 1000) and gets
+sudo. The LensBridge content signing key comes from `musallahboard.txt` on the
+boot partition (an example, `musallahboard-example.txt`, is on every image):
+
+```
+content_key = <base64 of 32 bytes>
+service_port = on        # or off; read at the first boot only
+```
+
+Reading the key from the boot partition is the same trust as `setup.sh`
+asking for it: whoever can write the SD card owns the board anyway. A USB
+stick is not, and cannot become, a way to pin a key (section 9.6).
+
+**`musallahboard-firstboot.service`** is ordered after cloud-init has made the
+accounts (`cloud-init-network.service`) and applied its config
+(`cloud-config.service`), and after NetworkManager; none of those is ordered
+after `multi-user.target`, which it is part of. It runs when
+`/usr/lib/musallahboard/firstboot.done` is missing (the first boot) or a
+`musallahboard.txt` is on the card (any boot), so a key can also be pinned, or
+a new one added, later by putting the file back. The one-time part writes
+`firstboot.done` when it has finished; a failure leaves it unwritten and the
+next boot tries again (every step is idempotent). The key is pinned with
+`trust add content`, which the daemon reads on every import, so no restart is
+needed. `musallahboard.txt` is deleted once applied; a file it cannot apply
+(an invalid key, an unknown setting) is renamed `musallahboard-failed.txt` with
+the reason appended, for whoever puts the card in a computer.
+
+- **Admins.** The SSH lockdown allows the members of `sudo` with a login
+  shell other than the board's own accounts: the admins cloud-init made. With
+  none (a card flashed without customisation), it allows nobody by name, and
+  nobody could log in anyway (no passwords, no keys); the board still works,
+  and a maintainer who needs SSH reflashes with an admin. Password login is
+  off whatever Imager was told: the hardening drop-in is
+  `00-musallahboard-hardening.conf`, ahead of cloud-init's `50-cloud-init.conf`
+  (sshd keeps the first value it reads).
+- **`userconfig.service`** (Raspberry Pi OS's "new user" wizard) is masked in
+  the image: on a console boot it switches the screen to tty8 and asks for a
+  user name and password, over the kiosk, on a board with no keyboard.
+  cloud-init masks it too when it makes a user.
+- **First boot.** The image keeps what makes a card a new machine:
+  `machine-id` is `uninitialized` (`ConditionFirstBoot`), SSH host keys are
+  made at first boot (`regenerate_ssh_host_keys.service`), and `rpi-resize`
+  grows the root filesystem to the card. The build removes apt lists and
+  caches and its own logs, and zeroes free space so it compresses.
+- **The board app** in the image is the one current at build time, as a signed
+  package in the inbox, imported within seconds of the first boot. It is
+  verified against the release keys like any other package (by `mbpack verify`
+  at build time too), so the image must carry a release build of the agent.
+
+**Checks.** The build fails unless the image has: the agent of the expected
+version; the agent, kiosk, updater and first-boot units enabled;
+`userconfig.service` masked; `multi-user.target` as default; the kiosk's
+packages; the two service accounts (the kiosk's without sudo); a root-owned
+`trust.json` with no content key; no `agent.toml` or `agent.key`; no SSH host
+keys; `machine-id` uninitialized; `resize` still on the kernel command line;
+and the board app in the inbox when one was given.
+
+## 18. Out of scope
 
 - Weather on boards without internet (online boards get it through the weather
   overlay in section 7).

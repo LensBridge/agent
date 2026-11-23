@@ -42,6 +42,7 @@ systemctl disable musallahboard-agent.service 2>/dev/null || true
 systemctl disable musallahboard-kiosk.service 2>/dev/null || true
 systemctl disable musallahboard-kiosk-watch.path 2>/dev/null || true
 systemctl disable musallahboard-agent-update.path 2>/dev/null || true
+systemctl disable musallahboard-firstboot.service 2>/dev/null || true
 
 info "Services stopped and disabled"
 
@@ -50,6 +51,7 @@ section "Removing systemd units"
 
 rm -f /lib/systemd/system/musallahboard-agent.service
 rm -f /lib/systemd/system/musallahboard-kiosk.service
+rm -f /etc/systemd/system/musallahboard-firstboot.service
 rm -f /lib/systemd/system/musallahboard-kiosk-watch.path
 rm -f /lib/systemd/system/musallahboard-kiosk-reload.service
 rm -f /lib/systemd/system/musallahboard-agent-update.path
@@ -134,7 +136,7 @@ section "Removing system configurations"
 
 rm -f /etc/systemd/system.conf.d/watchdog.conf
 rm -f /etc/systemd/logind.conf.d/kiosk.conf
-rm -f /etc/ssh/sshd_config.d/kiosk-hardening.conf
+rm -f /etc/ssh/sshd_config.d/00-musallahboard-hardening.conf /etc/ssh/sshd_config.d/kiosk-hardening.conf
 rm -f /etc/NetworkManager/conf.d/wifi-powersave-off.conf
 
 # Reload affected services

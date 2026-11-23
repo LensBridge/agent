@@ -30,6 +30,19 @@
 # USB sticks work on every board.
 #
 # Re-running this script is safe.
+#
+# The pre-built board image (image/build.sh) is made from this script too, in
+# two halves, so there is one copy of every step:
+#   setup.sh --image      as root, inside a chroot of Raspberry Pi OS Lite:
+#                         everything every board shares (packages, accounts,
+#                         agent, system files). No per-board answers, no
+#                         running system needed.
+#   setup.sh --firstboot  run on the board by musallahboard-firstboot.service:
+#                         what needs the running system or this board's
+#                         answers (SSH lockdown for the admin cloud-init
+#                         created, firewall, service port, the content key
+#                         from /boot/firmware/musallahboard.txt).
+# The curl | bash install above runs both halves' steps, in one go.
 # =====================================================
 
 set -euo pipefail
@@ -59,10 +72,28 @@ BINARY_URL="${RELEASE_URL}/musallahboard-agent-${ARCH}"
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
 RED='\033[0;31m'; YELLOW='\033[1;33m'; GREEN='\033[0;32m'; BOLD='\033[1m'; NC='\033[0m'
+# Plain text into the journal (--firstboot) and build logs.
+[[ -t 1 ]] || { RED=''; YELLOW=''; GREEN=''; BOLD=''; NC=''; }
 info()    { echo -e "${GREEN}[INFO]${NC}  $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 section() { echo; echo -e "${BOLD}=== $* ===${NC}"; }
+
+# What this run does: a normal install (curl | bash), the image half
+# (--image) or the first-boot half (--firstboot). See the header.
+MODE=install
+
+# --image and --firstboot run as root, where every `sudo` below is just the
+# command: running a step as root or through sudo must not be two versions of
+# the step. (A normal install refuses root in preflight, so this changes
+# nothing there.)
+if [[ $EUID -eq 0 ]]; then
+    sudo() {
+        while [[ "${1-}" == -* ]]; do shift; done
+        [[ $# -eq 0 ]] && return 0
+        "$@"
+    }
+fi
 
 # ── Tunables ──────────────────────────────────────────────────────────────────
 NTP_SYNC_TIMEOUT_SEC="${NTP_SYNC_TIMEOUT_SEC:-90}"
@@ -104,7 +135,24 @@ SERVICE_IFACE=eth0
 SERVICE_ADDR=10.77.0.1/24
 SERVICE_NET=10.77.0.0/24
 RTC_OVERLAY="dtoverlay=i2c-rtc,ds3231"
-SSHD_HARDENING=/etc/ssh/sshd_config.d/kiosk-hardening.conf
+# sshd keeps the first value it reads for each option, and reads
+# sshd_config.d in name order: the 00- prefix puts this ahead of cloud-init's
+# 50-cloud-init.conf, which says `PasswordAuthentication yes` when Raspberry Pi
+# Imager is told to allow passwords. The old name sorted after it.
+SSHD_HARDENING=/etc/ssh/sshd_config.d/00-musallahboard-hardening.conf
+SSHD_HARDENING_OLD=/etc/ssh/sshd_config.d/kiosk-hardening.conf
+
+# The pre-built image (--image, --firstboot).
+# A file on the SD card's boot partition (FAT, so any computer can write it)
+# with this board's content key; read and removed at boot.
+BOOT_CONFIG=/boot/firmware/musallahboard.txt
+BOOT_CONFIG_FAILED=/boot/firmware/musallahboard-failed.txt
+# A copy of this script on the image, for musallahboard-firstboot.service.
+SETUP_COPY="$LIB_DIR/setup.sh"
+FIRSTBOOT_UNIT=/etc/systemd/system/musallahboard-firstboot.service
+# Written when the one-time part of --firstboot has finished. Root's, outside
+# the daemon's directories.
+FIRSTBOOT_DONE="$LIB_DIR/firstboot.done"
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 usage() {
@@ -128,6 +176,13 @@ Service port (after a normal setup, while still online):
                          turn it on; skips the normal setup
   --rtc                  a DS3231 RTC is fitted: enable it, remove fake-hwclock
 
+Pre-built image (image/build.sh; see docs/architecture.md, section 17):
+  --image                as root in a chroot of Raspberry Pi OS Lite: the
+                         steps every board shares. MB_AGENT_BINARY=<file>
+                         installs that agent instead of downloading one;
+                         MB_APP_PACKAGE=<file.mbu> adds the board app.
+  --firstboot            run by musallahboard-firstboot.service on the board
+
 Update packages (.mbu) are installed with a USB stick, an upload on the
 service port, or: sudo musallahboard-agent import <file.mbu>
 USAGE
@@ -145,10 +200,40 @@ for arg in "$@"; do
         --service-port)    SERVICE_PORT=1 ;;
         --no-service-port) export MB_SERVICE_PORT=0 ;;
         --rtc)             SERVICE_PORT_RTC=1 ;;
+        --image)           MODE=image ;;
+        --firstboot)       MODE=firstboot ;;
         -h|--help)         usage; exit 0 ;;
         *) echo "Unknown option: $arg" >&2; usage >&2; exit 1 ;;
     esac
 done
+
+if [[ "$MODE" != install && "$SERVICE_PORT" == "1" ]]; then
+    echo "--service-port does not go with --image or --firstboot" >&2
+    exit 1
+fi
+# The image is for a Pi, whatever the machine building it is (often a VM).
+[[ "$MODE" == image ]] && IS_VM=0
+
+# Building the image, nothing runs: there is no systemd to start, restart or
+# reload anything. systemctl itself skips those in a chroot it recognises,
+# but not where /proc/1 is hidden (a container building the image), where it
+# fails instead. So in --image they are skipped here; what works on files
+# (enable, disable, mask, set-default, is-enabled) goes through.
+if [[ "$MODE" == image ]]; then
+    systemctl() {
+        local a
+        for a in "$@"; do
+            case "$a" in
+                -*) continue ;;
+                start|stop|restart|reload|try-restart|reload-or-restart|try-reload-or-restart|daemon-reload|daemon-reexec)
+                    echo "  (image build: not running systemctl $*)"
+                    return 0 ;;
+                *) break ;;
+            esac
+        done
+        command systemctl "$@"
+    }
+fi
 
 if [[ "$SERVICE_PORT" != "1" && "$SERVICE_PORT_RTC" == "1" ]]; then
     echo "--rtc only applies with --service-port" >&2
@@ -460,8 +545,9 @@ setup_display_stack() {
     sudo chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR"
     sudo chmod 0751 "$CONFIG_DIR"
 
-    # Kiosk environment: software-rendering fallback for VMs
-    if systemd-detect-virt --quiet 2>/dev/null; then
+    # Kiosk environment: software-rendering fallback for VMs. An image is for
+    # a Pi, wherever it is being built.
+    if [[ "$MODE" != image ]] && systemd-detect-virt --quiet 2>/dev/null; then
         sudo tee "$CONFIG_DIR/kiosk.env" > /dev/null << 'EOF'
 WLR_NO_HARDWARE_CURSORS=1
 WLR_RENDERER=pixman
@@ -485,22 +571,34 @@ disable_tty1_autologin() {
 }
 
 # ── SSH hardening ─────────────────────────────────────────────────────────────
+# ADMIN_USER is one name (a normal install) or a space-separated list
+# (--firstboot: every admin cloud-init made). With none, nobody is allowed in
+# by name, and no account can log in anyway: no passwords, no keys.
 harden_ssh() {
     section "SSH hardening"
 
+    local allow=""
+    [[ -n "${ADMIN_USER// }" ]] && allow="AllowUsers $ADMIN_USER"
     sudo mkdir -p /etc/ssh/sshd_config.d
-    sudo tee /etc/ssh/sshd_config.d/kiosk-hardening.conf > /dev/null << EOF
+    sudo tee "$SSHD_HARDENING" > /dev/null << EOF
 PasswordAuthentication no
+KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
 PubkeyAuthentication yes
 PermitRootLogin no
-AllowUsers $ADMIN_USER
-DenyUsers $KIOSK_USER
+${allow}
+DenyUsers $KIOSK_USER $SERVICE_USER
 EOF
+    sudo rm -f "$SSHD_HARDENING_OLD"
 
     sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd 2>/dev/null || true
-    info "SSH: key-based auth only, $ADMIN_USER access only"
-    warn "Verify you can SSH as $ADMIN_USER before closing this session!"
+    if [[ -n "$allow" ]]; then
+        info "SSH: key-based auth only, for: $ADMIN_USER"
+        [[ "$MODE" == install ]] && warn "Verify you can SSH as $ADMIN_USER before closing this session!"
+    else
+        warn "SSH: key-based auth only, and no admin account to allow: nobody can log in over SSH"
+    fi
+    return 0
 }
 
 # ── logind ────────────────────────────────────────────────────────────────────
@@ -580,6 +678,14 @@ EOF
 install_agent_binary() {
     section "Agent binary"
 
+    # A local file (the image build, or testing a build of this checkout).
+    if [[ -n "${MB_AGENT_BINARY-}" ]]; then
+        [[ -f "$MB_AGENT_BINARY" ]] || error "MB_AGENT_BINARY: no such file: $MB_AGENT_BINARY"
+        sudo install -o root -g root -m 0755 "$MB_AGENT_BINARY" "$BINARY_DEST"
+        info "Installed $BINARY_DEST from $MB_AGENT_BINARY ($("$BINARY_DEST" version 2>/dev/null || echo 'version unknown'))"
+        return 0
+    fi
+
     info "Downloading from $BINARY_URL"
     local tmp_binary="/tmp/musallahboard-agent-$$"
 
@@ -647,7 +753,9 @@ apply_appliance_policy() {
 
     # Disable display managers
     if systemctl list-unit-files 2>/dev/null | grep -qE '^(lightdm|gdm3?|sddm)\.service'; then
-        sudo systemctl disable --now lightdm.service gdm.service gdm3.service sddm.service 2>/dev/null || true
+        local now=--now
+        [[ "$MODE" == image ]] && now=
+        sudo systemctl disable $now lightdm.service gdm.service gdm3.service sddm.service 2>/dev/null || true
         info "Disabled display manager(s)"
     else
         info "No display manager installed"
@@ -950,8 +1058,251 @@ service_port_main() {
     service_port_summary
 }
 
+# ══ Pre-built image, part 1 (setup.sh --image) ════════════════════════════════
+# Runs as root inside a chroot of Raspberry Pi OS Lite (image/build.sh). Only
+# the steps every board shares; the rest is --firstboot's. A chroot has no
+# running systemd: `systemctl enable/mask/set-default` work on the files, and
+# start/restart/reload are skipped by systemctl itself ("Running in chroot").
+
+image_preflight() {
+    [[ $EUID -eq 0 ]] || error "--image runs as root, inside the image's chroot (image/build.sh)."
+    # A booted system has /run/systemd/system (sd_booted). The image's chroot
+    # does not: nothing in it was booted.
+    [[ ! -d /run/systemd/system ]] || \
+        error "--image changes a system for good and is only for an image being built: run it in the image's chroot (image/build.sh), not on a running system."
+    [[ "$ARCH" == "arm64" ]] || error "The image is arm64. Got: $(uname -m)"
+    [[ -f /boot/firmware/config.txt ]] || \
+        error "No /boot/firmware/config.txt: mount the image's boot partition there first."
+    command -v apt-get >/dev/null || error "apt-get not found: is this Raspberry Pi OS?"
+    [[ -f "${BASH_SOURCE[0]}" ]] || \
+        error "--image copies this script into the image for --firstboot: run it from a file, not curl | bash."
+}
+
+# The answers a board gets until cloud-init (Raspberry Pi Imager) gives it
+# its own: the same defaults a normal install offers.
+image_defaults() {
+    section "Image defaults"
+    HOSTNAME="${MB_HOSTNAME:-musallahboard}"
+    TIMEZONE="${MB_TIMEZONE:-America/Toronto}"
+    [[ -f "/usr/share/zoneinfo/$TIMEZONE" ]] || error "Unknown timezone '$TIMEZONE'"
+
+    echo "$HOSTNAME" > /etc/hostname
+    if grep -q "127\.0\.1\.1" /etc/hosts; then
+        sed -i "s/^\(127\.0\.1\.1\s\+\).*/\1$HOSTNAME/" /etc/hosts
+    else
+        echo "127.0.1.1	$HOSTNAME" >> /etc/hosts
+    fi
+    ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
+    echo "$TIMEZONE" > /etc/timezone
+    info "Hostname $HOSTNAME, time zone $TIMEZONE (cloud-init may set others at first boot)"
+
+    # Raspberry Pi OS's first-boot wizard asks for a user name and password
+    # on tty8 and switches the screen to it, over the kiosk, on a board with
+    # no keyboard. cloud-init masks it when it makes a user; a card flashed
+    # without one would show the wizard forever. Admins come from cloud-init.
+    systemctl mask userconfig.service >/dev/null 2>&1
+    info "Masked userconfig.service (admin accounts come from cloud-init / Raspberry Pi Imager)"
+}
+
+# The board app, imported by the agent from its inbox within seconds of the
+# first boot (signed with the release key; checked like any other package).
+image_app_package() {
+    [[ -n "${MB_APP_PACKAGE-}" ]] || { info "No board app in the image: the board fetches it when online, or from a USB kit"; return 0; }
+    section "Board app"
+    [[ -f "$MB_APP_PACKAGE" ]] || error "MB_APP_PACKAGE: no such file: $MB_APP_PACKAGE"
+    local dest
+    dest="$INBOX_DIR/$(basename "$MB_APP_PACKAGE")"
+    [[ "$dest" == *.mbu ]] || dest="$dest.mbu"
+    # image/build.sh has checked its signature (mbpack verify); the agent
+    # checks it again before installing it.
+    install -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0640 "$MB_APP_PACKAGE" "$dest"
+    info "Queued $(basename "$dest") in $INBOX_DIR"
+}
+
+# musallahboard-firstboot.service: this script's --firstboot, once after the
+# first boot (and again whenever a musallahboard.txt is put on the card).
+install_firstboot() {
+    section "First-boot service"
+    install -o root -g root -m 0755 "${BASH_SOURCE[0]}" "$SETUP_COPY"
+    cat > "$FIRSTBOOT_UNIT" << EOF
+# Written by setup.sh --image. See docs/architecture.md, section 17.
+[Unit]
+Description=MusallahBoard first boot (SSH, firewall, service port, content key)
+# After cloud-init made the admin account (cloud-init-network) and applied
+# its config, with NetworkManager up for the service-port profiles. None of
+# these is ordered after multi-user.target, so this can be part of it.
+After=cloud-init-network.service cloud-config.service NetworkManager.service
+Wants=NetworkManager.service
+RequiresMountsFor=/boot/firmware
+# Once, and again whenever the card carries a new musallahboard.txt.
+ConditionPathExists=|!$FIRSTBOOT_DONE
+ConditionPathExists=|$BOOT_CONFIG
+
+[Service]
+Type=oneshot
+ExecStart=$SETUP_COPY --firstboot
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 0644 "$FIRSTBOOT_UNIT"
+    systemctl enable musallahboard-firstboot.service >/dev/null 2>&1
+    cat > /boot/firmware/musallahboard-example.txt << 'EOF'
+# MusallahBoard: this board's settings, read once at boot.
+#
+# Copy this file to musallahboard.txt (same folder, the SD card's boot
+# partition) and fill it in. The board reads it at its next boot, applies it,
+# and deletes it. If something is wrong with it, the board renames it to
+# musallahboard-failed.txt and writes the reason at the end.
+#
+# LensBridge's content signing public key (base64, 44 characters ending in =).
+# The console shows it; the backend publishes it at /api/agent/signing-keys.
+# Without it the board accepts no setup file and no content.
+content_key =
+
+# The ethernet service port, for a laptop or phone plugged straight in:
+# on (default) or off. Read at the first boot only.
+service_port = on
+EOF
+    info "Installed $FIRSTBOOT_UNIT and $SETUP_COPY"
+    info "Wrote /boot/firmware/musallahboard-example.txt"
+}
+
+image_main() {
+    image_preflight
+    info "Building the MusallahBoard image (setup.sh --image)"
+
+    install_packages
+    service_port_install_packages
+    image_defaults
+    setup_service_user
+    setup_kiosk_user
+    setup_display_stack
+    disable_tty1_autologin
+    setup_logind
+    setup_journal
+    setup_unattended_upgrades
+    setup_pi_extras
+
+    install_agent_binary
+    install_state_dirs
+    install_system_files
+    apply_appliance_policy
+    image_app_package
+    install_firstboot
+    echo
+    info "Image steps done. The rest happens on the board's first boot (setup.sh --firstboot)."
+}
+
+# ══ Pre-built image, part 2 (setup.sh --firstboot) ════════════════════════════
+# Run by musallahboard-firstboot.service, as root, on the board. Needs no
+# internet. The one-time part runs at the first boot; the content key part
+# whenever /boot/firmware/musallahboard.txt is there.
+
+firstboot_preflight() {
+    [[ $EUID -eq 0 ]] || error "--firstboot runs as root (musallahboard-firstboot.service)."
+    [[ -d /run/systemd/system ]] || error "--firstboot runs on the booted board (musallahboard-firstboot.service)."
+    [[ -x "$BINARY_DEST" ]] || error "$BINARY_DEST is not installed: is this a MusallahBoard image?"
+}
+
+# Moves a bad musallahboard.txt aside with the reason, so whoever looks at the
+# card in a computer sees what went wrong, and stops.
+_boot_config_failed() {
+    if [[ -f "$BOOT_CONFIG" ]]; then
+        { echo; echo "# The board did not apply this file: $*"; } >> "$BOOT_CONFIG"
+        mv -f "$BOOT_CONFIG" "$BOOT_CONFIG_FAILED"
+        sync
+    fi
+    error "$BOOT_CONFIG: $*"
+}
+
+# read_boot_config: CONTENT_KEY and MB_SERVICE_PORT from musallahboard.txt,
+# `key = value` lines. Written on any computer, so CRLF and a BOM are fine.
+read_boot_config() {
+    CONTENT_KEY=""
+    [[ -f "$BOOT_CONFIG" ]] || return 0
+    info "Reading $BOOT_CONFIG"
+    local line key value n=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        n=$((n + 1))
+        line="${line//$'\r'/}"
+        [[ $n -eq 1 ]] && line="${line#$'\xef\xbb\xbf'}"
+        [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+        [[ "$line" == *=* ]] || _boot_config_failed "line $n is not 'name = value': $line"
+        key="$(tr -d '[:space:]' <<< "${line%%=*}")"
+        value="$(tr -d '[:space:]' <<< "${line#*=}")"
+        case "$key" in
+            content_key)  CONTENT_KEY="$value" ;;
+            service_port)
+                case "${value,,}" in
+                    on|yes|true|1)  export MB_SERVICE_PORT=1 ;;
+                    off|no|false|0) export MB_SERVICE_PORT=0 ;;
+                    *) _boot_config_failed "service_port must be on or off, not '$value'" ;;
+                esac ;;
+            *) _boot_config_failed "unknown setting '$key' on line $n" ;;
+        esac
+    done < "$BOOT_CONFIG"
+    if [[ -n "$CONTENT_KEY" ]] && ! valid_content_key "$CONTENT_KEY"; then
+        _boot_config_failed "content_key is not a content signing public key (the base64 of 32 bytes: 44 characters ending in =)"
+    fi
+    return 0
+}
+
+# The admins cloud-init (Raspberry Pi Imager) made: members of sudo with a
+# login shell, other than the board's own accounts. Raspberry Pi OS's
+# placeholder `pi` has no shell until cloud-init renames it into an admin.
+firstboot_admins() {
+    local members u shell admins=()
+    members="$(getent group sudo | cut -d: -f4 | tr ',' ' ')"
+    for u in $members; do
+        [[ "$u" == "$KIOSK_USER" || "$u" == "$SERVICE_USER" ]] && continue
+        shell="$(getent passwd "$u" | cut -d: -f7)"
+        [[ -z "$shell" || "$shell" == */nologin || "$shell" == */false ]] && continue
+        admins+=("$u")
+    done
+    echo "${admins[*]}"
+}
+
+firstboot_main() {
+    firstboot_preflight
+    read_boot_config
+
+    if [[ ! -e "$FIRSTBOOT_DONE" ]]; then
+        info "MusallahBoard first boot (setup.sh --firstboot)"
+        ADMIN_USER="$(firstboot_admins)"
+        harden_ssh
+        setup_ufw
+        prepare_service_port
+        enable_service_port
+        install -o root -g root -m 0644 /dev/null "$FIRSTBOOT_DONE"
+        date -u +%FT%TZ > "$FIRSTBOOT_DONE"
+        info "First boot done"
+    fi
+
+    if [[ -n "$CONTENT_KEY" ]]; then
+        pin_content_key
+    elif [[ -f "$BOOT_CONFIG" ]]; then
+        info "$BOOT_CONFIG has no content_key; nothing to pin"
+    fi
+    if [[ -f "$BOOT_CONFIG" ]]; then
+        rm -f "$BOOT_CONFIG" "$BOOT_CONFIG_FAILED"
+        sync
+        info "Applied and removed $BOOT_CONFIG"
+    fi
+    if "$BINARY_DEST" trust show 2>/dev/null | grep -q "^  none\. This board cannot verify any content"; then
+        warn "No content signing key is pinned: the board accepts no setup file or content until one is."
+        warn "Put musallahboard.txt with content_key = ... on the card's boot partition and reboot (see musallahboard-example.txt)."
+    fi
+    return 0
+}
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 main() {
+    case "$MODE" in
+        image)     image_main; return ;;
+        firstboot) firstboot_main; return ;;
+    esac
     if [[ "$SERVICE_PORT" == "1" ]]; then
         service_port_main
         return

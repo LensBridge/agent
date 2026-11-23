@@ -1,0 +1,118 @@
+name: Image
+
+# The pre-built Raspberry Pi image (image/build.sh; docs/architecture.md,
+# section 17). Built on an arm64 runner, so the image's programs run natively.
+#
+#   - Release (called by release.yml): the image of that agent release, with
+#     the current board app, attached to the release.
+#   - Pull requests and pushes that touch what goes into it: built and checked
+#     with the latest agent release and this checkout's setup.sh, kept as a
+#     workflow artifact for a week, so a change can be flashed and tried.
+#   - By hand (Actions, Image, Run workflow), optionally with an agent version.
+
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Agent release tag to build the image of and attach it to
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      agent_version:
+        description: Agent release in the image (empty for the latest)
+        type: string
+        required: false
+  pull_request:
+    paths:
+      - setup.sh
+      - image/**
+      - packaging/**
+      - .github/workflows/image.yml
+  push:
+    branches: [main, master]
+    paths:
+      - setup.sh
+      - image/**
+      - packaging/**
+      - .github/workflows/image.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-${{ github.ref }}-${{ inputs.release_tag || 'build' }}
+  cancel-in-progress: ${{ inputs.release_tag == '' }}
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      RELEASE_KEYS: ${{ vars.MB_RELEASE_PUBLIC_KEYS }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq parted zerofree mtools xz-utils
+
+      - name: Which agent
+        id: agent
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          WANTED: ${{ inputs.agent_version }}
+        run: |
+          if [[ -n "$RELEASE_TAG" ]]; then
+            tag="$RELEASE_TAG"
+          elif [[ -n "$WANTED" ]]; then
+            tag="$WANTED"
+          else
+            url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/LensBridge/agent/releases/latest)"
+            tag="${url##*/}"
+          fi
+          [[ -n "$tag" && "$tag" != latest ]] || { echo "::error::Could not tell which agent release to use"; exit 1; }
+          echo "Agent release: $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # mbpack with the release keys, to check the board app's signature
+      # before it goes into the image.
+      - name: Build mbpack
+        run: make mbpack RELEASE_KEYS="$RELEASE_KEYS"
+
+      - name: Build the image
+        run: |
+          app=(--app-latest)
+          [[ -n "$RELEASE_KEYS" ]] && app+=(--mbpack=build/mbpack)
+          sudo image/build.sh --agent-version="${{ steps.agent.outputs.tag }}" "${app[@]}"
+          sudo chown -R "$(id -u):$(id -g)" build
+          ls -la build/*.img.xz*
+
+      - name: Attach to the release
+        if: inputs.release_tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          fail_on_unmatched_files: true
+          files: |
+            build/musallahboard-*-arm64.img.xz
+            build/musallahboard-*-arm64.img.xz.sha256
+
+      - name: Keep as an artifact
+        if: inputs.release_tag == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: musallahboard-image-${{ steps.agent.outputs.tag }}
+          path: |
+            build/musallahboard-*-arm64.img.xz
+            build/musallahboard-*-arm64.img.xz.sha256
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error

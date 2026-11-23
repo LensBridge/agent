@@ -88,3 +88,13 @@ jobs:
             build/mbpush-windows-amd64.exe
             build/mbpush-darwin-arm64
             build/mbpush-linux-amd64
+
+  # The pre-built Raspberry Pi image with this agent, attached to the same
+  # release (image.yml; docs/architecture.md, section 17).
+  image:
+    needs: release
+    uses: ./.github/workflows/image.yml
+    with:
+      release_tag: ${{ github.ref_name }}
+    permissions:
+      contents: write

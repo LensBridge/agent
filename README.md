@@ -32,6 +32,23 @@ be a memory-efficient React SPA rather than a full Electron app (Under 1Gb total
 
 ### 1. Install
 
+#### Option A: flash the pre-built image
+
+Every [release](https://github.com/LensBridge/agent/releases) carries `musallahboard-<version>-arm64.img.xz`: Raspberry Pi OS Lite (trixie, arm64) with the agent, the kiosk and the board app already installed. It needs no internet, then or later. For a 64-bit Raspberry Pi and an SD card of 8 GB or more.
+
+1. Download the `.img.xz` (and check it against its `.sha256` if you like).
+2. In [Raspberry Pi Imager](https://www.raspberrypi.com/software/), choose your Pi, then **Choose OS, Use custom**, and pick the `.img.xz`. Choose the card.
+3. When Imager offers to **customise** the image, do:
+   - **Hostname**, **time zone**, and **Wi-Fi** if the board will use it.
+   - **Username**: the admin account you will SSH in as. Its password is never used for SSH.
+   - **Enable SSH, public-key only**, with your public key. The board allows key login only, whatever you choose here.
+4. Before ejecting the card, open its boot partition (it shows up as `bootfs` on any computer). Copy `musallahboard-example.txt` to `musallahboard.txt` and set `content_key` to **LensBridge's content signing public key** (base64, shown in the console; the backend also publishes it at `/api/agent/signing-keys`). The board accepts content and setup files signed by that key only.
+5. Put the card in the Pi and power it on. The first boot takes a few minutes (it grows the filesystem, applies your settings and installs the board app) and ends on **"This board is not set up yet. Plug in its setup USB stick."**
+
+The board deletes `musallahboard.txt` once it has applied it. If something in it is wrong, it renames it `musallahboard-failed.txt` and writes the reason at the end: fix it, rename it back and reboot. The same file pins a key on a board later, too. Building the image yourself: [image/build.sh](image/build.sh) and [docs/architecture.md](docs/architecture.md), section 17.
+
+#### Option B: install on Raspberry Pi OS
+
 On a fresh Raspberry Pi OS Lite (trixie, arm64), as a user with sudo (not as root), while the Pi has internet:
 
 ```bash
@@ -124,6 +141,12 @@ sudo musallahboard-agent trust remove <key id>
 sudo musallahboard-agent trust fetch
 ```
 
-## Roadmap
+## The pre-built image
 
-Eventually I would like to create a premade Pi image (or an image builder) with the agent preinstalled, so that users can just flash an SD card and have a ready-to-go kiosk. Unfortunately, everything has been testing my patience lately and I gave up on that for now.
+`image/build.sh` makes the image the releases carry, from a pinned Raspberry Pi OS Lite release, by running `setup.sh --image` inside it; the board finishes with `setup.sh --firstboot` at its first boot. As root, on Linux (an arm64 machine, or any machine with `qemu-user-static` registered for aarch64):
+
+```bash
+sudo image/build.sh --agent-version=1.1.5 --app-latest
+```
+
+`--agent=build/musallahboard-agent-arm64` puts a local build in instead; it must be a release build (`RELEASE_KEYS` set) to install the board app. Pull requests that change `setup.sh`, `image/` or `packaging/` build an image in CI and keep it as a workflow artifact for a week, so a change can be flashed and tried. See [docs/architecture.md](docs/architecture.md), section 17.
